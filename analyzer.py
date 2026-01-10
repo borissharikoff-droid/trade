@@ -3,484 +3,430 @@ import asyncio
 import aiohttp
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
-import json
-import math
 import numpy as np
 import pandas as pd
 from binance.client import Client
-from binance.exceptions import BinanceAPIException
 
 logger = logging.getLogger(__name__)
 
 
 class TechnicalIndicators:
-    """Класс для расчета технических индикаторов"""
+    """Технические индикаторы"""
     
     @staticmethod
-    def calculate_rsi(prices: List[float], period: int = 14) -> float:
-        """Расчет RSI (Relative Strength Index)"""
+    def rsi(prices: List[float], period: int = 14) -> float:
         if len(prices) < period + 1:
-            return 50.0  # Нейтральное значение
+            return 50.0
         
-        deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-        gains = [d if d > 0 else 0 for d in deltas]
-        losses = [-d if d < 0 else 0 for d in deltas]
+        deltas = np.diff(prices)
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
         
-        avg_gain = sum(gains[-period:]) / period
-        avg_loss = sum(losses[-period:]) / period
+        avg_gain = np.mean(gains[-period:])
+        avg_loss = np.mean(losses[-period:])
         
         if avg_loss == 0:
             return 100.0
         
         rs = avg_gain / avg_loss
-        rsi = 100 - (100 / (1 + rs))
-        
-        # Нормализация к 0-1 (0.5 = нейтрально)
-        return rsi / 100.0
+        return 100 - (100 / (1 + rs))
     
     @staticmethod
-    def calculate_macd(prices: List[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[float, float, float]:
-        """Расчет MACD"""
-        if len(prices) < slow:
-            return (0.0, 0.0, 0.0)
+    def macd(prices: List[float]) -> Tuple[float, float, float]:
+        if len(prices) < 26:
+            return 0.0, 0.0, 0.0
         
         df = pd.DataFrame({'close': prices})
-        exp1 = df['close'].ewm(span=fast, adjust=False).mean()
-        exp2 = df['close'].ewm(span=slow, adjust=False).mean()
-        macd_line = exp1 - exp2
-        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-        histogram = macd_line - signal_line
+        ema12 = df['close'].ewm(span=12).mean()
+        ema26 = df['close'].ewm(span=26).mean()
+        macd_line = ema12 - ema26
+        signal = macd_line.ewm(span=9).mean()
+        histogram = macd_line - signal
         
-        macd_val = macd_line.iloc[-1]
-        signal_val = signal_line.iloc[-1]
-        hist_val = histogram.iloc[-1]
-        
-        return (float(macd_val), float(signal_val), float(hist_val))
+        return float(macd_line.iloc[-1]), float(signal.iloc[-1]), float(histogram.iloc[-1])
     
     @staticmethod
-    def calculate_moving_averages(prices: List[float]) -> Dict[str, float]:
-        """Расчет скользящих средних"""
-        if len(prices) < 50:
-            return {'sma_20': 0.5, 'sma_50': 0.5, 'ema_12': 0.5, 'ema_26': 0.5}
+    def bollinger_bands(prices: List[float], period: int = 20) -> Tuple[float, float, float]:
+        if len(prices) < period:
+            return 0, 0, 0
         
         df = pd.DataFrame({'close': prices})
+        sma = df['close'].rolling(period).mean()
+        std = df['close'].rolling(period).std()
         
-        sma_20 = df['close'].rolling(window=20).mean().iloc[-1]
-        sma_50 = df['close'].rolling(window=50).mean().iloc[-1]
-        ema_12 = df['close'].ewm(span=12, adjust=False).mean().iloc[-1]
-        ema_26 = df['close'].ewm(span=26, adjust=False).mean().iloc[-1]
+        upper = sma + (std * 2)
+        lower = sma - (std * 2)
         
-        current_price = prices[-1]
-        
-        # Анализ тренда
-        trend_score = 0.5  # Нейтрально
-        
-        if current_price > sma_20 > sma_50:
-            trend_score = 0.7  # Бычий тренд
-        elif current_price < sma_20 < sma_50:
-            trend_score = 0.3  # Медвежий тренд
-        
-        if ema_12 > ema_26:
-            trend_score = min(trend_score + 0.1, 0.9)
-        else:
-            trend_score = max(trend_score - 0.1, 0.1)
-        
-        return {
-            'sma_20': float(sma_20),
-            'sma_50': float(sma_50),
-            'ema_12': float(ema_12),
-            'ema_26': float(ema_26),
-            'trend_score': trend_score
-        }
+        return float(upper.iloc[-1]), float(sma.iloc[-1]), float(lower.iloc[-1])
     
     @staticmethod
-    def calculate_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
-        """Расчет ATR (Average True Range) для волатильности"""
+    def stochastic(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> Tuple[float, float]:
+        if len(closes) < period:
+            return 50.0, 50.0
+        
+        lowest_low = min(lows[-period:])
+        highest_high = max(highs[-period:])
+        
+        if highest_high == lowest_low:
+            return 50.0, 50.0
+        
+        k = ((closes[-1] - lowest_low) / (highest_high - lowest_low)) * 100
+        
+        # %D = 3-period SMA of %K
+        k_values = []
+        for i in range(3):
+            if len(closes) >= period + i:
+                ll = min(lows[-(period+i):len(lows)-i] if i > 0 else lows[-period:])
+                hh = max(highs[-(period+i):len(highs)-i] if i > 0 else highs[-period:])
+                if hh != ll:
+                    k_values.append(((closes[-(i+1)] - ll) / (hh - ll)) * 100)
+        
+        d = np.mean(k_values) if k_values else k
+        
+        return k, d
+    
+    @staticmethod
+    def atr(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
         if len(highs) < period + 1:
             return 0.0
         
         true_ranges = []
         for i in range(1, len(highs)):
-            tr1 = highs[i] - lows[i]
-            tr2 = abs(highs[i] - closes[i-1])
-            tr3 = abs(lows[i] - closes[i-1])
-            true_ranges.append(max(tr1, tr2, tr3))
+            tr = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i-1]),
+                abs(lows[i] - closes[i-1])
+            )
+            true_ranges.append(tr)
         
-        atr = sum(true_ranges[-period:]) / period if true_ranges else 0.0
-        return float(atr) if atr else 0.0
+        return np.mean(true_ranges[-period:])
     
     @staticmethod
-    def calculate_support_resistance(prices: List[float], window: int = 20) -> Tuple[float, float]:
-        """Определение уровней поддержки и сопротивления"""
-        if len(prices) < window:
-            current = prices[-1] if prices else 0
-            return (current * 0.98, current * 1.02)
+    def adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
+        """Average Directional Index - сила тренда"""
+        if len(highs) < period + 1:
+            return 25.0
         
-        recent_prices = prices[-window:]
-        support = min(recent_prices)
-        resistance = max(recent_prices)
+        plus_dm = []
+        minus_dm = []
+        tr_list = []
         
-        return (float(support), float(resistance))
+        for i in range(1, len(highs)):
+            high_diff = highs[i] - highs[i-1]
+            low_diff = lows[i-1] - lows[i]
+            
+            plus_dm.append(high_diff if high_diff > low_diff and high_diff > 0 else 0)
+            minus_dm.append(low_diff if low_diff > high_diff and low_diff > 0 else 0)
+            
+            tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+            tr_list.append(tr)
+        
+        if len(tr_list) < period:
+            return 25.0
+        
+        atr = np.mean(tr_list[-period:])
+        if atr == 0:
+            return 25.0
+        
+        plus_di = (np.mean(plus_dm[-period:]) / atr) * 100
+        minus_di = (np.mean(minus_dm[-period:]) / atr) * 100
+        
+        if plus_di + minus_di == 0:
+            return 25.0
+        
+        dx = abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+        return dx
 
 
 class MarketAnalyzer:
-    """Точный анализатор рынка с реальными данными"""
+    """Анализатор рынка с реальными данными"""
     
     def __init__(self):
-        self.news_cache = {}
-        self.sentiment_cache = {}
-        self.price_cache = {}
-        self.candles_cache = {}
         self.client = None
+        self.session = None
+        self.cache = {}
+        self.cache_ttl = 60  # секунд
         
-        # Инициализация Binance клиента (без API ключей для публичных данных)
         try:
             self.client = Client()
             logger.info("[ANALYZER] Binance клиент инициализирован")
         except Exception as e:
-            logger.warning(f"[ANALYZER] Не удалось инициализировать Binance клиент: {e}")
+            logger.warning(f"[ANALYZER] Binance недоступен: {e}")
     
-    def _get_binance_symbol(self, symbol: str) -> str:
-        """Конвертация символа в формат Binance"""
-        # BTC/USDT -> BTCUSDT
-        return symbol.replace('/', '')
+    async def _get_session(self):
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+        return self.session
     
-    async def get_current_price(self, symbol: str) -> float:
-        """Получение текущей цены с Binance"""
+    async def _fetch_json(self, url: str, cache_key: str = None) -> Optional[Dict]:
+        """Универсальный HTTP запрос с кешированием"""
+        if cache_key and cache_key in self.cache:
+            cached_time, data = self.cache[cache_key]
+            if (datetime.now() - cached_time).seconds < self.cache_ttl:
+                return data
+        
         try:
-            binance_symbol = self._get_binance_symbol(symbol)
-            
+            session = await self._get_session()
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if cache_key:
+                        self.cache[cache_key] = (datetime.now(), data)
+                    return data
+        except Exception as e:
+            logger.warning(f"[FETCH] Ошибка {url}: {e}")
+        return None
+    
+    # ==================== ДАННЫЕ С BINANCE ====================
+    
+    async def get_klines(self, symbol: str, interval: str = '1h', limit: int = 100) -> List:
+        """Свечи с Binance"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            if self.client:
+                return self.client.get_klines(symbol=binance_symbol, interval=interval, limit=limit)
+        except Exception as e:
+            logger.warning(f"[KLINES] Ошибка: {e}")
+        return []
+    
+    async def get_price(self, symbol: str) -> float:
+        """Текущая цена"""
+        try:
+            binance_symbol = symbol.replace('/', '')
             if self.client:
                 ticker = self.client.get_symbol_ticker(symbol=binance_symbol)
-                price = float(ticker['price'])
-                logger.info(f"[PRICE] Текущая цена {symbol}: ${price:.2f}")
-                return price
-            else:
-                # Fallback: симуляция
-                import random
-                base_prices = {
-                    'BTC': 45000,
-                    'ETH': 2500,
-                    'BNB': 300,
-                    'SOL': 100
-                }
-                base = symbol.split('/')[0]
-                base_price = base_prices.get(base, 1000)
-                return base_price * random.uniform(0.95, 1.05)
+                return float(ticker['price'])
         except Exception as e:
-            logger.error(f"[PRICE] Ошибка получения цены для {symbol}: {e}")
-            # Fallback
-            import random
-            return random.uniform(10000, 60000)
-    
-    async def get_klines(self, symbol: str, interval: str = '1h', limit: int = 100) -> List[List]:
-        """Получение свечей с Binance"""
-        try:
-            binance_symbol = self._get_binance_symbol(symbol)
-            cache_key = f"{binance_symbol}_{interval}"
-            
-            if cache_key in self.candles_cache:
-                cached_time, cached_data = self.candles_cache[cache_key]
-                if (datetime.now() - cached_time).seconds < 60:  # Кэш 1 минута
-                    return cached_data
-            
-            if self.client:
-                klines = self.client.get_klines(symbol=binance_symbol, interval=interval, limit=limit)
-                self.candles_cache[cache_key] = (datetime.now(), klines)
-                logger.info(f"[KLINES] Получено {len(klines)} свечей для {symbol}")
-                return klines
-            else:
-                # Fallback: генерация симулированных свечей
-                return self._generate_simulated_klines(limit)
-        except Exception as e:
-            logger.error(f"[KLINES] Ошибка получения свечей для {symbol}: {e}")
-            return self._generate_simulated_klines(limit)
-    
-    def _generate_simulated_klines(self, limit: int) -> List[List]:
-        """Генерация симулированных свечей"""
-        import random
-        base_price = random.uniform(10000, 60000)
-        klines = []
-        for i in range(limit):
-            open_price = base_price * (1 + random.uniform(-0.02, 0.02))
-            close_price = open_price * (1 + random.uniform(-0.03, 0.03))
-            high_price = max(open_price, close_price) * (1 + random.uniform(0, 0.01))
-            low_price = min(open_price, close_price) * (1 - random.uniform(0, 0.01))
-            volume = random.uniform(1000, 10000)
-            
-            klines.append([
-                int((datetime.now() - timedelta(hours=limit-i)).timestamp() * 1000),
-                str(open_price),
-                str(high_price),
-                str(low_price),
-                str(close_price),
-                str(volume),
-                int((datetime.now() - timedelta(hours=limit-i)).timestamp() * 1000),
-                str(volume),
-                0,
-                0,
-                0,
-                0
-            ])
-            base_price = close_price
-        return klines
-    
-    async def get_technical_analysis(self, symbol: str) -> float:
-        """Точный технический анализ с реальными индикаторами"""
-        try:
-            logger.info(f"[TECHNICAL] Начало технического анализа для {symbol}")
-            
-            # Получаем свечи
-            klines = await self.get_klines(symbol, interval='1h', limit=100)
-            
-            if not klines or len(klines) < 50:
-                logger.warning(f"[TECHNICAL] Недостаточно данных для {symbol}")
-                return 0.5
-            
-            # Извлекаем данные
-            closes = [float(k[4]) for k in klines]  # Close prices
-            highs = [float(k[2]) for k in klines]   # High prices
-            lows = [float(k[3]) for k in klines]    # Low prices
-            volumes = [float(k[5]) for k in klines]  # Volumes
-            
-            indicators = TechnicalIndicators()
-            
-            # RSI
-            rsi = indicators.calculate_rsi(closes, period=14)
-            rsi_score = rsi  # Уже нормализован 0-1
-            
-            # MACD
-            macd, signal, histogram = indicators.calculate_macd(closes)
-            macd_score = 0.5
-            if macd > signal and histogram > 0:
-                macd_score = 0.7  # Бычий сигнал
-            elif macd < signal and histogram < 0:
-                macd_score = 0.3  # Медвежий сигнал
-            
-            # Moving Averages
-            ma_data = indicators.calculate_moving_averages(closes)
-            ma_score = ma_data['trend_score']
-            
-            # Volume анализ
-            avg_volume = sum(volumes[-20:]) / 20
-            current_volume = volumes[-1]
-            volume_score = 0.5
-            if current_volume > avg_volume * 1.2:
-                volume_score = 0.6  # Высокий объем подтверждает тренд
-            elif current_volume < avg_volume * 0.8:
-                volume_score = 0.4  # Низкий объем - слабый тренд
-            
-            # Support/Resistance
-            support, resistance = indicators.calculate_support_resistance(closes)
-            current_price = closes[-1]
-            sr_score = 0.5
-            distance_to_support = (current_price - support) / current_price
-            distance_to_resistance = (resistance - current_price) / current_price
-            
-            if distance_to_support < 0.01:  # Близко к поддержке
-                sr_score = 0.4  # Возможен отскок вверх
-            elif distance_to_resistance < 0.01:  # Близко к сопротивлению
-                sr_score = 0.6  # Возможен отскок вниз
-            else:
-                # В середине диапазона
-                if current_price > (support + resistance) / 2:
-                    sr_score = 0.55
-                else:
-                    sr_score = 0.45
-            
-            # Взвешенная оценка технического анализа
-            technical_score = (
-                rsi_score * 0.25 +
-                macd_score * 0.25 +
-                ma_score * 0.30 +
-                volume_score * 0.10 +
-                sr_score * 0.10
-            )
-            
-            logger.info(f"[TECHNICAL] RSI: {rsi:.2f}, MACD: {macd:.4f}, MA: {ma_score:.2f}, Volume: {volume_score:.2f}")
-            logger.info(f"[TECHNICAL] Итоговая оценка: {technical_score:.2f}")
-            
-            return technical_score
-            
-        except Exception as e:
-            logger.error(f"[TECHNICAL] Ошибка технического анализа: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return 0.5
-    
-    async def get_news_analysis(self, symbol: str) -> float:
-        """Улучшенный анализ новостей"""
-        try:
-            base_symbol = symbol.split('/')[0]
-            
-            # В реальности здесь запрос к NewsAPI, CryptoCompare и т.д.
-            # Пока используем улучшенную симуляцию на основе технических данных
-            
-            # Получаем технический тренд для контекста
-            klines = await self.get_klines(symbol, interval='1h', limit=20)
-            if klines:
-                recent_closes = [float(k[4]) for k in klines[-10:]]
-                price_change = (recent_closes[-1] - recent_closes[0]) / recent_closes[0]
-                
-                # Новости обычно подтверждают тренд
-                if price_change > 0.02:  # Рост > 2%
-                    news_score = 0.6 + (price_change * 2)  # Позитивные новости
-                elif price_change < -0.02:  # Падение > 2%
-                    news_score = 0.4 + (price_change * 2)  # Негативные новости
-                else:
-                    news_score = 0.5 + (price_change * 5)  # Нейтральные
-                
-                news_score = max(0.3, min(0.7, news_score))  # Ограничение 0.3-0.7
-            else:
-                import random
-                news_score = random.uniform(0.4, 0.6)
-            
-            logger.info(f"[NEWS] Оценка новостей для {symbol}: {news_score:.2f}")
-            return news_score
-            
-        except Exception as e:
-            logger.error(f"[NEWS] Ошибка анализа новостей: {e}")
-            return 0.5
-    
-    async def get_market_sentiment(self, symbol: str) -> float:
-        """Улучшенный анализ сентимента рынка"""
-        try:
-            # Анализ на основе Fear & Greed Index и общих трендов
-            # В реальности: CryptoCompare API, Fear & Greed Index API
-            
-            # Используем технический анализ для оценки сентимента
-            klines = await self.get_klines(symbol, interval='4h', limit=50)
-            if klines:
-                closes = [float(k[4]) for k in klines]
-                
-                # Анализ тренда
-                short_ma = sum(closes[-7:]) / 7
-                long_ma = sum(closes[-20:]) / 20
-                
-                if short_ma > long_ma:
-                    sentiment = 0.55 + (short_ma / long_ma - 1) * 10
-                else:
-                    sentiment = 0.45 - (1 - short_ma / long_ma) * 10
-                
-                sentiment = max(0.35, min(0.65, sentiment))
-            else:
-                import random
-                sentiment = random.uniform(0.4, 0.6)
-            
-            logger.info(f"[SENTIMENT] Общий сентимент для {symbol}: {sentiment:.2f}")
-            return sentiment
-            
-        except Exception as e:
-            logger.error(f"[SENTIMENT] Ошибка анализа сентимента: {e}")
-            return 0.5
-    
-    async def get_twitter_sentiment(self, symbol: str) -> float:
-        """Улучшенный анализ Twitter сентимента"""
-        try:
-            base_symbol = symbol.split('/')[0]
-            
-            # В реальности: Twitter API v2, LunarCrush, Santiment
-            # Используем корреляцию с техническим анализом
-            
-            technical = await self.get_technical_analysis(symbol)
-            
-            # Twitter обычно немного опережает рынок
-            twitter_score = technical + (technical - 0.5) * 0.2
-            twitter_score = max(0.35, min(0.65, twitter_score))
-            
-            logger.info(f"[TWITTER] Сентимент Twitter для {symbol}: {twitter_score:.2f}")
-            return twitter_score
-            
-        except Exception as e:
-            logger.error(f"[TWITTER] Ошибка анализа Twitter: {e}")
-            return 0.5
-    
-    async def get_macro_analysis(self) -> float:
-        """Улучшенный макроэкономический анализ"""
-        try:
-            # В реальности: FRED API, TradingEconomics API
-            # Макро обычно более стабильно, но влияет на весь рынок
-            
-            # Симуляция с небольшими вариациями
-            import random
-            base_score = 0.5
-            variation = random.uniform(-0.05, 0.05)
-            macro_score = base_score + variation
-            
-            logger.info(f"[MACRO] Макроэкономическая оценка: {macro_score:.2f}")
-            return macro_score
-            
-        except Exception as e:
-            logger.error(f"[MACRO] Ошибка макро анализа: {e}")
-            return 0.5
-    
-    def _check_components_consistency(self, components: Dict[str, float], direction: str) -> bool:
-        """Проверка согласованности компонентов"""
-        # Все компоненты должны поддерживать одно направление
-        bullish_components = sum(1 for score in components.values() if score > 0.5)
-        bearish_components = sum(1 for score in components.values() if score < 0.5)
+            logger.warning(f"[PRICE] Ошибка: {e}")
         
-        if direction == "LONG":
-            # Для LONG нужно минимум 3 из 5 компонентов бычьих
-            return bullish_components >= 3
-        else:  # SHORT
-            # Для SHORT нужно минимум 3 из 5 компонентов медвежьих
-            return bearish_components >= 3
+        # Fallback
+        defaults = {'BTC/USDT': 95000, 'ETH/USDT': 3300, 'BNB/USDT': 700, 'SOL/USDT': 200}
+        return defaults.get(symbol, 1000)
     
-    async def analyze_signal(self, symbol: str) -> Optional[Dict]:
-        """Точный комплексный анализ для генерации сигнала"""
-        logger.info(f"[ANALYZER] Начало точного анализа для {symbol}")
+    async def get_funding_rate(self, symbol: str) -> float:
+        """Funding Rate с Binance Futures"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            url = f"https://fapi.binance.com/fapi/v1/fundingRate?symbol={binance_symbol}&limit=1"
+            data = await self._fetch_json(url, f"funding_{binance_symbol}")
+            if data and len(data) > 0:
+                rate = float(data[0]['fundingRate'])
+                logger.info(f"[FUNDING] {symbol}: {rate:.6f}")
+                return rate
+        except Exception as e:
+            logger.warning(f"[FUNDING] Ошибка: {e}")
+        return 0.0
+    
+    async def get_open_interest(self, symbol: str) -> Dict:
+        """Open Interest с Binance Futures"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            url = f"https://fapi.binance.com/fapi/v1/openInterest?symbol={binance_symbol}"
+            data = await self._fetch_json(url, f"oi_{binance_symbol}")
+            if data:
+                oi = float(data['openInterest'])
+                logger.info(f"[OI] {symbol}: {oi:.2f}")
+                return {'value': oi, 'symbol': symbol}
+        except Exception as e:
+            logger.warning(f"[OI] Ошибка: {e}")
+        return {'value': 0, 'symbol': symbol}
+    
+    async def get_long_short_ratio(self, symbol: str) -> float:
+        """Long/Short Ratio"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={binance_symbol}&period=1h&limit=1"
+            data = await self._fetch_json(url, f"lsr_{binance_symbol}")
+            if data and len(data) > 0:
+                ratio = float(data[0]['longShortRatio'])
+                logger.info(f"[LSR] {symbol}: {ratio:.4f}")
+                return ratio
+        except Exception as e:
+            logger.warning(f"[LSR] Ошибка: {e}")
+        return 1.0
+    
+    # ==================== FEAR & GREED INDEX ====================
+    
+    async def get_fear_greed_index(self) -> Dict:
+        """Fear & Greed Index от alternative.me"""
+        url = "https://api.alternative.me/fng/?limit=1"
+        data = await self._fetch_json(url, "fng")
         
-        # Параллельный сбор всех данных
-        news_task = self.get_news_analysis(symbol)
-        sentiment_task = self.get_market_sentiment(symbol)
-        twitter_task = self.get_twitter_sentiment(symbol)
-        macro_task = self.get_macro_analysis()
-        technical_task = self.get_technical_analysis(symbol)
+        if data and 'data' in data and len(data['data']) > 0:
+            fng = data['data'][0]
+            value = int(fng['value'])
+            classification = fng['value_classification']
+            logger.info(f"[FNG] Fear & Greed: {value} ({classification})")
+            return {'value': value, 'classification': classification}
         
-        results = await asyncio.gather(
-            news_task, sentiment_task, twitter_task, macro_task, technical_task,
-            return_exceptions=True
-        )
+        return {'value': 50, 'classification': 'Neutral'}
+    
+    # ==================== ТЕХНИЧЕСКИЙ АНАЛИЗ ====================
+    
+    async def analyze_technical(self, symbol: str) -> Dict:
+        """Полный технический анализ"""
+        klines = await self.get_klines(symbol, '1h', 100)
         
-        news_score, sentiment_score, twitter_score, macro_score, technical_score = results
+        if not klines or len(klines) < 50:
+            return {'score': 0.5, 'signal': 'NEUTRAL', 'indicators': {}}
         
-        # Обработка ошибок
-        news_score = news_score if not isinstance(news_score, Exception) else 0.5
-        sentiment_score = sentiment_score if not isinstance(sentiment_score, Exception) else 0.5
-        twitter_score = twitter_score if not isinstance(twitter_score, Exception) else 0.5
-        macro_score = macro_score if not isinstance(macro_score, Exception) else 0.5
-        technical_score = technical_score if not isinstance(technical_score, Exception) else 0.5
+        closes = [float(k[4]) for k in klines]
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        volumes = [float(k[5]) for k in klines]
         
-        components = {
-            'news': news_score,
-            'sentiment': sentiment_score,
-            'twitter': twitter_score,
-            'macro': macro_score,
-            'technical': technical_score
+        ind = TechnicalIndicators()
+        
+        # RSI
+        rsi = ind.rsi(closes)
+        rsi_signal = 1 if rsi < 30 else (-1 if rsi > 70 else 0)
+        
+        # MACD
+        macd_val, signal_val, hist = ind.macd(closes)
+        macd_signal = 1 if hist > 0 and macd_val > signal_val else (-1 if hist < 0 else 0)
+        
+        # Bollinger Bands
+        upper, middle, lower = ind.bollinger_bands(closes)
+        current = closes[-1]
+        bb_signal = 1 if current < lower else (-1 if current > upper else 0)
+        
+        # Stochastic
+        k, d = ind.stochastic(highs, lows, closes)
+        stoch_signal = 1 if k < 20 else (-1 if k > 80 else 0)
+        
+        # ADX (сила тренда)
+        adx = ind.adx(highs, lows, closes)
+        trend_strength = 'STRONG' if adx > 25 else 'WEAK'
+        
+        # Volume analysis
+        avg_vol = np.mean(volumes[-20:])
+        current_vol = volumes[-1]
+        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1
+        
+        # MA trend
+        sma20 = np.mean(closes[-20:])
+        sma50 = np.mean(closes[-50:])
+        ma_signal = 1 if current > sma20 > sma50 else (-1 if current < sma20 < sma50 else 0)
+        
+        # Composite score
+        signals = [rsi_signal, macd_signal, bb_signal, stoch_signal, ma_signal]
+        weights = [0.2, 0.25, 0.15, 0.15, 0.25]
+        
+        score = sum(s * w for s, w in zip(signals, weights))
+        
+        # Normalize to 0-1
+        normalized_score = (score + 1) / 2
+        
+        # Determine signal
+        if normalized_score > 0.6:
+            signal = 'LONG'
+        elif normalized_score < 0.4:
+            signal = 'SHORT'
+        else:
+            signal = 'NEUTRAL'
+        
+        indicators = {
+            'rsi': rsi,
+            'macd': macd_val,
+            'macd_hist': hist,
+            'stoch_k': k,
+            'stoch_d': d,
+            'adx': adx,
+            'volume_ratio': vol_ratio,
+            'price_vs_sma20': (current / sma20 - 1) * 100,
+            'trend_strength': trend_strength
         }
         
-        # Взвешенная оценка (технический анализ имеет больший вес)
-        total_score = (
-            news_score * 0.20 +
-            sentiment_score * 0.15 +
-            twitter_score * 0.15 +
-            macro_score * 0.10 +
-            technical_score * 0.40  # Увеличенный вес технического анализа
+        logger.info(f"[TECH] {symbol}: RSI={rsi:.1f}, MACD_hist={hist:.2f}, Stoch={k:.1f}, ADX={adx:.1f}")
+        logger.info(f"[TECH] Score: {normalized_score:.2f}, Signal: {signal}")
+        
+        return {
+            'score': normalized_score,
+            'signal': signal,
+            'indicators': indicators
+        }
+    
+    # ==================== SENTIMENT ANALYSIS ====================
+    
+    async def analyze_sentiment(self, symbol: str) -> Dict:
+        """Анализ сентимента на основе реальных данных"""
+        
+        # Fear & Greed
+        fng = await self.get_fear_greed_index()
+        fng_score = fng['value'] / 100  # 0-1
+        
+        # Funding Rate
+        funding = await self.get_funding_rate(symbol)
+        # Положительный funding = много лонгов = перекуплено
+        # Отрицательный funding = много шортов = перепродано
+        funding_signal = -1 if funding > 0.0005 else (1 if funding < -0.0005 else 0)
+        
+        # Long/Short Ratio
+        lsr = await self.get_long_short_ratio(symbol)
+        # LSR > 1.5 = много лонгов = bearish signal (contrarian)
+        # LSR < 0.7 = много шортов = bullish signal (contrarian)
+        lsr_signal = -1 if lsr > 1.5 else (1 if lsr < 0.7 else 0)
+        
+        # Combine
+        sentiment_score = (
+            fng_score * 0.4 +
+            (0.5 + funding_signal * 0.2) * 0.3 +
+            (0.5 + lsr_signal * 0.2) * 0.3
         )
         
-        # Определение направления
-        direction = "LONG" if total_score > 0.5 else "SHORT"
-        confidence = abs(total_score - 0.5) * 2  # 0-1
+        logger.info(f"[SENTIMENT] FnG={fng['value']}, Funding={funding:.6f}, LSR={lsr:.2f}")
+        logger.info(f"[SENTIMENT] Score: {sentiment_score:.2f}")
         
-        # Проверка согласованности компонентов
-        if not self._check_components_consistency(components, direction):
-            logger.warning(f"[ANALYZER] Компоненты не согласованы для {symbol}, пропускаем сигнал")
+        return {
+            'score': sentiment_score,
+            'fear_greed': fng,
+            'funding_rate': funding,
+            'long_short_ratio': lsr
+        }
+    
+    # ==================== ГЛАВНЫЙ АНАЛИЗ ====================
+    
+    async def analyze_signal(self, symbol: str) -> Optional[Dict]:
+        """Комплексный анализ для генерации сигнала"""
+        logger.info(f"[ANALYZER] ========== Анализ {symbol} ==========")
+        
+        # Параллельный сбор данных
+        tech_task = self.analyze_technical(symbol)
+        sentiment_task = self.analyze_sentiment(symbol)
+        price_task = self.get_price(symbol)
+        
+        tech, sentiment, current_price = await asyncio.gather(
+            tech_task, sentiment_task, price_task
+        )
+        
+        # Веса компонентов
+        tech_weight = 0.6
+        sentiment_weight = 0.4
+        
+        # Общий скор
+        total_score = tech['score'] * tech_weight + sentiment['score'] * sentiment_weight
+        
+        # Определение направления
+        if total_score > 0.58:
+            direction = "LONG"
+        elif total_score < 0.42:
+            direction = "SHORT"
+        else:
+            logger.info(f"[ANALYZER] Нет четкого сигнала (score={total_score:.2f})")
             return None
         
-        # Фильтрация: только высококачественные сигналы
-        if confidence < 0.75:
-            logger.warning(f"[ANALYZER] Низкая уверенность ({confidence:.2%}) для {symbol}, пропускаем")
+        # Confidence
+        confidence = abs(total_score - 0.5) * 2
+        
+        # Минимальный порог
+        if confidence < 0.15:
+            logger.info(f"[ANALYZER] Низкая уверенность ({confidence:.2%})")
+            return None
+        
+        # ADX check - нужен тренд
+        adx = tech['indicators'].get('adx', 20)
+        if adx < 20:
+            logger.info(f"[ANALYZER] Слабый тренд (ADX={adx:.1f})")
             return None
         
         analysis = {
@@ -488,130 +434,76 @@ class MarketAnalyzer:
             'direction': direction,
             'confidence': confidence,
             'total_score': total_score,
-            'components': components,
+            'current_price': current_price,
+            'components': {
+                'technical': tech['score'],
+                'sentiment': sentiment['score']
+            },
+            'indicators': tech['indicators'],
+            'sentiment_data': {
+                'fear_greed': sentiment['fear_greed']['value'],
+                'funding_rate': sentiment['funding_rate'],
+                'long_short_ratio': sentiment['long_short_ratio']
+            },
             'timestamp': datetime.now()
         }
         
-        logger.info(f"[ANALYZER] ✓ Анализ завершен: {direction} с уверенностью {confidence:.2%}")
-        logger.info(f"[ANALYZER] Компоненты: News={news_score:.2f}, Sentiment={sentiment_score:.2f}, "
-                   f"Twitter={twitter_score:.2f}, Macro={macro_score:.2f}, Technical={technical_score:.2f}")
+        logger.info(f"[ANALYZER] ✓ Сигнал: {direction}, Confidence: {confidence:.2%}")
         
         return analysis
     
     async def calculate_entry_price(self, symbol: str, direction: str, analysis: Dict) -> Dict:
-        """Точный расчет цены входа, SL и TP на основе анализа и волатильности"""
-        try:
-            # Получаем реальную текущую цену
-            current_price = await self.get_current_price(symbol)
-            
-            # Получаем свечи для расчета ATR
-            klines = await self.get_klines(symbol, interval='1h', limit=50)
-            
-            if not klines or len(klines) < 20:
-                # Fallback: фиксированные проценты
-                if direction == "LONG":
-                    entry = current_price * 0.999  # Небольшая скидка
-                    stop_loss = entry * 0.98  # -2%
-                    take_profit = entry * (1 + analysis['confidence'] * 0.03)  # +1-3%
-                else:  # SHORT
-                    entry = current_price * 1.001  # Небольшая премия
-                    stop_loss = entry * 1.02  # +2%
-                    take_profit = entry * (1 - analysis['confidence'] * 0.03)  # -1-3%
-            else:
-                # Используем ATR для динамических SL/TP
-                highs = [float(k[2]) for k in klines]
-                lows = [float(k[3]) for k in klines]
-                closes = [float(k[4]) for k in klines]
-                
-                indicators = TechnicalIndicators()
-                atr = indicators.calculate_atr(highs, lows, closes, period=14)
-                
-                if atr == 0:
-                    atr = current_price * 0.02  # Fallback: 2% от цены
-                
-                # SL на основе ATR (1.5-2.0 ATR)
-                sl_distance = atr * 1.75
-                # TP на основе ATR и confidence (2.5-4.0 ATR)
-                tp_distance = atr * (2.5 + analysis['confidence'] * 1.5)
-                
-                if direction == "LONG":
-                    entry = current_price * 0.9995  # Минимальная скидка
-                    stop_loss = entry - sl_distance
-                    take_profit = entry + tp_distance
-                else:  # SHORT
-                    entry = current_price * 1.0005  # Минимальная премия
-                    stop_loss = entry + sl_distance
-                    take_profit = entry - tp_distance
-            
-            # Проверка Risk/Reward Ratio (минимум 1:2)
-            if direction == "LONG":
-                risk = entry - stop_loss
-                reward = take_profit - entry
-            else:  # SHORT
-                risk = stop_loss - entry
-                reward = entry - take_profit
-            
-            if risk > 0:
-                rr_ratio = reward / risk
-                if rr_ratio < 2.0:
-                    # Корректируем TP для достижения минимум 1:2
-                    if direction == "LONG":
-                        take_profit = entry + (risk * 2.0)
-                    else:
-                        take_profit = entry - (risk * 2.0)
-            
-            # Улучшенный расчет success rate: 60-100%
-            base_success = 60
-            confidence_boost = analysis['confidence'] * 40
-            success_rate = base_success + confidence_boost
-            
-            # Бонус за согласованность компонентов
-            components = analysis['components']
-            agreement = sum(1 for score in components.values() 
-                          if (score > 0.5 and direction == "LONG") or 
-                             (score < 0.5 and direction == "SHORT"))
-            if agreement >= 4:  # 4 из 5 компонентов согласованы
-                success_rate = min(100, success_rate + 5)
-            
-            # Бонус за сильный технический анализ
-            if components['technical'] > 0.7 or components['technical'] < 0.3:
-                success_rate = min(100, success_rate + 3)
-            
-            success_rate = min(100, max(60, success_rate))  # Ограничение 60-100%
-            
-            logger.info(f"[PRICE] Entry: ${entry:.2f}, SL: ${stop_loss:.2f}, TP: ${take_profit:.2f}")
-            logger.info(f"[PRICE] Success Rate: {success_rate:.1f}%, R/R: {rr_ratio:.2f}")
-            
-            return {
-                'entry_price': entry,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'success_rate': success_rate,
-                'atr': atr if 'atr' in locals() else current_price * 0.02,
-                'rr_ratio': rr_ratio if 'rr_ratio' in locals() else 2.0
-            }
-            
-        except Exception as e:
-            logger.error(f"[PRICE] Ошибка расчета цен: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            # Fallback
-            import random
-            base_price = random.uniform(10000, 60000)
-            if direction == "LONG":
-                entry = base_price
-                stop_loss = entry * 0.98
-                take_profit = entry * 1.03
-            else:
-                entry = base_price
-                stop_loss = entry * 1.02
-                take_profit = entry * 0.97
-            
-            return {
-                'entry_price': entry,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'success_rate': 60 + (analysis['confidence'] * 40),
-                'atr': base_price * 0.02,
-                'rr_ratio': 2.0
-            }
+        """Расчет Entry, SL, TP на основе ATR"""
+        
+        klines = await self.get_klines(symbol, '1h', 50)
+        current_price = analysis.get('current_price', await self.get_price(symbol))
+        
+        # ATR для волатильности
+        if klines and len(klines) >= 20:
+            highs = [float(k[2]) for k in klines]
+            lows = [float(k[3]) for k in klines]
+            closes = [float(k[4]) for k in klines]
+            atr = TechnicalIndicators.atr(highs, lows, closes)
+        else:
+            atr = current_price * 0.02
+        
+        # SL = 1.5 ATR, TP = 3 ATR (Risk:Reward = 1:2)
+        confidence = analysis.get('confidence', 0.5)
+        
+        sl_multiplier = 1.5
+        tp_multiplier = 3.0 + confidence  # 3-4 ATR based on confidence
+        
+        if direction == "LONG":
+            entry = current_price
+            stop_loss = entry - (atr * sl_multiplier)
+            take_profit = entry + (atr * tp_multiplier)
+        else:
+            entry = current_price
+            stop_loss = entry + (atr * sl_multiplier)
+            take_profit = entry - (atr * tp_multiplier)
+        
+        # Win rate estimate
+        base_winrate = 55
+        confidence_bonus = confidence * 30
+        
+        # Bonus for strong ADX
+        adx = analysis.get('indicators', {}).get('adx', 20)
+        adx_bonus = 5 if adx > 30 else 0
+        
+        success_rate = min(95, base_winrate + confidence_bonus + adx_bonus)
+        
+        logger.info(f"[PRICE] Entry=${entry:.2f}, SL=${stop_loss:.2f}, TP=${take_profit:.2f}")
+        logger.info(f"[PRICE] ATR=${atr:.2f}, WinRate={success_rate:.0f}%")
+        
+        return {
+            'entry_price': entry,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'success_rate': success_rate,
+            'atr': atr
+        }
+    
+    async def close(self):
+        """Закрытие сессии"""
+        if self.session and not self.session.closed:
+            await self.session.close()

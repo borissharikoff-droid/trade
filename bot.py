@@ -26,7 +26,6 @@ logger.info("=" * 50)
 
 user_data: Dict[int, Dict] = {}
 active_positions: Dict[int, List[Dict]] = {}
-active_signals: Dict[str, 'TradeSignal'] = {}
 closed_positions: Dict[int, List[Dict]] = {}
 pinned_messages: Dict[int, int] = {}
 
@@ -489,19 +488,26 @@ def build_positions_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 async def handle_signal_notification(signal: TradeSignal, user_id: int, context: ContextTypes.DEFAULT_TYPE):
-    safe_symbol = signal.symbol.replace("/", "_")
-    signal_id = f"{safe_symbol}_{int(signal.timestamp.timestamp())}"
-    active_signals[signal_id] = signal
-    
     direction_icon = "🟢" if signal.direction == "LONG" else "🔴"
     
     # Аналитика
     analysis = signal.analysis or {}
     confidence = analysis.get('confidence', 0.85) * 100
     components = analysis.get('components', {})
+    indicators = analysis.get('indicators', {})
+    sentiment_data = analysis.get('sentiment_data', {})
     
     tech = components.get('technical', 0.7) * 100
     sent = components.get('sentiment', 0.6) * 100
+    
+    # Индикаторы
+    rsi = indicators.get('rsi', 50)
+    adx = indicators.get('adx', 25)
+    
+    # Сентимент
+    fng = sentiment_data.get('fear_greed', 50)
+    funding = sentiment_data.get('funding_rate', 0) * 100
+    lsr = sentiment_data.get('long_short_ratio', 1)
     
     symbol_escaped = escape_md(signal.symbol)
     
@@ -512,19 +518,31 @@ Winrate: {signal.success_rate:.0f}%
 
 _Аналитика_
 ├ Technical: {tech:.0f}%
+│  ├ RSI: {rsi:.0f}
+│  └ ADX: {adx:.0f}
 └ Sentiment: {sent:.0f}%
+   ├ Fear/Greed: {fng}
+   ├ Funding: {format_number(funding, 4)}%
+   └ L/S Ratio: {format_number(lsr, 2)}
 
 Entry: \\${format_number(signal.entry_price)}
 TP: \\${format_number(signal.take_profit)}
 SL: \\${format_number(signal.stop_loss)}"""
     
+    # Кодируем данные в callback (symbol|direction|entry|sl|tp|amount)
+    sym = signal.symbol.split('/')[0]  # BTC, ETH, etc
+    d = 'L' if signal.direction == "LONG" else 'S'
+    e = int(signal.entry_price)
+    sl = int(signal.stop_loss)
+    tp = int(signal.take_profit)
+    
     keyboard = [
         [
-            InlineKeyboardButton("$50", callback_data=f"enter|{signal_id}|50"),
-            InlineKeyboardButton("$100", callback_data=f"enter|{signal_id}|100"),
-            InlineKeyboardButton("$250", callback_data=f"enter|{signal_id}|250")
+            InlineKeyboardButton("$50", callback_data=f"e|{sym}|{d}|{e}|{sl}|{tp}|50"),
+            InlineKeyboardButton("$100", callback_data=f"e|{sym}|{d}|{e}|{sl}|{tp}|100"),
+            InlineKeyboardButton("$250", callback_data=f"e|{sym}|{d}|{e}|{sl}|{tp}|250")
         ],
-        [InlineKeyboardButton("✕ Пропустить", callback_data=f"skip|{signal_id}")]
+        [InlineKeyboardButton("✕ Пропустить", callback_data="skip")]
     ]
     
     await context.bot.send_message(
@@ -542,36 +560,41 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     logger.info(f"[ENTER_TRADE] Пользователь {user_id} входит в сделку")
     
+    # Формат: e|SYM|DIR|ENTRY|SL|TP|AMOUNT
     data = query.data.split("|")
     
-    if len(data) < 3:
-        logger.error(f"[ENTER_TRADE] Неверный формат данных")
+    if len(data) < 7:
+        logger.error(f"[ENTER_TRADE] Неверный формат: {query.data}")
         await query.edit_message_text("❌ Ошибка данных.")
         return
     
-    signal_id = data[1]
-    amount = float(data[2])
-    
-    if signal_id not in active_signals:
-        await query.edit_message_text("❌ Сигнал устарел.")
+    try:
+        sym = data[1]  # BTC, ETH, etc
+        direction = "LONG" if data[2] == 'L' else "SHORT"
+        entry_price = float(data[3])
+        stop_loss = float(data[4])
+        take_profit = float(data[5])
+        amount = float(data[6])
+    except (ValueError, IndexError) as e:
+        logger.error(f"[ENTER_TRADE] Ошибка парсинга: {e}")
+        await query.edit_message_text("❌ Ошибка данных.")
         return
     
-    signal = active_signals[signal_id]
+    symbol = f"{sym}/USDT"
     init_user(user_id)
     
     position = {
         'id': len(active_positions[user_id]) + 1,
-        'symbol': signal.symbol,
-        'direction': signal.direction,
+        'symbol': symbol,
+        'direction': direction,
         'amount': amount,
-        'entry_price': signal.entry_price,
-        'current_price': signal.entry_price,
-        'stop_loss': signal.stop_loss,
-        'take_profit': signal.take_profit,
+        'entry_price': entry_price,
+        'current_price': entry_price,
+        'stop_loss': stop_loss,
+        'take_profit': take_profit,
         'pnl': 0.0,
         'pnl_percent': 0.0,
-        'entry_time': datetime.now(),
-        'signal_id': signal_id
+        'entry_time': datetime.now()
     }
     
     active_positions[user_id].append(position)
@@ -584,11 +607,11 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = f"""✅ ПОЗИЦИЯ ОТКРЫТА!
 
 Позиция #{position['id']}
-📊 {signal.symbol} {signal.direction}
+📊 {symbol} {direction}
 💰 Сумма: ${amount:.2f}
-📥 Вход: ${signal.entry_price:.2f}
-🛡️ SL: ${signal.stop_loss:.2f}
-🎯 TP: ${signal.take_profit:.2f}"""
+📥 Вход: ${entry_price:.2f}
+🛡️ SL: ${stop_loss:.2f}
+🎯 TP: ${take_profit:.2f}"""
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -659,12 +682,7 @@ async def exit_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 async def skip_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer("Пропущено")
-    
-    data = query.data.split("|")
-    if len(data) >= 2:
-        signal_id = data[1]
-        active_signals.pop(signal_id, None)
-        logger.info(f"[SKIP] Сигнал {signal_id} пропущен")
+    logger.info(f"[SKIP] Сигнал пропущен")
     
     try:
         await query.message.delete()
@@ -883,10 +901,10 @@ def main() -> None:
     
     # Callbacks
     application.add_handler(CallbackQueryHandler(toggle_trading, pattern="^toggle_trading$"))
-    application.add_handler(CallbackQueryHandler(enter_trade, pattern=r"^enter\|"))
+    application.add_handler(CallbackQueryHandler(enter_trade, pattern=r"^e\|"))
     application.add_handler(CallbackQueryHandler(exit_trade, pattern="^exit_"))
     application.add_handler(CallbackQueryHandler(my_positions, pattern="^(my_positions|refresh_positions)$"))
-    application.add_handler(CallbackQueryHandler(skip_signal, pattern=r"^skip\|"))
+    application.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
     application.add_handler(CallbackQueryHandler(show_stats_callback, pattern="^show_stats$"))
     application.add_handler(CallbackQueryHandler(show_help_callback, pattern="^show_help$"))
     application.add_handler(CallbackQueryHandler(main_menu, pattern="^main_menu$"))
