@@ -27,11 +27,12 @@ history: Dict[int, List[Dict]] = {}
 def get_user(user_id: int) -> Dict:
     if user_id not in users:
         users[user_id] = {
-            'balance': 0.0,
-            'total_deposit': 0.0,
+            'balance': 100.0,  # Тестовый баланс $100
+            'total_deposit': 100.0,
             'total_profit': 0.0,
             'trading': False
         }
+        logger.info(f"[USER] New user {user_id} created with $100 test balance")
     if user_id not in positions:
         positions[user_id] = []
     if user_id not in history:
@@ -41,6 +42,7 @@ def get_user(user_id: int) -> Dict:
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    logger.info(f"[START] User {user_id}")
     user = get_user(user_id)
     
     balance = user['balance']
@@ -70,6 +72,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ==================== ПОПОЛНЕНИЕ ====================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    logger.info(f"[DEPOSIT] User {update.effective_user.id}")
     await query.answer()
     
     text = f"""💳 Пополнение баланса
@@ -239,7 +242,11 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer("Проверяем...")
     
-    invoice_id = int(query.data.split("_")[1])
+    try:
+        invoice_id = int(query.data.split("_")[1])
+    except (ValueError, IndexError):
+        await query.answer("Ошибка данных", show_alert=True)
+        return
     
     pending = context.bot_data.get('pending_invoices', {})
     if invoice_id not in pending:
@@ -288,17 +295,21 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.answer()
     
     user_id = update.effective_user.id
+    logger.info(f"[TOGGLE] User {user_id}")
     user = get_user(user_id)
     
     if not user['trading'] and user['balance'] < MIN_DEPOSIT:
+        logger.info(f"[TOGGLE] User {user_id} - insufficient balance")
         await query.answer(f"Минимальный баланс ${MIN_DEPOSIT}", show_alert=True)
         return
     
     user['trading'] = not user['trading']
+    logger.info(f"[TOGGLE] User {user_id} trading = {user['trading']}")
     await start(update, context)
 
 async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    logger.info(f"[TRADES] User {update.effective_user.id}")
     await query.answer()
     
     user_id = update.effective_user.id
@@ -419,12 +430,16 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text("❌ Ошибка")
         return
     
-    symbol = data[1]
-    direction = "LONG" if data[2] == 'L' else "SHORT"
-    entry = float(data[3])
-    sl = float(data[4])
-    tp = float(data[5])
-    amount = float(data[6])
+    try:
+        symbol = data[1]
+        direction = "LONG" if data[2] == 'L' else "SHORT"
+        entry = float(data[3])
+        sl = float(data[4])
+        tp = float(data[5])
+        amount = float(data[6])
+    except (ValueError, IndexError):
+        await query.edit_message_text("❌ Ошибка данных")
+        return
     
     # Проверка баланса
     if user['balance'] < amount:
@@ -472,7 +487,12 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     user = get_user(user_id)
     
-    pos_id = int(query.data.split("_")[1])
+    try:
+        pos_id = int(query.data.split("_")[1])
+    except (ValueError, IndexError):
+        await query.answer("Ошибка данных", show_alert=True)
+        return
+    
     pos = next((p for p in positions[user_id] if p['id'] == pos_id), None)
     
     if not pos:
@@ -507,11 +527,18 @@ P&L: {pnl_str}
 
 async def skip_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
+    logger.info(f"[SKIP] User {update.effective_user.id}")
     await query.answer("Пропущено")
     try:
         await query.message.delete()
     except:
         pass
+
+async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ловим необработанные callbacks"""
+    query = update.callback_query
+    logger.warning(f"[UNKNOWN] User {update.effective_user.id}, data: {query.data}")
+    await query.answer("Неизвестная команда")
 
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -599,12 +626,20 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
     
+    # Catch-all для неизвестных callbacks
+    app.add_handler(CallbackQueryHandler(unknown_callback))
+    
     # Jobs
     if app.job_queue:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
         app.job_queue.run_repeating(send_signal, interval=60, first=10)
+        logger.info("[JOBS] JobQueue configured")
+    else:
+        logger.warning("[JOBS] JobQueue NOT available! Install: pip install 'python-telegram-bot[job-queue]'")
     
-    logger.info("Bot started")
+    logger.info("=" * 40)
+    logger.info("BOT STARTED")
+    logger.info("=" * 40)
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
