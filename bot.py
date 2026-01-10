@@ -620,7 +620,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(pay_crypto_menu, pattern="^pay_crypto$"))
     app.add_handler(CallbackQueryHandler(create_crypto_invoice, pattern="^crypto_\\d+$"))
     app.add_handler(CallbackQueryHandler(check_crypto_payment, pattern="^check_"))
-    app.add_handler(CallbackQueryHandler(show_trades, pattern="^trades$"))
+    app.add_handler(CallbackQueryHandler(show_trades, pattern="^(trades|my_positions|refresh_positions)$"))
     app.add_handler(CallbackQueryHandler(enter_trade, pattern="^e\\|"))
     app.add_handler(CallbackQueryHandler(close_trade, pattern="^close_"))
     app.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
