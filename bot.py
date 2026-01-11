@@ -1358,15 +1358,49 @@ async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     status.append(f"URL: {hedger.base_url}")
     status.append(f"Enabled: {'✅' if hedger.enabled else '❌'}")
     
-    # Тест баланса
+    # Тест баланса (raw request для диагностики)
     try:
-        balance = await hedger.get_balance()
-        if balance is not None:
-            status.append(f"\n💰 Баланс USDT: ${balance:,.2f}")
-        else:
-            status.append(f"\n❌ Не удалось получить баланс")
+        import aiohttp
+        timestamp = str(int(datetime.now().timestamp() * 1000))
+        recv_window = "5000"
+        params = {"accountType": "UNIFIED"}
+        params_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        
+        sign_str = f"{timestamp}{api_key}{recv_window}{params_str}"
+        api_secret = os.getenv("BYBIT_API_SECRET", "")
+        
+        import hmac, hashlib
+        signature = hmac.new(api_secret.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+        
+        headers = {
+            "X-BAPI-API-KEY": api_key,
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-RECV-WINDOW": recv_window
+        }
+        if demo_mode:
+            headers["X-BAPI-DEMO-TRADING"] = "true"
+        
+        url = f"{hedger.base_url}/v5/account/wallet-balance?accountType=UNIFIED"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers) as resp:
+                data = await resp.json()
+                ret_code = data.get("retCode")
+                ret_msg = data.get("retMsg")
+                
+                if ret_code == 0:
+                    coins = data.get("result", {}).get("list", [{}])[0].get("coin", [])
+                    for coin in coins:
+                        if coin.get("coin") == "USDT":
+                            status.append(f"\n💰 Баланс USDT: ${float(coin.get('walletBalance', 0)):,.2f}")
+                            break
+                    else:
+                        status.append(f"\n💰 USDT не найден в списке")
+                else:
+                    status.append(f"\n❌ Bybit Error: {ret_msg} (code: {ret_code})")
     except Exception as e:
-        status.append(f"\n❌ Ошибка баланса: {e}")
+        status.append(f"\n❌ Ошибка: {e}")
     
     # Тест цены
     try:

@@ -155,8 +155,20 @@ class BybitHedger:
     
     async def get_balance(self) -> Optional[float]:
         """Получить баланс USDT"""
+        # Сначала пробуем UNIFIED (новый тип аккаунта)
         result = await self._request("GET", "/v5/account/wallet-balance", {
             "accountType": "UNIFIED"
+        })
+        
+        if result:
+            coins = result.get("list", [{}])[0].get("coin", [])
+            for coin in coins:
+                if coin.get("coin") == "USDT":
+                    return float(coin.get("walletBalance", 0))
+        
+        # Пробуем CONTRACT (старый тип)
+        result = await self._request("GET", "/v5/account/wallet-balance", {
+            "accountType": "CONTRACT"
         })
         
         if result:
