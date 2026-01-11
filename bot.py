@@ -1127,17 +1127,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     # Добавляем комиссию в накопитель
                     await add_commission(commission)
                     
-                    # Создаём позицию
+                    # Создаём позицию (конвертируем numpy в float для PostgreSQL)
                     position = {
                         'symbol': symbol,
                         'direction': direction,
-                        'entry': entry,
-                        'current': entry,
-                        'amount': auto_bet,
-                        'tp': tp,
-                        'sl': sl,
-                        'commission': commission,
-                        'pnl': -commission
+                        'entry': float(entry),
+                        'current': float(entry),
+                        'amount': float(auto_bet),
+                        'tp': float(tp),
+                        'sl': float(sl),
+                        'commission': float(commission),
+                        'pnl': float(-commission)
                     }
                     
                     # Сохраняем в БД
@@ -1151,8 +1151,8 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     # Хеджирование на Bybit
                     if await is_hedging_enabled():
-                        hedge_amount = auto_bet * auto_leverage
-                        hedge_result = await hedge_open(pos_id, symbol, direction, hedge_amount, tp=tp, sl=sl)
+                        hedge_amount = float(auto_bet * auto_leverage)
+                        hedge_result = await hedge_open(pos_id, symbol, direction, hedge_amount, tp=float(tp), sl=float(sl))
                         if hedge_result:
                             logger.info(f"[AUTO-TRADE] ✓ Hedge opened: {hedge_result}")
                     
