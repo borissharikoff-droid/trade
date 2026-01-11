@@ -304,7 +304,7 @@ init_db()
 
 # ==================== КОНФИГ ====================
 COMMISSION_PERCENT = 2.0  # Комиссия 2% за сделку
-MIN_DEPOSIT = 10  # Минимальный депозит $10
+MIN_DEPOSIT = 1  # Минимальный депозит $1
 STARS_RATE = 50  # 50 звёзд = $1
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]  # ID админов
 REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
@@ -480,6 +480,10 @@ async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 50 stars = $1
     keyboard = [
         [
+            InlineKeyboardButton("$1 (50⭐)", callback_data="stars_50"),
+            InlineKeyboardButton("$5 (250⭐)", callback_data="stars_250")
+        ],
+        [
             InlineKeyboardButton("$10 (500⭐)", callback_data="stars_500"),
             InlineKeyboardButton("$25 (1250⭐)", callback_data="stars_1250")
         ],
@@ -496,8 +500,8 @@ async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    stars_map = {"stars_500": 500, "stars_1250": 1250, "stars_2500": 2500, "stars_5000": 5000}
-    stars = stars_map.get(query.data, 500)
+    stars_map = {"stars_50": 50, "stars_250": 250, "stars_500": 500, "stars_1250": 1250, "stars_2500": 2500, "stars_5000": 5000}
+    stars = stars_map.get(query.data, 50)
     usd = stars // STARS_RATE
     
     try:
@@ -567,6 +571,10 @@ async def pay_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     keyboard = [
         [
+            InlineKeyboardButton("$1", callback_data="crypto_1"),
+            InlineKeyboardButton("$5", callback_data="crypto_5")
+        ],
+        [
             InlineKeyboardButton("$10", callback_data="crypto_10"),
             InlineKeyboardButton("$25", callback_data="crypto_25")
         ],
@@ -583,8 +591,8 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
 
-    amount_map = {"crypto_10": 10, "crypto_25": 25, "crypto_50": 50, "crypto_100": 100}
-    amount = amount_map.get(query.data, 10)
+    amount_map = {"crypto_1": 1, "crypto_5": 5, "crypto_10": 10, "crypto_25": 25, "crypto_50": 50, "crypto_100": 100}
+    amount = amount_map.get(query.data, 1)
     user_id = update.effective_user.id
     
     crypto_token = os.getenv("CRYPTO_BOT_TOKEN")
