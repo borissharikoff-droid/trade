@@ -22,6 +22,7 @@ class BybitHedger:
     
     BASE_URL = "https://api.bybit.com"
     TESTNET_URL = "https://api-testnet.bybit.com"
+    DEMO_URL = "https://api-demo.bybit.com"  # Отдельный домен для Demo Trading
     
     def __init__(self):
         self.api_key = os.getenv("BYBIT_API_KEY", "")
@@ -29,9 +30,11 @@ class BybitHedger:
         self.testnet = os.getenv("BYBIT_TESTNET", "").lower() in ("true", "1", "yes")
         self.demo = os.getenv("BYBIT_DEMO", "").lower() in ("true", "1", "yes")
         
-        # Demo Trading использует mainnet URL но с особым хедером
+        # Выбираем URL в зависимости от режима
         if self.testnet:
             self.base_url = self.TESTNET_URL
+        elif self.demo:
+            self.base_url = self.DEMO_URL  # Demo Trading = отдельный домен!
         else:
             self.base_url = self.BASE_URL
             
@@ -89,10 +92,8 @@ class BybitHedger:
             "X-BAPI-SIGN": signature,
             "X-BAPI-RECV-WINDOW": recv_window
         }
-        
-        # Для Demo Trading нужен специальный хедер
-        if self.demo:
-            headers["X-BAPI-DEMO-TRADING"] = "true"
+        # Demo Trading использует отдельный домен api-demo.bybit.com
+        # Header X-BAPI-DEMO-TRADING НЕ нужен
         
         return headers
     
