@@ -1176,10 +1176,10 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     positions_cache[user_id].append(position)
     
     # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
-    # На бирже открываем с плечом: $500 × x20 = $10,000 позиция
+    # Bybit сам применит x20 плечо (set_leverage вызывается в hedger)
     hedge_ok = False
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(pos_id, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
+        hedge_result = await hedge_open(pos_id, symbol, direction, amount, tp=tp, sl=sl)
         if hedge_result:
             hedge_ok = True
             logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
@@ -1352,9 +1352,9 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     positions_cache[user_id].append(position)
     
     # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
-    # На бирже открываем с плечом: $500 × x20 = $10,000 позиция
+    # Bybit сам применит x20 плечо (set_leverage вызывается в hedger)
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(pos_id, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
+        hedge_result = await hedge_open(pos_id, symbol, direction, amount, tp=tp, sl=sl)
         if hedge_result:
             logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
         else:

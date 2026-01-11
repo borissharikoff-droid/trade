@@ -197,6 +197,28 @@ class BybitHedger:
         
         return None
     
+    async def set_leverage(self, symbol: str, leverage: int = 20) -> bool:
+        """Установить плечо для символа на Bybit"""
+        bybit_symbol = symbol.replace("/", "")
+        
+        params = {
+            "category": "linear",
+            "symbol": bybit_symbol,
+            "buyLeverage": str(leverage),
+            "sellLeverage": str(leverage)
+        }
+        
+        logger.info(f"[BYBIT] Устанавливаем плечо x{leverage} для {bybit_symbol}")
+        result = await self._request("POST", "/v5/position/set-leverage", params)
+        
+        if result is not None:
+            logger.info(f"[BYBIT] ✓ Плечо установлено: x{leverage}")
+            return True
+        else:
+            # Ошибка 110043 = уже установлено такое плечо (OK)
+            logger.info(f"[BYBIT] Плечо уже установлено или ошибка")
+            return True  # Продолжаем в любом случае
+    
     async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float, tp: float = None, sl: float = None) -> Optional[str]:
         """
         Открыть хедж-позицию на Bybit с TP/SL
@@ -223,6 +245,9 @@ class BybitHedger:
         
         bybit_symbol = symbol.replace("/", "")
         side = "Buy" if direction == "LONG" else "Sell"
+        
+        # Устанавливаем плечо x20 перед открытием
+        await self.set_leverage(symbol, 20)
         
         # Получаем цену для расчёта qty
         price = await self.get_price(symbol)
