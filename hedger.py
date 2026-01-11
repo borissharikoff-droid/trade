@@ -438,6 +438,13 @@ class BybitHedger:
     
     async def get_position_pnl(self, symbol: str) -> Optional[float]:
         """Получить PnL по позиции"""
+        data = await self.get_position_data(symbol)
+        if data:
+            return data.get('pnl')
+        return None
+    
+    async def get_position_data(self, symbol: str) -> Optional[Dict]:
+        """Получить полные данные позиции с Bybit"""
         if not self.enabled:
             return None
         
@@ -450,12 +457,33 @@ class BybitHedger:
         
         if result:
             positions = result.get("list", [])
-            if positions:
-                pnl_str = positions[0].get("unrealisedPnl", "0")
-                # Bybit может вернуть пустую строку
+            if positions and float(positions[0].get("size", 0)) > 0:
+                pos = positions[0]
+                
+                # Парсим данные
+                pnl_str = pos.get("unrealisedPnl", "0")
                 if pnl_str == "" or pnl_str is None:
                     pnl_str = "0"
-                return float(pnl_str)
+                
+                entry_str = pos.get("avgPrice", "0")
+                if entry_str == "" or entry_str is None:
+                    entry_str = "0"
+                
+                mark_str = pos.get("markPrice", "0")
+                if mark_str == "" or mark_str is None:
+                    mark_str = "0"
+                
+                logger.info(f"[BYBIT] Position {bybit_symbol}: entry={entry_str}, mark={mark_str}, pnl={pnl_str}")
+                
+                return {
+                    'symbol': bybit_symbol,
+                    'entry': float(entry_str),
+                    'current': float(mark_str),
+                    'pnl': float(pnl_str),
+                    'size': float(pos.get("size", 0)),
+                    'side': pos.get("side", ""),
+                    'leverage': pos.get("leverage", "1")
+                }
         
         return None
 

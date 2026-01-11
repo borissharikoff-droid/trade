@@ -1426,19 +1426,23 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 change = random.uniform(-0.003, 0.004)
                 pos['current'] = pos['current'] * (1 + change)
             
-            # PnL - берём реальный с Bybit если хеджирование включено
+            # PnL - берём реальные данные с Bybit если хеджирование включено
             if await is_hedging_enabled():
-                bybit_pnl = await hedger.get_position_pnl(pos['symbol'])
-                if bybit_pnl is not None:
-                    # Используем реальный PNL с Bybit (учитывает комиссии биржи)
-                    pos['pnl'] = bybit_pnl
+                bybit_data = await hedger.get_position_data(pos['symbol'])
+                if bybit_data and bybit_data.get('pnl') is not None:
+                    # Используем реальные данные с Bybit
+                    pos['pnl'] = bybit_data['pnl']
+                    pos['current'] = bybit_data['current']
+                    # Обновляем entry если сильно отличается (слиппедж)
+                    if abs(pos['entry'] - bybit_data['entry']) / pos['entry'] > 0.001:
+                        logger.info(f"[SYNC] Entry update: {pos['entry']:.4f} -> {bybit_data['entry']:.4f}")
+                        pos['entry'] = bybit_data['entry']
                 else:
                     # Фоллбэк на локальный расчёт
                     if pos['direction'] == "LONG":
                         pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
                     else:
                         pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-                    # PNL с учётом плеча: $500 × x20 × 1% = $100
                     pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos['commission']
             else:
                 # Локальный расчёт без Bybit
@@ -1446,7 +1450,6 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
                 else:
                     pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-                # PNL с учётом плеча: $500 × x20 × 1% = $100
                 pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos['commission']
             
             # Обновляем в БД
