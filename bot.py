@@ -1376,6 +1376,38 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text(text)
 
+async def add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Добавить баланс пользователю (админ)"""
+    admin_id = update.effective_user.id
+    
+    if admin_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    # /addbalance [user_id] [amount] или /addbalance [amount] (себе)
+    if not context.args:
+        await update.message.reply_text("Использование:\n/addbalance 100 — себе\n/addbalance 123456 100 — юзеру")
+        return
+    
+    try:
+        if len(context.args) == 1:
+            target_id = admin_id
+            amount = float(context.args[0])
+        else:
+            target_id = int(context.args[0])
+            amount = float(context.args[1])
+        
+        # Обновляем баланс
+        run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
+        user = db_get_user(target_id)
+        
+        if user:
+            await update.message.reply_text(f"✅ Добавлено ${amount:.2f} юзеру {target_id}\n💰 Новый баланс: ${user['balance']:.2f}")
+        else:
+            await update.message.reply_text(f"❌ Юзер {target_id} не найден")
+    except (ValueError, IndexError):
+        await update.message.reply_text("❌ Неверный формат. Пример: /addbalance 100")
+
 async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест генерации сигнала"""
     user_id = update.effective_user.id
@@ -1736,6 +1768,7 @@ def main() -> None:
     # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("addbalance", add_balance))
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
