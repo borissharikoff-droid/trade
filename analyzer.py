@@ -261,6 +261,178 @@ class MarketAnalyzer:
         
         return {'value': 50, 'classification': 'Neutral'}
     
+    # ==================== МУЛЬТИ-ТАЙМФРЕЙМ АНАЛИЗ ====================
+    
+    async def analyze_multi_timeframe(self, symbol: str) -> Dict:
+        """Анализ нескольких таймфреймов для подтверждения тренда"""
+        timeframes = ['15m', '1h', '4h']
+        tf_results = {}
+        
+        for tf in timeframes:
+            klines = await self.get_klines(symbol, tf, 50)
+            if not klines or len(klines) < 30:
+                continue
+            
+            closes = [float(k[4]) for k in klines]
+            
+            # Тренд по SMA
+            sma10 = np.mean(closes[-10:])
+            sma30 = np.mean(closes[-30:])
+            current = closes[-1]
+            
+            if current > sma10 > sma30:
+                trend = "BULLISH"
+                score = 0.7
+            elif current < sma10 < sma30:
+                trend = "BEARISH"
+                score = 0.3
+            else:
+                trend = "NEUTRAL"
+                score = 0.5
+            
+            # RSI
+            ind = TechnicalIndicators()
+            rsi = ind.rsi(closes)
+            
+            tf_results[tf] = {
+                'trend': trend,
+                'score': score,
+                'rsi': rsi,
+                'price_vs_sma': (current / sma10 - 1) * 100
+            }
+        
+        # Проверка согласованности таймфреймов
+        trends = [r['trend'] for r in tf_results.values()]
+        bullish_count = trends.count("BULLISH")
+        bearish_count = trends.count("BEARISH")
+        
+        confluence = "NONE"
+        if bullish_count >= 2:
+            confluence = "BULLISH"
+        elif bearish_count >= 2:
+            confluence = "BEARISH"
+        
+        # Средний скор
+        avg_score = np.mean([r['score'] for r in tf_results.values()]) if tf_results else 0.5
+        
+        logger.info(f"[MTF] {symbol}: {trends}, Confluence: {confluence}")
+        
+        return {
+            'timeframes': tf_results,
+            'confluence': confluence,
+            'score': avg_score,
+            'aligned': bullish_count == 3 or bearish_count == 3
+        }
+    
+    async def detect_divergence(self, symbol: str) -> Dict:
+        """Обнаружение дивергенций RSI"""
+        klines = await self.get_klines(symbol, '1h', 50)
+        if not klines or len(klines) < 30:
+            return {'divergence': None}
+        
+        closes = [float(k[4]) for k in klines]
+        ind = TechnicalIndicators()
+        
+        # Вычисляем RSI для каждой свечи
+        rsi_values = []
+        for i in range(20, len(closes)):
+            rsi_values.append(ind.rsi(closes[:i+1]))
+        
+        prices = closes[-len(rsi_values):]
+        
+        # Ищем дивергенции на последних 10 свечах
+        divergence = None
+        
+        # Bullish divergence: цена делает новый минимум, RSI делает более высокий минимум
+        if len(prices) >= 10:
+            recent_price_low_idx = np.argmin(prices[-10:])
+            recent_rsi_low_idx = np.argmin(rsi_values[-10:])
+            
+            prev_price_low_idx = np.argmin(prices[-20:-10])
+            prev_rsi_low_idx = np.argmin(rsi_values[-20:-10])
+            
+            recent_price_low = prices[-10:][recent_price_low_idx]
+            prev_price_low = prices[-20:-10][prev_price_low_idx]
+            recent_rsi_low = rsi_values[-10:][recent_rsi_low_idx]
+            prev_rsi_low = rsi_values[-20:-10][prev_rsi_low_idx]
+            
+            # Бычья дивергенция
+            if recent_price_low < prev_price_low and recent_rsi_low > prev_rsi_low:
+                divergence = {
+                    'type': 'BULLISH',
+                    'strength': abs(recent_rsi_low - prev_rsi_low),
+                    'description': 'Цена ниже, но RSI выше - разворот вверх'
+                }
+            
+            # Медвежья дивергенция
+            recent_price_high = max(prices[-10:])
+            prev_price_high = max(prices[-20:-10])
+            recent_rsi_high = max(rsi_values[-10:])
+            prev_rsi_high = max(rsi_values[-20:-10])
+            
+            if recent_price_high > prev_price_high and recent_rsi_high < prev_rsi_high:
+                divergence = {
+                    'type': 'BEARISH',
+                    'strength': abs(recent_rsi_high - prev_rsi_high),
+                    'description': 'Цена выше, но RSI ниже - разворот вниз'
+                }
+        
+        if divergence:
+            logger.info(f"[DIV] {symbol}: {divergence['type']} дивергенция обнаружена")
+        
+        return {'divergence': divergence}
+    
+    async def find_support_resistance(self, symbol: str) -> Dict:
+        """Определение уровней поддержки и сопротивления"""
+        klines = await self.get_klines(symbol, '4h', 100)
+        if not klines or len(klines) < 50:
+            return {'supports': [], 'resistances': []}
+        
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        current = float(klines[-1][4])
+        
+        # Найти локальные максимумы и минимумы
+        resistances = []
+        supports = []
+        
+        for i in range(5, len(klines) - 5):
+            # Локальный максимум
+            if highs[i] == max(highs[i-5:i+6]):
+                resistances.append(highs[i])
+            # Локальный минимум
+            if lows[i] == min(lows[i-5:i+6]):
+                supports.append(lows[i])
+        
+        # Кластеризация близких уровней
+        def cluster_levels(levels, tolerance=0.02):
+            if not levels:
+                return []
+            levels = sorted(levels)
+            clusters = [[levels[0]]]
+            for level in levels[1:]:
+                if (level - clusters[-1][-1]) / clusters[-1][-1] < tolerance:
+                    clusters[-1].append(level)
+                else:
+                    clusters.append([level])
+            return [np.mean(c) for c in clusters]
+        
+        supports = cluster_levels(supports)
+        resistances = cluster_levels(resistances)
+        
+        # Ближайшие уровни к текущей цене
+        nearest_support = max([s for s in supports if s < current], default=None)
+        nearest_resistance = min([r for r in resistances if r > current], default=None)
+        
+        return {
+            'supports': supports[-3:] if supports else [],
+            'resistances': resistances[:3] if resistances else [],
+            'nearest_support': nearest_support,
+            'nearest_resistance': nearest_resistance,
+            'distance_to_support': ((current - nearest_support) / current * 100) if nearest_support else None,
+            'distance_to_resistance': ((nearest_resistance - current) / current * 100) if nearest_resistance else None
+        }
+    
     # ==================== ТЕХНИЧЕСКИЙ АНАЛИЗ ====================
     
     async def analyze_technical(self, symbol: str) -> Dict:
@@ -384,27 +556,327 @@ class MarketAnalyzer:
             'long_short_ratio': lsr
         }
     
+    # ==================== ГЛУБОКИЙ АНАЛИЗ ====================
+    
+    def _analyze_market_context(self, indicators: Dict, sentiment: Dict) -> Dict:
+        """Анализ контекста рынка и генерация выводов"""
+        insights = []
+        warnings = []
+        bullish_factors = 0
+        bearish_factors = 0
+        
+        rsi = indicators.get('rsi', 50)
+        macd_hist = indicators.get('macd_hist', 0)
+        adx = indicators.get('adx', 25)
+        volume_ratio = indicators.get('volume_ratio', 1)
+        stoch_k = indicators.get('stoch_k', 50)
+        price_vs_sma = indicators.get('price_vs_sma20', 0)
+        
+        fng = sentiment.get('fear_greed', {}).get('value', 50)
+        funding = sentiment.get('funding_rate', 0)
+        lsr = sentiment.get('long_short_ratio', 1)
+        
+        # === RSI АНАЛИЗ ===
+        if rsi < 30:
+            insights.append("📉 RSI в зоне перепроданности — потенциал отскока вверх")
+            bullish_factors += 2
+        elif rsi > 70:
+            insights.append("📈 RSI в зоне перекупленности — риск коррекции")
+            bearish_factors += 2
+        elif 40 <= rsi <= 60:
+            insights.append("⚖️ RSI нейтрален — рынок в равновесии")
+        elif rsi < 40:
+            insights.append("📊 RSI показывает слабость, но ещё не перепродан")
+            bullish_factors += 1
+        else:
+            insights.append("📊 RSI показывает силу, но ещё не перекуплен")
+            bearish_factors += 1
+        
+        # === MACD АНАЛИЗ ===
+        if macd_hist > 0:
+            if macd_hist > 50:
+                insights.append("🚀 MACD сильно бычий — моментум на стороне покупателей")
+                bullish_factors += 2
+            else:
+                insights.append("📈 MACD положительный — бычий моментум")
+                bullish_factors += 1
+        else:
+            if macd_hist < -50:
+                insights.append("💥 MACD сильно медвежий — давление продавцов")
+                bearish_factors += 2
+            else:
+                insights.append("📉 MACD отрицательный — медвежий моментум")
+                bearish_factors += 1
+        
+        # === ТРЕНД (ADX) ===
+        if adx > 40:
+            insights.append("💪 ADX > 40 — очень сильный тренд, можно торговать по тренду")
+        elif adx > 25:
+            insights.append("📊 ADX умеренный — тренд присутствует")
+        else:
+            warnings.append("⚠️ ADX < 25 — слабый тренд, высокий риск флэта")
+        
+        # === ОБЪЁМ ===
+        if volume_ratio > 1.5:
+            insights.append("📊 Объём выше среднего на 50%+ — подтверждение движения")
+        elif volume_ratio < 0.7:
+            warnings.append("⚠️ Низкий объём — движение может быть ложным")
+        
+        # === СТОХАСТИК ===
+        if stoch_k < 20 and rsi < 35:
+            insights.append("🎯 Стохастик + RSI оба в зоне перепроданности — сильный сигнал на покупку")
+            bullish_factors += 2
+        elif stoch_k > 80 and rsi > 65:
+            insights.append("🎯 Стохастик + RSI оба в зоне перекупленности — сильный сигнал на продажу")
+            bearish_factors += 2
+        
+        # === ДИВЕРГЕНЦИЯ RSI/ЦЕНА ===
+        if price_vs_sma > 2 and rsi < 50:
+            warnings.append("⚠️ Возможная медвежья дивергенция: цена растёт, RSI падает")
+            bearish_factors += 1
+        elif price_vs_sma < -2 and rsi > 50:
+            insights.append("💡 Возможная бычья дивергенция: цена падает, RSI растёт")
+            bullish_factors += 1
+        
+        # === FEAR & GREED ===
+        if fng < 25:
+            insights.append(f"😱 Extreme Fear ({fng}) — рынок в панике, исторически хорошее время для покупок")
+            bullish_factors += 2
+        elif fng < 40:
+            insights.append(f"😰 Fear ({fng}) — осторожный оптимизм для покупок")
+            bullish_factors += 1
+        elif fng > 75:
+            insights.append(f"🤑 Extreme Greed ({fng}) — эйфория на рынке, риск коррекции")
+            bearish_factors += 2
+        elif fng > 60:
+            insights.append(f"😊 Greed ({fng}) — оптимизм, но осторожно с лонгами")
+            bearish_factors += 1
+        
+        # === FUNDING RATE ===
+        if funding > 0.0003:
+            insights.append("💰 Высокий Funding Rate — много лонгов, возможен шорт-сквиз наоборот")
+            bearish_factors += 1
+        elif funding < -0.0003:
+            insights.append("💰 Отрицательный Funding — много шортов, возможен шорт-сквиз")
+            bullish_factors += 1
+        
+        # === LONG/SHORT RATIO ===
+        if lsr > 1.5:
+            warnings.append(f"⚠️ L/S Ratio {lsr:.2f} — слишком много лонгов (контрарный сигнал)")
+            bearish_factors += 1
+        elif lsr < 0.7:
+            insights.append(f"💡 L/S Ratio {lsr:.2f} — много шортов, потенциал сквиза вверх")
+            bullish_factors += 1
+        
+        # === ИТОГОВЫЙ ВЫВОД ===
+        if bullish_factors >= bearish_factors + 3:
+            conclusion = "🟢 СИЛЬНЫЙ БЫЧИЙ СЕТАП — множество факторов указывают на рост"
+            bias = "STRONG_LONG"
+        elif bullish_factors >= bearish_factors + 1:
+            conclusion = "🟢 Умеренно бычий сетап — перевес в сторону покупок"
+            bias = "LONG"
+        elif bearish_factors >= bullish_factors + 3:
+            conclusion = "🔴 СИЛЬНЫЙ МЕДВЕЖИЙ СЕТАП — множество факторов указывают на падение"
+            bias = "STRONG_SHORT"
+        elif bearish_factors >= bullish_factors + 1:
+            conclusion = "🔴 Умеренно медвежий сетап — перевес в сторону продаж"
+            bias = "SHORT"
+        else:
+            conclusion = "⚖️ Нейтральный рынок — нет явного преимущества"
+            bias = "NEUTRAL"
+        
+        return {
+            'insights': insights,
+            'warnings': warnings,
+            'conclusion': conclusion,
+            'bias': bias,
+            'bullish_factors': bullish_factors,
+            'bearish_factors': bearish_factors
+        }
+    
+    def _generate_trade_reasoning(self, direction: str, context: Dict, indicators: Dict) -> str:
+        """Генерация человекочитаемого обоснования сделки с глубоким анализом"""
+        
+        reasoning_parts = []
+        
+        # Заголовок
+        if direction == "LONG":
+            reasoning_parts.append("📈 <b>Анализ: LONG</b>")
+        else:
+            reasoning_parts.append("📉 <b>Анализ: SHORT</b>")
+        
+        # Топ причины (максимум 4)
+        insights = context.get('insights', [])[:4]
+        for insight in insights:
+            # Укорачиваем длинные инсайты
+            if len(insight) > 60:
+                insight = insight[:57] + "..."
+            reasoning_parts.append(f"• {insight}")
+        
+        # MTF confluence
+        mtf = context.get('mtf')
+        if mtf:
+            if mtf.get('aligned'):
+                reasoning_parts.append(f"• ✅ Таймфреймы согласованы")
+            elif mtf.get('confluence') != "NONE":
+                reasoning_parts.append(f"• 📊 MTF: {mtf['confluence']}")
+        
+        # Дивергенция
+        div = context.get('divergence')
+        if div:
+            reasoning_parts.append(f"• 💎 {div['type']} дивергенция")
+        
+        # S/R
+        sr = context.get('sr_levels', {})
+        if direction == "LONG" and sr.get('nearest_support'):
+            dist = sr.get('distance_to_support', 999)
+            if dist < 3:
+                reasoning_parts.append(f"• 🛡️ Близко к поддержке")
+        elif direction == "SHORT" and sr.get('nearest_resistance'):
+            dist = sr.get('distance_to_resistance', 999)
+            if dist < 3:
+                reasoning_parts.append(f"• 🧱 Близко к сопротивлению")
+        
+        # Предупреждения (максимум 2)
+        warnings = context.get('warnings', [])[:2]
+        if warnings:
+            reasoning_parts.append("\n⚠️ <b>Риски:</b>")
+            for warning in warnings:
+                # Укорачиваем
+                if len(warning) > 50:
+                    warning = warning[:47] + "..."
+                reasoning_parts.append(f"• {warning}")
+        
+        # Ключевые метрики
+        rsi = indicators.get('rsi', 50)
+        adx = indicators.get('adx', 25)
+        vol = indicators.get('volume_ratio', 1)
+        
+        metrics = f"\n📊 RSI {rsi:.0f} | ADX {adx:.0f}"
+        if vol > 1.3:
+            metrics += " | Vol ↑"
+        elif vol < 0.7:
+            metrics += " | Vol ↓"
+        reasoning_parts.append(metrics)
+        
+        # Сила сигнала
+        bf = context.get('bullish_factors', 0)
+        bef = context.get('bearish_factors', 0)
+        strength = abs(bf - bef)
+        if strength >= 5:
+            reasoning_parts.append("💪 Сила: ★★★★★")
+        elif strength >= 3:
+            reasoning_parts.append("💪 Сила: ★★★☆☆")
+        else:
+            reasoning_parts.append("💪 Сила: ★★☆☆☆")
+        
+        return "\n".join(reasoning_parts)
+    
     # ==================== ГЛАВНЫЙ АНАЛИЗ ====================
     
     async def analyze_signal(self, symbol: str) -> Optional[Dict]:
-        """Комплексный анализ для генерации сигнала"""
-        logger.info(f"[ANALYZER] ========== Анализ {symbol} ==========")
+        """Комплексный анализ для генерации сигнала с глубоким анализом"""
+        logger.info(f"[ANALYZER] ========== Глубокий анализ {symbol} ==========")
         
-        # Параллельный сбор данных
+        # Параллельный сбор ВСЕХ данных
         tech_task = self.analyze_technical(symbol)
         sentiment_task = self.analyze_sentiment(symbol)
         price_task = self.get_price(symbol)
+        mtf_task = self.analyze_multi_timeframe(symbol)
+        div_task = self.detect_divergence(symbol)
+        sr_task = self.find_support_resistance(symbol)
         
-        tech, sentiment, current_price = await asyncio.gather(
-            tech_task, sentiment_task, price_task
+        tech, sentiment, current_price, mtf, divergence, sr_levels = await asyncio.gather(
+            tech_task, sentiment_task, price_task, mtf_task, div_task, sr_task
         )
         
-        # Веса компонентов
-        tech_weight = 0.6
-        sentiment_weight = 0.4
+        # === ГЛУБОКИЙ АНАЛИЗ КОНТЕКСТА ===
+        market_context = self._analyze_market_context(
+            tech['indicators'],
+            {'fear_greed': sentiment['fear_greed'], 
+             'funding_rate': sentiment['funding_rate'],
+             'long_short_ratio': sentiment['long_short_ratio']}
+        )
         
-        # Общий скор
-        total_score = tech['score'] * tech_weight + sentiment['score'] * sentiment_weight
+        # Добавляем MTF анализ в контекст
+        if mtf['confluence'] == "BULLISH" and mtf['aligned']:
+            market_context['insights'].insert(0, "🎯 ВСЕ таймфреймы (15m, 1h, 4h) бычьи — сильное подтверждение")
+            market_context['bullish_factors'] += 3
+        elif mtf['confluence'] == "BEARISH" and mtf['aligned']:
+            market_context['insights'].insert(0, "🎯 ВСЕ таймфреймы (15m, 1h, 4h) медвежьи — сильное подтверждение")
+            market_context['bearish_factors'] += 3
+        elif mtf['confluence'] != "NONE":
+            market_context['insights'].append(f"📊 Мульти-TF: {mtf['confluence']} (частичное согласование)")
+            if mtf['confluence'] == "BULLISH":
+                market_context['bullish_factors'] += 1
+            else:
+                market_context['bearish_factors'] += 1
+        else:
+            market_context['warnings'].append("⚠️ Таймфреймы не согласованы — конфликт сигналов")
+        
+        # Добавляем дивергенцию
+        if divergence.get('divergence'):
+            div = divergence['divergence']
+            if div['type'] == "BULLISH":
+                market_context['insights'].insert(0, f"💎 Бычья дивергенция RSI — {div['description']}")
+                market_context['bullish_factors'] += 2
+            elif div['type'] == "BEARISH":
+                market_context['insights'].insert(0, f"💎 Медвежья дивергенция RSI — {div['description']}")
+                market_context['bearish_factors'] += 2
+        
+        # Добавляем уровни S/R
+        if sr_levels.get('distance_to_support') and sr_levels['distance_to_support'] < 1:
+            market_context['insights'].append(f"🛡️ Цена у сильной поддержки (${sr_levels['nearest_support']:.0f})")
+            market_context['bullish_factors'] += 1
+        if sr_levels.get('distance_to_resistance') and sr_levels['distance_to_resistance'] < 1:
+            market_context['insights'].append(f"🧱 Цена у сопротивления (${sr_levels['nearest_resistance']:.0f})")
+            market_context['bearish_factors'] += 1
+        
+        logger.info(f"[ANALYZER] Контекст: {market_context['bias']}")
+        logger.info(f"[ANALYZER] MTF: {mtf['confluence']}, Divergence: {divergence.get('divergence')}")
+        logger.info(f"[ANALYZER] Bullish: {market_context['bullish_factors']}, Bearish: {market_context['bearish_factors']}")
+        
+        # Пересчитываем bias после добавления MTF и дивергенций
+        bf = market_context['bullish_factors']
+        bef = market_context['bearish_factors']
+        if bf >= bef + 4:
+            market_context['bias'] = "STRONG_LONG"
+            market_context['conclusion'] = "🟢 ОЧЕНЬ СИЛЬНЫЙ БЫЧИЙ СЕТАП — комплексный анализ подтверждает рост"
+        elif bf >= bef + 2:
+            market_context['bias'] = "LONG"
+            market_context['conclusion'] = "🟢 Бычий сетап — перевес факторов в сторону покупок"
+        elif bef >= bf + 4:
+            market_context['bias'] = "STRONG_SHORT"
+            market_context['conclusion'] = "🔴 ОЧЕНЬ СИЛЬНЫЙ МЕДВЕЖИЙ СЕТАП — комплексный анализ подтверждает падение"
+        elif bef >= bf + 2:
+            market_context['bias'] = "SHORT"
+            market_context['conclusion'] = "🔴 Медвежий сетап — перевес факторов в сторону продаж"
+        else:
+            market_context['bias'] = "NEUTRAL"
+            market_context['conclusion'] = "⚖️ Нейтральный рынок — рекомендуем ждать"
+        
+        # Веса компонентов
+        tech_weight = 0.35
+        sentiment_weight = 0.2
+        context_weight = 0.25
+        mtf_weight = 0.2
+        
+        # Контекстный скор
+        context_score = 0.5
+        if market_context['bias'] == "STRONG_LONG":
+            context_score = 0.9
+        elif market_context['bias'] == "LONG":
+            context_score = 0.7
+        elif market_context['bias'] == "STRONG_SHORT":
+            context_score = 0.1
+        elif market_context['bias'] == "SHORT":
+            context_score = 0.3
+        
+        # Общий скор с MTF
+        total_score = (tech['score'] * tech_weight + 
+                      sentiment['score'] * sentiment_weight + 
+                      context_score * context_weight +
+                      mtf['score'] * mtf_weight)
         
         # Определение направления
         if total_score > 0.58:
@@ -415,19 +887,42 @@ class MarketAnalyzer:
             logger.info(f"[ANALYZER] Нет четкого сигнала (score={total_score:.2f})")
             return None
         
-        # Confidence
-        confidence = abs(total_score - 0.5) * 2
+        # Проверка согласованности с контекстом
+        if direction == "LONG" and market_context['bias'] in ["SHORT", "STRONG_SHORT"]:
+            logger.info(f"[ANALYZER] Конфликт: сигнал LONG, но контекст медвежий")
+            return None
+        if direction == "SHORT" and market_context['bias'] in ["LONG", "STRONG_LONG"]:
+            logger.info(f"[ANALYZER] Конфликт: сигнал SHORT, но контекст бычий")
+            return None
+        
+        # Нейтральный контекст — пропускаем
+        if market_context['bias'] == "NEUTRAL":
+            logger.info(f"[ANALYZER] Контекст нейтрален — пропускаем сигнал")
+            return None
+        
+        # Confidence с учётом силы контекста и MTF
+        base_confidence = abs(total_score - 0.5) * 2
+        context_bonus = 0.15 if "STRONG" in market_context['bias'] else 0.05
+        mtf_bonus = 0.1 if mtf['aligned'] else 0
+        div_bonus = 0.1 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
+        confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
         # Минимальный порог
-        if confidence < 0.15:
+        if confidence < 0.20:
             logger.info(f"[ANALYZER] Низкая уверенность ({confidence:.2%})")
             return None
         
         # ADX check - нужен тренд
         adx = tech['indicators'].get('adx', 20)
-        if adx < 20:
+        if adx < 18:
             logger.info(f"[ANALYZER] Слабый тренд (ADX={adx:.1f})")
             return None
+        
+        # Генерация обоснования с учётом всех данных
+        market_context['mtf'] = mtf
+        market_context['divergence'] = divergence.get('divergence')
+        market_context['sr_levels'] = sr_levels
+        reasoning = self._generate_trade_reasoning(direction, market_context, tech['indicators'])
         
         analysis = {
             'symbol': symbol,
@@ -437,7 +932,8 @@ class MarketAnalyzer:
             'current_price': current_price,
             'components': {
                 'technical': tech['score'],
-                'sentiment': sentiment['score']
+                'sentiment': sentiment['score'],
+                'context': context_score
             },
             'indicators': tech['indicators'],
             'sentiment_data': {
@@ -445,10 +941,13 @@ class MarketAnalyzer:
                 'funding_rate': sentiment['funding_rate'],
                 'long_short_ratio': sentiment['long_short_ratio']
             },
+            'market_context': market_context,
+            'reasoning': reasoning,
             'timestamp': datetime.now()
         }
         
         logger.info(f"[ANALYZER] ✓ Сигнал: {direction}, Confidence: {confidence:.2%}")
+        logger.info(f"[ANALYZER] Вывод: {market_context['conclusion']}")
         
         return analysis
     

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
+from telegram.error import BadRequest
 
 load_dotenv()
 
@@ -785,7 +786,10 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             [InlineKeyboardButton("🔄 Обновить", callback_data="trades")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back")]
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        try:
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        except BadRequest:
+            pass  # Сообщение не изменилось
         return
     
     text = "<b>💼 Позиции</b>\n\n"
@@ -807,7 +811,10 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    try:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    except BadRequest:
+        pass  # Сообщение не изменилось
 
 # ==================== СИГНАЛЫ ====================
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -859,6 +866,11 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await analyzer.close()
     
+    # Получаем аналитику из сигнала
+    reasoning = best_signal.get('reasoning', '')
+    context_data = best_signal.get('market_context', {})
+    conclusion = context_data.get('conclusion', '')
+    
     # Отправляем активным юзерам
     for user_id in active_users:
         user = get_user(user_id)
@@ -871,11 +883,15 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         d = 'L' if direction == "LONG" else 'S'
         dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
         
-        text = f"""📈 {winrate}% успех | {ticker} | {dir_emoji}
+        # Компактный формат с аналитикой
+        text = f"""<b>📊 СИГНАЛ | {ticker} | {dir_emoji}</b>
 
-Шанс: {winrate}%
-TP: ${tp:,.0f}
-SL: ${sl:,.0f}"""
+🎯 Вин-рейт: <b>{winrate}%</b>
+💰 TP: ${tp:,.0f} | SL: ${sl:,.0f}
+
+{reasoning}
+
+{conclusion}"""
         
         # Кнопки с суммами
         amounts = [10, 25, 50, 100]
@@ -897,7 +913,7 @@ SL: ${sl:,.0f}"""
         keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
         
         try:
-            await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
             logger.info(f"[SIGNAL] Sent {direction} {ticker} @ ${entry:.2f} (WR={winrate}%) to {user_id}")
         except Exception as e:
             logger.error(f"[SIGNAL] Error sending to {user_id}: {e}")
