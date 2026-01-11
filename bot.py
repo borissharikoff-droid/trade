@@ -1386,19 +1386,26 @@ async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers) as resp:
                 data = await resp.json()
-                ret_code = data.get("retCode")
-                ret_msg = data.get("retMsg")
+                status.append(f"\n📦 Raw: {str(data)[:200]}")
+                
+                ret_code = data.get("retCode") if data else None
+                ret_msg = data.get("retMsg") if data else "No response"
                 
                 if ret_code == 0:
-                    coins = data.get("result", {}).get("list", [{}])[0].get("coin", [])
-                    for coin in coins:
-                        if coin.get("coin") == "USDT":
-                            status.append(f"\n💰 Баланс USDT: ${float(coin.get('walletBalance', 0)):,.2f}")
-                            break
+                    result = data.get("result", {})
+                    coin_list = result.get("list", [])
+                    if coin_list and len(coin_list) > 0:
+                        coins = coin_list[0].get("coin", [])
+                        for coin in coins:
+                            if coin.get("coin") == "USDT":
+                                status.append(f"💰 Баланс USDT: ${float(coin.get('walletBalance', 0)):,.2f}")
+                                break
+                        else:
+                            status.append(f"⚠️ USDT не найден")
                     else:
-                        status.append(f"\n💰 USDT не найден в списке")
+                        status.append(f"⚠️ Список пуст: {result}")
                 else:
-                    status.append(f"\n❌ Bybit Error: {ret_msg} (code: {ret_code})")
+                    status.append(f"❌ Bybit: {ret_msg} (code: {ret_code})")
     except Exception as e:
         status.append(f"\n❌ Ошибка: {e}")
     
