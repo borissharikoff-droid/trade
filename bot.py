@@ -1015,25 +1015,36 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         dir_emoji = "🟢" if direction == "LONG" else "🔴"
         dir_text = "LONG" if direction == "LONG" else "SHORT"
         
-        # Минималистичный формат сигнала
-        text = f"""🎯 <b>{winrate}%</b> | {ticker} {dir_text}
-
-💵 ${entry:,.0f} → ${tp:,.0f}
-🛡 SL: ${sl:,.0f}
-
-Баланс: ${balance:.0f}"""
+        # Формат сигнала с TP/SL и плечом
+        tp_percent = abs(tp - entry) / entry * 100
+        sl_percent = abs(sl - entry) / entry * 100
         
-        # Кнопки с суммами в ряд
-        amounts = [10, 25, 50, 100]
+        text = f"""🎯 <b>{winrate}%</b> | {ticker} {dir_text} x10
+
+💵 Вход: <b>${entry:,.0f}</b>
+✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
+🛡 SL: ${sl:,.0f} (-{sl_percent:.1f}%)
+
+💰 ${balance:.0f}"""
+        
+        # Кнопки с суммами - включая малые для низких балансов
+        if balance >= 100:
+            amounts = [10, 25, 50, 100]
+        elif balance >= 25:
+            amounts = [5, 10, 25]
+        elif balance >= 10:
+            amounts = [3, 5, 10]
+        else:
+            amounts = [1, 2, 3]
+        
         amounts = [a for a in amounts if a <= balance]
         
         keyboard = []
-        # Кнопки сумм в один ряд
         if amounts:
             row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{amt}|{winrate}") for amt in amounts[:4]]
             keyboard.append(row)
         
-        keyboard.append([InlineKeyboardButton("💵 Другая сумма", callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{winrate}")])
+        keyboard.append([InlineKeyboardButton("💵 Своя сумма", callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{winrate}")])
         keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
         
         try:
