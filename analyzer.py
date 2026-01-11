@@ -902,8 +902,8 @@ class MarketAnalyzer:
         div_bonus = 0.1 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
         confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
-        # Минимальный порог (снижен для большего количества сигналов)
-        if confidence < 0.10:
+        # Минимальный порог качества
+        if confidence < 0.15:
             logger.info(f"[ANALYZER] Низкая уверенность ({confidence:.2%})")
             return None
         
@@ -973,9 +973,9 @@ class MarketAnalyzer:
             stop_loss = entry + sl_distance
             take_profit = entry - tp_distance
         
-        # Win rate estimate для скальпинга (выше из-за близких целей)
-        base_winrate = 65  # Выше для скальпинга
-        confidence_bonus = confidence * 25
+        # Win rate estimate для скальпинга x20 (выше из-за близких целей + строгих фильтров)
+        base_winrate = 68  # Выше для качественного скальпинга
+        confidence_bonus = confidence * 22
         
         # Bonus for strong ADX (тренд)
         adx = analysis.get('indicators', {}).get('adx', 20)

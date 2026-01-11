@@ -958,8 +958,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ==================== СИГНАЛЫ ====================
 # Кэш последних сигналов для предотвращения дубликатов
 last_signals: Dict[str, Dict] = {}  # {symbol: {'direction': str, 'price': float, 'time': datetime}}
-SIGNAL_COOLDOWN = 300  # 5 минут между одинаковыми сигналами
-PRICE_CHANGE_THRESHOLD = 0.005  # 0.5% изменение цены для нового сигнала
+SIGNAL_COOLDOWN = 180  # 3 минуты между одинаковыми сигналами (было 5)
+PRICE_CHANGE_THRESHOLD = 0.003  # 0.3% изменение цены для нового сигнала (было 0.5%)
+LEVERAGE = 20  # Плечо x20
 
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправка сигнала с реальной аналитикой"""
@@ -975,8 +976,12 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     logger.info(f"[SIGNAL] Активных юзеров: {len(active_users)}")
     
-    # Анализируем несколько пар
-    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+    # Анализируем несколько пар (топ волатильные)
+    symbols = [
+        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
+        "XRP/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT",
+        "MATIC/USDT", "ARB/USDT", "OP/USDT", "APT/USDT"
+    ]
     
     analyzer = MarketAnalyzer()
     best_signal = None
@@ -1054,7 +1059,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         tp_percent = abs(tp - entry) / entry * 100
         sl_percent = abs(sl - entry) / entry * 100
         
-        text = f"""🎯 <b>{winrate}%</b> | {ticker} {dir_text} x10
+        text = f"""🎯 <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE}
 
 💵 Вход: <b>${entry:,.0f}</b>
 ✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
@@ -1168,7 +1173,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     tp_percent = abs(tp - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x10 | ${amount:.0f}
+    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE} | ${amount:.0f}
 
 📍 Вход: ${entry:,.0f}
 ✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
@@ -1342,7 +1347,7 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     tp_percent = abs(tp - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x10 | ${amount:.0f}
+    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE} | ${amount:.0f}
 
 📍 Вход: ${entry:,.0f}
 ✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
@@ -2012,7 +2017,7 @@ def main() -> None:
     
     if app.job_queue:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
-        app.job_queue.run_repeating(send_signal, interval=60, first=10)
+        app.job_queue.run_repeating(send_signal, interval=30, first=10)  # Каждые 30 сек (было 60)
         app.job_queue.run_repeating(check_alerts, interval=30, first=15)
         logger.info("[JOBS] JobQueue configured (positions, signals, alerts)")
     else:
