@@ -966,20 +966,24 @@ class MarketAnalyzer:
         else:
             atr = current_price * 0.02
         
-        # SL = 1.5 ATR, TP = 3 ATR (Risk:Reward = 1:2)
+        # Минимум 3% SL чтобы не выбивало сразу
+        min_sl_percent = 0.03  # 3%
+        min_sl_distance = current_price * min_sl_percent
+        
+        # SL = max(2.5 ATR, 3%), TP = 2x SL (Risk:Reward = 1:2)
         confidence = analysis.get('confidence', 0.5)
         
-        sl_multiplier = 1.5
-        tp_multiplier = 3.0 + confidence  # 3-4 ATR based on confidence
+        sl_distance = max(atr * 2.5, min_sl_distance)
+        tp_distance = sl_distance * (2.0 + confidence)  # 2-3x SL based on confidence
         
         if direction == "LONG":
             entry = current_price
-            stop_loss = entry - (atr * sl_multiplier)
-            take_profit = entry + (atr * tp_multiplier)
+            stop_loss = entry - sl_distance
+            take_profit = entry + tp_distance
         else:
             entry = current_price
-            stop_loss = entry + (atr * sl_multiplier)
-            take_profit = entry - (atr * tp_multiplier)
+            stop_loss = entry + sl_distance
+            take_profit = entry - tp_distance
         
         # Win rate estimate
         base_winrate = 55

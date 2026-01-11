@@ -881,14 +881,14 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         dir_emoji = "🟢" if direction == "LONG" else "🔴"
         dir_text = "LONG" if direction == "LONG" else "SHORT"
         
-        # Простой и цепляющий формат
-        text = f"""🚀 <b>СИГНАЛ</b>
+        # Простой и цепляющий формат с винрейтом в заголовке
+        text = f"""🚀 <b>{winrate}% | {ticker} {dir_text}</b>
 
 {dir_emoji} <b>{ticker}</b> {dir_text} x10
-🎯 Успех: <b>{winrate}%</b>
+💵 Цена: <b>${entry:,.0f}</b>
 
-TP: ${tp:,.0f}
-SL: ${sl:,.0f}
+TP: ${tp:,.0f}  (+{abs(tp-entry)/entry*100:.1f}%)
+SL: ${sl:,.0f}  (-{abs(sl-entry)/entry*100:.1f}%)
 
 💰 Баланс: <b>${balance:.0f}</b>"""
         

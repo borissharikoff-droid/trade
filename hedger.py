@@ -26,7 +26,14 @@ class BybitHedger:
         self.api_key = os.getenv("BYBIT_API_KEY", "")
         self.api_secret = os.getenv("BYBIT_API_SECRET", "")
         self.testnet = os.getenv("BYBIT_TESTNET", "").lower() in ("true", "1", "yes")
-        self.base_url = self.TESTNET_URL if self.testnet else self.BASE_URL
+        self.demo = os.getenv("BYBIT_DEMO", "").lower() in ("true", "1", "yes")
+        
+        # Demo Trading использует mainnet URL но с особым хедером
+        if self.testnet:
+            self.base_url = self.TESTNET_URL
+        else:
+            self.base_url = self.BASE_URL
+            
         self._session: Optional[aiohttp.ClientSession] = None
         
         # Маппинг позиций: {user_position_id: bybit_order_id}
@@ -35,8 +42,13 @@ class BybitHedger:
         if not self.api_key or not self.api_secret:
             logger.warning("[BYBIT] API ключи не настроены! Хеджирование отключено.")
         else:
-            mode = "TESTNET" if self.testnet else "MAINNET"
-            logger.info(f"[BYBIT] Hedger инициализирован ({mode})")
+            if self.testnet:
+                mode = "TESTNET"
+            elif self.demo:
+                mode = "DEMO TRADING"
+            else:
+                mode = "LIVE"
+            logger.info(f"[BYBIT] Hedger инициализирован ({mode}) - {self.base_url}")
     
     @property
     def enabled(self) -> bool:
@@ -63,22 +75,31 @@ class BybitHedger:
             hashlib.sha256
         ).hexdigest()
         
-        return {
+        headers = {
             "X-BAPI-API-KEY": self.api_key,
             "X-BAPI-TIMESTAMP": timestamp,
             "X-BAPI-SIGN": signature,
             "X-BAPI-RECV-WINDOW": "5000"
         }
+        
+        # Для Demo Trading нужен специальный хедер
+        if self.demo:
+            headers["X-BAPI-DEMO-TRADING"] = "true"
+        
+        return headers
     
     async def _request(self, method: str, endpoint: str, params: dict = None) -> Optional[dict]:
         """Выполнить запрос к Bybit API"""
         if not self.enabled:
+            logger.warning("[BYBIT] Request skipped - not enabled")
             return None
         
         params = params or {}
         url = f"{self.base_url}{endpoint}"
         headers = self._sign(params)
         headers["Content-Type"] = "application/json"
+        
+        logger.info(f"[BYBIT] {method} {endpoint} params={params}")
         
         try:
             session = await self._get_session()
@@ -90,10 +111,12 @@ class BybitHedger:
                 async with session.post(url, headers=headers, json=params) as resp:
                     data = await resp.json()
             
+            logger.info(f"[BYBIT] Response: retCode={data.get('retCode')}, retMsg={data.get('retMsg')}")
+            
             if data.get("retCode") == 0:
                 return data.get("result")
             else:
-                logger.error(f"[BYBIT] API Error: {data.get('retMsg')}")
+                logger.error(f"[BYBIT] API Error: {data.get('retMsg')} (code: {data.get('retCode')})")
                 return None
                 
         except Exception as e:
