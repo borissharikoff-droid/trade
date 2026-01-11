@@ -605,26 +605,34 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     try:
-        from aiosend import CryptoPay
         is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
-        logger.info(f"[CRYPTO] Testnet mode: {is_testnet}")
-        cp = CryptoPay(crypto_token)
-        if is_testnet:
-            cp._network = "testnet"
-            cp._base_url = "https://testnet-pay.crypt.bot/api"
+        base_url = "https://testnet-pay.crypt.bot/api" if is_testnet else "https://pay.crypt.bot/api"
+        logger.info(f"[CRYPTO] Using API: {base_url}")
         
-        invoice = await cp.create_invoice(
-            amount=amount,
-            asset="USDT",
-            description=f"Пополнение баланса ${amount}",
-            payload=f"{user_id}_{amount}",
-            expires_in=3600
-        )
+        # Прямой запрос к CryptoBot API
+        async with aiohttp.ClientSession() as session:
+            headers = {"Crypto-Pay-API-Token": crypto_token}
+            payload = {
+                "asset": "USDT",
+                "amount": str(amount),
+                "description": f"Пополнение баланса ${amount}",
+                "payload": f"{user_id}_{amount}",
+                "expires_in": 3600
+            }
+            
+            async with session.post(f"{base_url}/createInvoice", headers=headers, json=payload) as resp:
+                data = await resp.json()
+                logger.info(f"[CRYPTO] Response: {data}")
+                
+                if not data.get("ok"):
+                    raise Exception(data.get("error", {}).get("name", "Unknown error"))
+                
+                invoice = data["result"]
         
         # Сохраняем invoice_id для проверки
         if 'pending_invoices' not in context.bot_data:
             context.bot_data['pending_invoices'] = {}
-        context.bot_data['pending_invoices'][invoice.invoice_id] = {
+        context.bot_data['pending_invoices'][invoice['invoice_id']] = {
             'user_id': user_id,
             'amount': amount
         }
@@ -634,8 +642,8 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
 Нажмите кнопку для оплаты:"""
         
         keyboard = [
-            [InlineKeyboardButton("💳 Оплатить", url=invoice.bot_invoice_url)],
-            [InlineKeyboardButton("✅ Я оплатил", callback_data=f"check_{invoice.invoice_id}")],
+            [InlineKeyboardButton("💳 Оплатить", url=invoice['bot_invoice_url'])],
+            [InlineKeyboardButton("✅ Я оплатил", callback_data=f"check_{invoice['invoice_id']}")],
             [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
         ]
         
@@ -669,16 +677,24 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     try:
-        from aiosend import CryptoPay
         is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
-        cp = CryptoPay(crypto_token)
-        if is_testnet:
-            cp._network = "testnet"
-            cp._base_url = "https://testnet-pay.crypt.bot/api"
+        base_url = "https://testnet-pay.crypt.bot/api" if is_testnet else "https://pay.crypt.bot/api"
         
-        invoices = await cp.get_invoices(invoice_ids=[invoice_id])
+        # Прямой запрос к CryptoBot API
+        async with aiohttp.ClientSession() as session:
+            headers = {"Crypto-Pay-API-Token": crypto_token}
+            params = {"invoice_ids": invoice_id}
+            
+            async with session.get(f"{base_url}/getInvoices", headers=headers, params=params) as resp:
+                data = await resp.json()
+                
+                if not data.get("ok") or not data.get("result", {}).get("items"):
+                    await query.answer("Платёж ещё не получен", show_alert=True)
+                    return
+                
+                invoice = data["result"]["items"][0]
         
-        if invoices and invoices[0].status == "paid":
+        if invoice.get("status") == "paid":
             info = pending.pop(invoice_id)
             user_id = info['user_id']
             amount = info['amount']
@@ -747,23 +763,29 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = get_user(user_id)
     user_positions = get_positions(user_id)
     
+    # Статистика побед
+    user_history = db_get_history(user_id)
+    wins = len([t for t in user_history if t['pnl'] > 0])
+    total_trades = len(user_history)
+    winrate = int((wins / total_trades * 100)) if total_trades > 0 else 0
+    total_profit = user.get('total_profit', 0)
+    profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
+    
     if not user_positions:
-        total_profit = user.get('total_profit', 0)
-        user_history = db_get_history(user_id)
-        trades_count = len(user_history)
-        pnl_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
-        
-        text = f"""📊 Мои сделки
+        text = f"""💼 Позиции
 
-Активных: 0
-Всего сделок: {trades_count}
-Общий профит: {pnl_str}"""
+Нет активных сделок
+
+───────────────
+Баланс: ${user['balance']:.2f}
+Профит: {profit_str}
+Побед: {wins}/{total_trades} ({winrate}%)"""
         
         keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
     
-    text = "📊 Активные сделки\n\n"
+    text = "💼 Позиции\n\n"
     
     keyboard = []
     for pos in user_positions:
@@ -771,8 +793,14 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         emoji = "🟢" if pnl >= 0 else "🔴"
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-        text += f"{emoji} {ticker} | ${pos['amount']:.0f} | {pnl_str}\n"
+        text += f"{ticker}  ${pos['amount']:.0f}  →  PNL: {pnl_str}{emoji}\n"
         keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_{pos['id']}")])
+    
+    text += f"""
+───────────────
+Баланс: ${user['balance']:.2f}
+Профит: {profit_str}
+Побед: {wins}/{total_trades} ({winrate}%)"""
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -832,49 +860,35 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         user = get_user(user_id)
         balance = user['balance']
         
-        if balance < 10:
+        if balance < 1:
             continue
         
-        emoji = "🟢" if direction == "LONG" else "🔴"
         ticker = symbol.split("/")[0]
-        
-        # Индикаторы для текста
-        indicators = best_signal.get('indicators', {})
-        rsi = indicators.get('rsi', 50)
-        adx = indicators.get('adx', 25)
-        
-        text = f"""{emoji} {direction} {ticker}
-
-📊 Винрейт: {winrate}%
-💰 Потенциал: +{potential_profit:.1f}%
-📍 Вход: ${entry:,.2f}
-
-RSI: {rsi:.0f} | ADX: {adx:.0f}
-
-Сумма сделки:"""
-        
         d = 'L' if direction == "LONG" else 'S'
+        dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
+        
+        text = f"""📈 {ticker} {dir_emoji}
+
+Шанс: {winrate}%
+TP: ${tp:,.0f}
+SL: ${sl:,.0f}"""
+        
+        # Кнопки с суммами
         amounts = [10, 25, 50, 100]
         amounts = [a for a in amounts if a <= balance]
         
-        if not amounts:
-            continue
-        
         keyboard = []
-        row = []
-        for amt in amounts[:4]:
-            profit = amt * (potential_profit / 100)
-            commission = amt * (COMMISSION_PERCENT / 100)
-            net = profit - commission
-            row.append(InlineKeyboardButton(
-                f"${amt} → +${net:.1f}",
+        for amt in amounts:
+            keyboard.append([InlineKeyboardButton(
+                f"${amt}",
                 callback_data=f"e|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{amt}"
-            ))
-            if len(row) == 2:
-                keyboard.append(row)
-                row = []
-        if row:
-            keyboard.append(row)
+            )])
+        
+        # Кнопка своей суммы
+        keyboard.append([InlineKeyboardButton(
+            "💵 Своя сумма",
+            callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}"
+        )])
         
         keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
         
@@ -998,9 +1012,116 @@ P&L: {pnl_str}
     keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запрос своей суммы"""
+    query = update.callback_query
+    await query.answer()
+    
+    # custom|SYM|D|ENTRY|SL|TP
+    data = query.data.split("|")
+    if len(data) < 6:
+        await query.edit_message_text("❌ Ошибка")
+        return
+    
+    # Сохраняем данные сигнала
+    context.user_data['pending_trade'] = {
+        'symbol': data[1],
+        'direction': data[2],
+        'entry': data[3],
+        'sl': data[4],
+        'tp': data[5]
+    }
+    
+    user = get_user(update.effective_user.id)
+    
+    text = f"""💵 Введи сумму сделки
+
+Минимум: $1
+Твой баланс: ${user['balance']:.2f}
+
+Отправь число (например: 15)"""
+    
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="skip")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка введённой суммы"""
+    if 'pending_trade' not in context.user_data:
+        return
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    
+    try:
+        amount = float(update.message.text.replace(",", ".").replace("$", "").strip())
+    except ValueError:
+        await update.message.reply_text("❌ Введи число")
+        return
+    
+    if amount < 1:
+        await update.message.reply_text("❌ Минимум $1")
+        return
+    
+    if amount > user['balance']:
+        await update.message.reply_text(f"❌ Недостаточно средств. Баланс: ${user['balance']:.2f}")
+        return
+    
+    trade = context.user_data.pop('pending_trade')
+    
+    # Выполняем сделку
+    symbol = trade['symbol']
+    direction = "LONG" if trade['direction'] == 'L' else "SHORT"
+    entry = float(trade['entry'])
+    sl = float(trade['sl'])
+    tp = float(trade['tp'])
+    
+    # Комиссия за открытие
+    commission = amount * (COMMISSION_PERCENT / 100)
+    user['balance'] -= amount
+    save_user(user_id)
+    
+    position = {
+        'symbol': symbol,
+        'direction': direction,
+        'amount': amount,
+        'entry': entry,
+        'current': entry,
+        'sl': sl,
+        'tp': tp,
+        'pnl': -commission,
+        'commission': commission
+    }
+    
+    pos_id = db_add_position(user_id, position)
+    position['id'] = pos_id
+    
+    # Обновляем кэш
+    if user_id not in positions_cache:
+        positions_cache[user_id] = []
+    positions_cache[user_id].append(position)
+    
+    logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} (custom)")
+    
+    ticker = symbol.split("/")[0] if "/" in symbol else symbol
+    text = f"""✅ Сделка открыта!
+
+{ticker} {direction}
+Сумма: ${amount:.2f}
+Комиссия: ${commission:.2f}
+
+Баланс: ${user['balance']:.2f}"""
+    
+    keyboard = [[InlineKeyboardButton("💼 Мои позиции", callback_data="trades")]]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def skip_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     logger.info(f"[SKIP] User {update.effective_user.id}")
+    
+    # Очищаем pending trade если был
+    if 'pending_trade' in context.user_data:
+        del context.user_data['pending_trade']
+    
     await query.answer("Пропущено")
     try:
         await query.message.delete()
@@ -1377,9 +1498,13 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(check_crypto_payment, pattern="^check_"))
     app.add_handler(CallbackQueryHandler(show_trades, pattern="^(trades|my_positions|refresh_positions)$"))
     app.add_handler(CallbackQueryHandler(enter_trade, pattern="^e\\|"))
+    app.add_handler(CallbackQueryHandler(custom_amount_prompt, pattern="^custom\\|"))
     app.add_handler(CallbackQueryHandler(close_trade, pattern="^close_"))
     app.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
+    
+    # Обработка текста для своей суммы
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_amount))
     
     # Catch-all для неизвестных callbacks
     app.add_handler(CallbackQueryHandler(unknown_callback))
