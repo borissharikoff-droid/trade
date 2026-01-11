@@ -12,7 +12,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Labeled
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 from telegram.error import BadRequest
 
-from hedger import hedge_open, hedge_close, is_hedging_enabled
+from hedger import hedge_open, hedge_close, is_hedging_enabled, hedger
 
 load_dotenv()
 
@@ -561,19 +561,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = get_user(user_id)
     
     balance = user['balance']
-    trading_status = "🟢 ВКЛ" if user['trading'] else "🔴 ВЫКЛ"
+    trading_status = "🟢" if user['trading'] else "🔴"
     
-    text = f"""<b>💰 Баланс:</b> ${balance:.2f}
+    text = f"""<b>💰 ${balance:.2f}</b>
 
-<b>📊 Авто-Торговля:</b> {trading_status}
-Включив Авто-торговлю, вам будут приходить сделки.
+Торговля: {trading_status}
 
-Получайте сигналы с винрейтом 70-85%"""
+Включи — получай сделки 75%+ winrate"""
     
     keyboard = [
-        [InlineKeyboardButton(f"{'🔴 Выключить' if user['trading'] else '🟢 Включить'} торговлю", callback_data="toggle")],
-        [InlineKeyboardButton("💳 Пополнить", callback_data="deposit")],
-        [InlineKeyboardButton("📊 Мои сделки", callback_data="trades")]
+        [InlineKeyboardButton(f"{'🔴 Выкл' if user['trading'] else '🟢 Вкл'}", callback_data="toggle")],
+        [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -911,16 +909,12 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not user_positions:
         text = f"""<b>💼 Позиции</b>
 
-Нет активных сделок
+Нет сделок
 
-───────────────
-<b>Баланс:</b> ${user['balance']:.2f}
-<b>Профит:</b> {profit_str}
-<b>Побед:</b> {wins}/{total_trades} ({winrate}%)"""
+💰 ${user['balance']:.0f} | {wins}/{total_trades} ({winrate}%)"""
         
         keyboard = [
-            [InlineKeyboardButton("🔄 Обновить", callback_data="trades")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+            [InlineKeyboardButton("🔄", callback_data="trades"), InlineKeyboardButton("🔙", callback_data="back")]
         ]
         try:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1021,16 +1015,13 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         dir_emoji = "🟢" if direction == "LONG" else "🔴"
         dir_text = "LONG" if direction == "LONG" else "SHORT"
         
-        # Простой и цепляющий формат с винрейтом в заголовке
-        text = f"""🚀 <b>{winrate}% | {ticker} {dir_text}</b>
+        # Минималистичный формат сигнала
+        text = f"""🎯 <b>{winrate}%</b> | {ticker} {dir_text}
 
-{dir_emoji} <b>{ticker}</b> {dir_text} x10
-💵 Цена: <b>${entry:,.0f}</b>
+💵 ${entry:,.0f} → ${tp:,.0f}
+🛡 SL: ${sl:,.0f}
 
-TP: ${tp:,.0f}  (+{abs(tp-entry)/entry*100:.1f}%)
-SL: ${sl:,.0f}  (-{abs(sl-entry)/entry*100:.1f}%)
-
-💰 Баланс: <b>${balance:.0f}</b>"""
+Баланс: ${balance:.0f}"""
         
         # Кнопки с суммами в ряд
         amounts = [10, 25, 50, 100]
@@ -1115,10 +1106,10 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         positions_cache[user_id] = []
     positions_cache[user_id].append(position)
     
-    # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit ===
+    # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
     hedge_ok = False
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(pos_id, symbol, direction, amount)
+        hedge_result = await hedge_open(pos_id, symbol, direction, amount, tp=tp, sl=sl)
         if hedge_result:
             hedge_ok = True
             logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
@@ -1129,18 +1120,14 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     dir_text = "LONG" if direction == "LONG" else "SHORT"
     
-    text = f"""✅ <b>Вы в сделке!</b>
+    text = f"""✅ <b>{ticker} {dir_text}</b> | ${amount:.0f}
 
-{dir_emoji} {ticker} {dir_text}
-💵 ${amount:.0f} | 🎯 {winrate}%
-📍 Вход: <b>${entry:,.0f}</b>
+📍 ${entry:,.0f} → ${tp:,.0f}
+🛡 SL: ${sl:,.0f}
 
-TP: ${tp:,.0f}
-SL: ${sl:,.0f}
-
-💰 Баланс: ${user['balance']:.2f}"""
+💰 ${user['balance']:.0f}"""
     
-    keyboard = [[InlineKeyboardButton("📊 Мои сделки", callback_data="trades")]]
+    keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1183,20 +1170,20 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     db_close_position(pos_id, pos['current'], pnl, 'MANUAL')
     user_positions.remove(pos)
     
-    result_emoji = "🟢" if pnl >= 0 else "🔴"
-    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-    dir_emoji = "🟢 LONG" if pos['direction'] == "LONG" else "🔴 SHORT"
-    
+    pnl_abs = abs(pnl)
     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-    text = f"""{result_emoji} Сделка закрыта!
-
-{ticker} {dir_emoji}
-P&L: {pnl_str}
-
-Баланс: ${user['balance']:.2f}"""
     
-    keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    if pnl >= 0:
+        text = f"""✅ <b>+${pnl_abs:.0f}</b> | {ticker}
+
+💰 ${user['balance']:.0f}"""
+    else:
+        text = f"""🛑 <b>-${pnl_abs:.0f}</b> | {ticker}
+
+💰 ${user['balance']:.0f}"""
+    
+    keyboard = [[InlineKeyboardButton("🔙 Меню", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запрос своей суммы"""
@@ -1291,24 +1278,28 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         positions_cache[user_id] = []
     positions_cache[user_id].append(position)
     
+    # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
+    if await is_hedging_enabled():
+        hedge_result = await hedge_open(pos_id, symbol, direction, amount, tp=tp, sl=sl)
+        if hedge_result:
+            logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
+        else:
+            logger.warning(f"[HEDGE] ✗ Failed to hedge position {pos_id}")
+    
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} (custom)")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
     dir_text = "LONG" if direction == "LONG" else "SHORT"
     
-    text = f"""✅ <b>Вы в сделке!</b>
+    text = f"""✅ <b>{ticker} {dir_text}</b> | ${amount:.0f}
 
-{dir_emoji} {ticker} {dir_text}
-💵 ${amount:.2f} | 🎯 {winrate}%
-📍 Вход: <b>${entry:,.0f}</b>
+📍 ${entry:,.0f} → ${tp:,.0f}
+🛡 SL: ${sl:,.0f}
 
-TP: ${tp:,.0f}
-SL: ${sl:,.0f}
-
-💰 Баланс: ${user['balance']:.2f}"""
+💰 ${user['balance']:.0f}"""
     
-    keyboard = [[InlineKeyboardButton("📊 Мои сделки", callback_data="trades")]]
+    keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def skip_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1348,13 +1339,26 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 change = random.uniform(-0.003, 0.004)
                 pos['current'] = pos['current'] * (1 + change)
             
-            # PnL
-            if pos['direction'] == "LONG":
-                pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
+            # PnL - берём реальный с Bybit если хеджирование включено
+            if await is_hedging_enabled():
+                bybit_pnl = await hedger.get_position_pnl(pos['symbol'])
+                if bybit_pnl is not None:
+                    # Используем реальный PNL с Bybit (учитывает комиссии биржи)
+                    pos['pnl'] = bybit_pnl
+                else:
+                    # Фоллбэк на локальный расчёт
+                    if pos['direction'] == "LONG":
+                        pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
+                    else:
+                        pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
+                    pos['pnl'] = pos['amount'] * pnl_percent - pos['commission']
             else:
-                pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-            
-            pos['pnl'] = pos['amount'] * pnl_percent - pos['commission']
+                # Локальный расчёт без Bybit
+                if pos['direction'] == "LONG":
+                    pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
+                else:
+                    pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
+                pos['pnl'] = pos['amount'] * pnl_percent - pos['commission']
             
             # Обновляем в БД
             db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
@@ -1389,17 +1393,15 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                 
                 if hit_tp:
-                    text = f"""🎯 +${pnl_abs:.0f} Take Profit!
+                    text = f"""✅ <b>+${pnl_abs:.0f}</b> | {ticker}
 
-{ticker} {dir_emoji}
-P&L: {pnl_str}
-Баланс: ${user['balance']:.2f}"""
+Вход → Выход: ${pos['entry']:,.0f} → ${pos['current']:,.0f}
+💰 ${user['balance']:.0f}"""
                 else:
-                    text = f"""🛡️ -${pnl_abs:.0f} Stop Loss!
+                    text = f"""🛑 <b>-${pnl_abs:.0f}</b> | {ticker}
 
-{ticker} {dir_emoji}
-P&L: {pnl_str}
-Баланс: ${user['balance']:.2f}"""
+Следующая компенсирует.
+💰 ${user['balance']:.0f}"""
                 
                 try:
                     await context.bot.send_message(

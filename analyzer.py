@@ -947,29 +947,22 @@ class MarketAnalyzer:
         return analysis
     
     async def calculate_entry_price(self, symbol: str, direction: str, analysis: Dict) -> Dict:
-        """Расчет Entry, SL, TP на основе ATR"""
+        """Расчет Entry, SL, TP для СКАЛЬПИНГА (15-40 минут)"""
         
-        klines = await self.get_klines(symbol, '1h', 50)
+        # Используем 5m для скальпинга
+        klines = await self.get_klines(symbol, '5m', 50)
         current_price = analysis.get('current_price', await self.get_price(symbol))
         
-        # ATR для волатильности
-        if klines and len(klines) >= 20:
-            highs = [float(k[2]) for k in klines]
-            lows = [float(k[3]) for k in klines]
-            closes = [float(k[4]) for k in klines]
-            atr = TechnicalIndicators.atr(highs, lows, closes)
-        else:
-            atr = current_price * 0.02
-        
-        # Минимум 3% SL чтобы не выбивало сразу
-        min_sl_percent = 0.03  # 3%
-        min_sl_distance = current_price * min_sl_percent
-        
-        # SL = max(2.5 ATR, 3%), TP = 2x SL (Risk:Reward = 1:2)
         confidence = analysis.get('confidence', 0.5)
         
-        sl_distance = max(atr * 2.5, min_sl_distance)
-        tp_distance = sl_distance * (2.0 + confidence)  # 2-3x SL based on confidence
+        # СКАЛЬПИНГ: фиксированные проценты
+        # SL: 0.3-0.5% (зависит от уверенности)
+        # TP: 0.5-1.0% (зависит от уверенности)
+        sl_percent = 0.003 + (1 - confidence) * 0.002  # 0.3-0.5%
+        tp_percent = 0.005 + confidence * 0.005        # 0.5-1.0%
+        
+        sl_distance = current_price * sl_percent
+        tp_distance = current_price * tp_percent
         
         if direction == "LONG":
             entry = current_price
@@ -980,25 +973,26 @@ class MarketAnalyzer:
             stop_loss = entry + sl_distance
             take_profit = entry - tp_distance
         
-        # Win rate estimate
-        base_winrate = 55
-        confidence_bonus = confidence * 30
+        # Win rate estimate для скальпинга (выше из-за близких целей)
+        base_winrate = 65  # Выше для скальпинга
+        confidence_bonus = confidence * 25
         
-        # Bonus for strong ADX
+        # Bonus for strong ADX (тренд)
         adx = analysis.get('indicators', {}).get('adx', 20)
-        adx_bonus = 5 if adx > 30 else 0
+        adx_bonus = 5 if adx > 25 else 0
         
-        success_rate = min(95, base_winrate + confidence_bonus + adx_bonus)
+        success_rate = min(92, base_winrate + confidence_bonus + adx_bonus)
         
-        logger.info(f"[PRICE] Entry=${entry:.2f}, SL=${stop_loss:.2f}, TP=${take_profit:.2f}")
-        logger.info(f"[PRICE] ATR=${atr:.2f}, WinRate={success_rate:.0f}%")
+        logger.info(f"[SCALP] Entry=${entry:.2f}, SL=${stop_loss:.2f} ({sl_percent*100:.2f}%), TP=${take_profit:.2f} ({tp_percent*100:.2f}%)")
+        logger.info(f"[SCALP] WinRate={success_rate:.0f}%, Confidence={confidence:.2f}")
         
         return {
             'entry_price': entry,
             'stop_loss': stop_loss,
             'take_profit': take_profit,
             'success_rate': success_rate,
-            'atr': atr
+            'sl_percent': sl_percent,
+            'tp_percent': tp_percent
         }
     
     async def close(self):

@@ -190,21 +190,24 @@ class BybitHedger:
         
         return None
     
-    async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float) -> Optional[str]:
+    async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float, tp: float = None, sl: float = None) -> Optional[str]:
         """
-        Открыть хедж-позицию на Bybit
+        Открыть хедж-позицию на Bybit с TP/SL
         
         Args:
             position_id: ID позиции юзера в нашей системе
             symbol: Торговая пара (BTC/USDT)
             direction: LONG или SHORT
             amount_usd: Сумма в USD
+            tp: Take Profit цена
+            sl: Stop Loss цена
         
         Returns:
             order_id если успешно, None если ошибка
         """
         logger.info(f"[HEDGE] === Попытка открыть хедж ===")
         logger.info(f"[HEDGE] symbol={symbol}, direction={direction}, amount=${amount_usd}")
+        logger.info(f"[HEDGE] TP=${tp}, SL=${sl}")
         logger.info(f"[HEDGE] API Key: {self.api_key[:8]}... Demo: {self.demo}, Testnet: {self.testnet}")
         
         if not self.enabled:
@@ -247,7 +250,13 @@ class BybitHedger:
             "positionIdx": 0  # One-way mode
         }
         
-        logger.info(f"[HEDGE] Открываем: {bybit_symbol} {side} qty={qty} (${amount_usd})")
+        # Добавляем TP/SL если указаны
+        if tp is not None:
+            params["takeProfit"] = str(round(tp, 2))
+        if sl is not None:
+            params["stopLoss"] = str(round(sl, 2))
+        
+        logger.info(f"[HEDGE] Открываем: {bybit_symbol} {side} qty={qty} (${amount_usd}) TP={tp} SL={sl}")
         
         result = await self._request("POST", "/v5/order/create", params)
         
@@ -349,9 +358,9 @@ class BybitHedger:
 hedger = BybitHedger()
 
 
-async def hedge_open(position_id: int, symbol: str, direction: str, amount: float) -> Optional[str]:
-    """Wrapper для открытия хеджа"""
-    return await hedger.open_hedge(position_id, symbol, direction, amount)
+async def hedge_open(position_id: int, symbol: str, direction: str, amount: float, tp: float = None, sl: float = None) -> Optional[str]:
+    """Wrapper для открытия хеджа с TP/SL"""
+    return await hedger.open_hedge(position_id, symbol, direction, amount, tp, sl)
 
 
 async def hedge_close(position_id: int, symbol: str, direction: str) -> bool:
