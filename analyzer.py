@@ -204,7 +204,7 @@ class MarketAnalyzer:
         except Exception as e:
             logger.warning(f"[PRICE] Ошибка: {e}")
         
-        # Fallback
+            # Fallback
         defaults = {'BTC/USDT': 95000, 'ETH/USDT': 3300, 'BNB/USDT': 700, 'SOL/USDT': 200}
         return defaults.get(symbol, 1000)
     
@@ -283,7 +283,7 @@ class MarketAnalyzer:
                     signal = 'STRONG_SELL'
                 elif imbalance < -0.05:
                     signal = 'SELL'
-                else:
+            else:
                     signal = 'NEUTRAL'
                 
                 logger.info(f"[ORDERBOOK] {symbol}: Imbalance={imbalance:.2%}, Bid={bid_volume:.0f}, Ask={ask_volume:.0f}")
@@ -358,7 +358,7 @@ class MarketAnalyzer:
                     # т.е. продавец был тейкером (маркет ордер на продажу)
                     if trade['m']:  # Buyer was maker = sell aggressor
                         sell_volume += qty
-                    else:
+            else:
                         buy_volume += qty
                 
                 total = buy_volume + sell_volume
@@ -516,7 +516,7 @@ class MarketAnalyzer:
                 btc_trend = 'BULLISH'
             elif btc_change_24h < -0.02:
                 btc_trend = 'BEARISH'
-            else:
+                else:
                 btc_trend = 'NEUTRAL'
             
             # Влияние на альт
@@ -526,7 +526,7 @@ class MarketAnalyzer:
                     impact = 'NEGATIVE'
                 elif btc_trend == 'BULLISH':
                     impact = 'POSITIVE'
-                else:
+            else:
                     impact = 'NEUTRAL'
             else:
                 impact = 'LOW'  # Низкая корреляция, BTC мало влияет
@@ -1448,16 +1448,16 @@ class MarketAnalyzer:
         
         sl_distance = current_price * sl_percent
         tp_distance = current_price * tp_percent
-        
-        if direction == "LONG":
+                
+                if direction == "LONG":
             entry = current_price
-            stop_loss = entry - sl_distance
-            take_profit = entry + tp_distance
+                    stop_loss = entry - sl_distance
+                    take_profit = entry + tp_distance
         else:
             entry = current_price
-            stop_loss = entry + sl_distance
-            take_profit = entry - tp_distance
-        
+                    stop_loss = entry + sl_distance
+                    take_profit = entry - tp_distance
+            
         # Win rate estimate с учётом волатильности
         base_winrate = 68
         confidence_bonus = confidence * 20
@@ -1477,12 +1477,12 @@ class MarketAnalyzer:
         
         logger.info(f"[ADAPTIVE] Entry=${entry:.4f}, SL=${stop_loss:.4f} ({sl_percent*100:.2f}%), TP=${take_profit:.4f} ({tp_percent*100:.2f}%)")
         logger.info(f"[ADAPTIVE] WinRate={success_rate:.0f}%, Vol={volatility}, R/R={rr:.1f}")
-        
-        return {
-            'entry_price': entry,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'success_rate': success_rate,
+            
+            return {
+                'entry_price': entry,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'success_rate': success_rate,
             'sl_percent': sl_percent,
             'tp_percent': tp_percent,
             'volatility': volatility,

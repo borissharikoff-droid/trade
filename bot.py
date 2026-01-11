@@ -975,6 +975,54 @@ SIGNAL_COOLDOWN = 60  # 1 минута между одинаковыми сиг�
 PRICE_CHANGE_THRESHOLD = 0.002  # 0.2% изменение цены для нового сигнала
 LEVERAGE = 20  # Плечо x20
 
+# ==================== АВТО-ТОРГОВЛЯ ====================
+AUTO_TRADE_ENABLED = True  # Включить автоматическое принятие сделок
+AUTO_TRADE_USER_ID = int(os.getenv("ADMIN_IDS", "0").split(",")[0])  # ID юзера для авто-трейда (первый админ)
+AUTO_TRADE_MIN_BET = 10  # Минимальная ставка $
+AUTO_TRADE_MAX_BET = 500  # Максимальная ставка $
+AUTO_TRADE_START_BALANCE = 1500  # Стартовый баланс для авто-трейда
+
+def calculate_auto_bet(confidence: float, balance: float) -> tuple:
+    """
+    Рассчитать размер ставки и плечо на основе уверенности
+    
+    Returns:
+        (bet_amount, leverage)
+    """
+    # Уверенность от 50% до 90%
+    # Чем выше уверенность - тем больше ставка
+    
+    if confidence >= 85:
+        # Очень высокая уверенность - агрессивная ставка
+        bet_percent = 0.25  # 25% от баланса
+        leverage = 25
+    elif confidence >= 80:
+        # Высокая уверенность
+        bet_percent = 0.20  # 20% от баланса
+        leverage = 20
+    elif confidence >= 75:
+        # Хорошая уверенность
+        bet_percent = 0.15  # 15% от баланса
+        leverage = 20
+    elif confidence >= 70:
+        # Средняя уверенность
+        bet_percent = 0.10  # 10% от баланса
+        leverage = 15
+    else:
+        # Низкая уверенность - консервативно
+        bet_percent = 0.05  # 5% от баланса
+        leverage = 10
+    
+    bet = balance * bet_percent
+    
+    # Ограничения
+    bet = max(AUTO_TRADE_MIN_BET, min(AUTO_TRADE_MAX_BET, bet))
+    
+    # Не ставить больше баланса
+    bet = min(bet, balance * 0.9)
+    
+    return round(bet, 0), leverage
+
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправка сигнала с реальной аналитикой"""
     from analyzer import MarketAnalyzer
@@ -1054,6 +1102,84 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         
     finally:
         await analyzer.close()
+    
+    # ==================== АВТО-ТОРГОВЛЯ ====================
+    if AUTO_TRADE_ENABLED and AUTO_TRADE_USER_ID:
+        auto_user = get_user(AUTO_TRADE_USER_ID)
+        auto_balance = auto_user['balance']
+        
+        if auto_balance >= AUTO_TRADE_MIN_BET:
+            # Рассчитываем ставку и плечо на основе уверенности
+            auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance)
+            
+            if auto_bet <= auto_balance:
+                ticker = symbol.split("/")[0]
+                
+                # Комиссия
+                commission = auto_bet * (COMMISSION_PERCENT / 100)
+                
+                # Обновляем баланс юзера
+                auto_user['balance'] -= auto_bet
+                new_balance = auto_user['balance']
+                save_user(AUTO_TRADE_USER_ID)
+                
+                # Добавляем комиссию в накопитель
+                await add_commission(commission)
+                
+                # Создаём позицию
+                position = {
+                    'symbol': symbol,
+                    'direction': direction,
+                    'entry': entry,
+                    'current': entry,
+                    'amount': auto_bet,
+                    'tp': tp,
+                    'sl': sl,
+                    'commission': commission,
+                    'pnl': -commission
+                }
+                
+                # Сохраняем в БД
+                pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
+                position['id'] = pos_id
+                
+                # Обновляем кэш
+                if AUTO_TRADE_USER_ID not in positions_cache:
+                    positions_cache[AUTO_TRADE_USER_ID] = []
+                positions_cache[AUTO_TRADE_USER_ID].append(position)
+                
+                # Хеджирование на Bybit
+                if await is_hedging_enabled():
+                    hedge_amount = auto_bet * auto_leverage  # Используем рассчитанный leverage
+                    hedge_result = await hedge_open(pos_id, symbol, direction, hedge_amount, tp=tp, sl=sl)
+                    if hedge_result:
+                        logger.info(f"[AUTO-TRADE] ✓ Hedge opened: {hedge_result}")
+                
+                # Уведомление
+                try:
+                    tp_percent = abs(tp - entry) / entry * 100
+                    sl_percent = abs(sl - entry) / entry * 100
+                    
+                    auto_msg = f"""🤖 <b>АВТО-СДЕЛКА</b>
+
+{'🟢' if direction == 'LONG' else '🔴'} {ticker} {direction} x{auto_leverage}
+
+💵 Ставка: <b>${auto_bet:.0f}</b>
+🎯 Уверенность: <b>{winrate}%</b>
+📍 Вход: {format_price(entry)}
+✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
+🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
+
+💰 Баланс: ${new_balance:.0f}"""
+                    
+                    await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML")
+                    logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
+                except Exception as e:
+                    logger.error(f"[AUTO-TRADE] Notification error: {e}")
+            else:
+                logger.info(f"[AUTO-TRADE] Skip: bet ${auto_bet} > balance ${auto_balance}")
+        else:
+            logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
     
     # Отправляем активным юзерам
     for user_id in active_users:
@@ -1697,6 +1823,66 @@ async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     finally:
         await analyzer.close()
 
+async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Управление авто-торговлей: /autotrade [on|off|status|balance AMOUNT]"""
+    global AUTO_TRADE_ENABLED
+    
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    args = context.args
+    
+    if not args:
+        # Показать статус
+        auto_user = get_user(AUTO_TRADE_USER_ID) if AUTO_TRADE_USER_ID else None
+        balance = auto_user['balance'] if auto_user else 0
+        positions = get_positions(AUTO_TRADE_USER_ID) if AUTO_TRADE_USER_ID else []
+        
+        status = "✅ ВКЛ" if AUTO_TRADE_ENABLED else "❌ ВЫКЛ"
+        
+        text = f"""🤖 <b>АВТО-ТОРГОВЛЯ</b>
+
+Статус: {status}
+User ID: {AUTO_TRADE_USER_ID}
+Баланс: <b>${balance:.0f}</b>
+Открытых позиций: {len(positions)}
+
+Настройки:
+• Мин. ставка: ${AUTO_TRADE_MIN_BET}
+• Макс. ставка: ${AUTO_TRADE_MAX_BET}
+• Плечо: x10-x25 (по уверенности)
+
+Команды:
+/autotrade on — включить
+/autotrade off — выключить
+/autotrade balance 1500 — установить баланс"""
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        return
+    
+    cmd = args[0].lower()
+    
+    if cmd == "on":
+        AUTO_TRADE_ENABLED = True
+        await update.message.reply_text("✅ Авто-торговля ВКЛЮЧЕНА")
+    elif cmd == "off":
+        AUTO_TRADE_ENABLED = False
+        await update.message.reply_text("❌ Авто-торговля ВЫКЛЮЧЕНА")
+    elif cmd == "balance" and len(args) > 1:
+        try:
+            new_balance = float(args[1])
+            run_sql("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, AUTO_TRADE_USER_ID))
+            # Обновляем кэш
+            if AUTO_TRADE_USER_ID in users_cache:
+                users_cache[AUTO_TRADE_USER_ID]['balance'] = new_balance
+            await update.message.reply_text(f"✅ Баланс установлен: ${new_balance:.0f}")
+        except ValueError:
+            await update.message.reply_text("❌ Неверная сумма")
+    else:
+        await update.message.reply_text("❌ Неизвестная команда. Используй: on, off, balance AMOUNT")
+
 async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест подключения к Bybit"""
     user_id = update.effective_user.id
@@ -2062,6 +2248,7 @@ def main() -> None:
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
+    app.add_handler(CommandHandler("autotrade", autotrade_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("reset", reset_all))
     app.add_handler(CommandHandler("history", history_cmd))
