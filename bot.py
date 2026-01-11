@@ -1092,12 +1092,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         
         amounts = [a for a in amounts if a <= balance]
         
+        # Форматируем цены с нужной точностью (не int для дешёвых монет!)
+        entry_str = f"{entry:.4f}" if entry < 100 else f"{entry:.0f}"
+        sl_str = f"{sl:.4f}" if sl < 100 else f"{sl:.0f}"
+        tp_str = f"{tp:.4f}" if tp < 100 else f"{tp:.0f}"
+        
         keyboard = []
         if amounts:
-            row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{amt}|{winrate}") for amt in amounts[:4]]
+            row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{entry_str}|{sl_str}|{tp_str}|{amt}|{winrate}") for amt in amounts[:4]]
             keyboard.append(row)
         
-        keyboard.append([InlineKeyboardButton("💵 Своя сумма", callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{winrate}")])
+        keyboard.append([InlineKeyboardButton("💵 Своя сумма", callback_data=f"custom|{symbol}|{d}|{entry_str}|{sl_str}|{tp_str}|{winrate}")])
         keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
         
         try:
