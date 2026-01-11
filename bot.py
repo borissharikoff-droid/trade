@@ -868,11 +868,6 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     finally:
         await analyzer.close()
     
-    # Получаем аналитику из сигнала
-    reasoning = best_signal.get('reasoning', '')
-    context_data = best_signal.get('market_context', {})
-    conclusion = context_data.get('conclusion', '')
-    
     # Отправляем активным юзерам
     for user_id in active_users:
         user = get_user(user_id)
@@ -883,35 +878,31 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         
         ticker = symbol.split("/")[0]
         d = 'L' if direction == "LONG" else 'S'
-        dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
+        dir_emoji = "🟢" if direction == "LONG" else "🔴"
+        dir_text = "LONG" if direction == "LONG" else "SHORT"
         
-        # Компактный формат с аналитикой
-        text = f"""<b>📊 СИГНАЛ | {ticker} | {dir_emoji}</b>
+        # Простой и цепляющий формат
+        text = f"""🚀 <b>СИГНАЛ</b>
 
-🎯 Вин-рейт: <b>{winrate}%</b>
-💰 TP: ${tp:,.0f} | SL: ${sl:,.0f}
+{dir_emoji} <b>{ticker}</b> {dir_text} x10
+🎯 Успех: <b>{winrate}%</b>
 
-{reasoning}
+TP: ${tp:,.0f}
+SL: ${sl:,.0f}
 
-{conclusion}"""
+💰 Баланс: <b>${balance:.0f}</b>"""
         
-        # Кнопки с суммами
+        # Кнопки с суммами в ряд
         amounts = [10, 25, 50, 100]
         amounts = [a for a in amounts if a <= balance]
         
         keyboard = []
-        for amt in amounts:
-            keyboard.append([InlineKeyboardButton(
-                f"${amt}",
-                callback_data=f"e|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{amt}|{winrate}"
-            )])
+        # Кнопки сумм в один ряд
+        if amounts:
+            row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{amt}|{winrate}") for amt in amounts[:4]]
+            keyboard.append(row)
         
-        # Кнопка своей суммы
-        keyboard.append([InlineKeyboardButton(
-            "💵 Своя сумма",
-            callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{winrate}"
-        )])
-        
+        keyboard.append([InlineKeyboardButton("💵 Другая сумма", callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{winrate}")])
         keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
         
         try:
@@ -950,6 +941,12 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("Недостаточно средств", show_alert=True)
         return
     
+    ticker = symbol.split("/")[0] if "/" in symbol else symbol
+    dir_emoji = "🟢" if direction == "LONG" else "🔴"
+    
+    # === ПОКАЗЫВАЕМ "ОТКРЫВАЕМ..." ===
+    await query.edit_message_text(f"⏳ Открываем {dir_emoji} {ticker} на ${amount:.0f}...")
+    
     # Комиссия за открытие
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
@@ -976,32 +973,31 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     positions_cache[user_id].append(position)
     
     # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit ===
+    hedge_ok = False
     if await is_hedging_enabled():
         hedge_result = await hedge_open(pos_id, symbol, direction, amount)
         if hedge_result:
+            hedge_ok = True
             logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
         else:
             logger.warning(f"[HEDGE] ✗ Failed to hedge position {pos_id}")
     
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}")
     
-    ticker = symbol.split("/")[0] if "/" in symbol else symbol
-    dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
+    dir_text = "LONG" if direction == "LONG" else "SHORT"
     
-    text = f"""✅ Вы в сделке!
+    text = f"""✅ <b>Вы в сделке!</b>
 
-{dir_emoji} | {ticker}
-
-Сумма: ${amount:.0f}
-Шанс: {winrate}%
+{dir_emoji} {ticker} {dir_text}
+💵 ${amount:.0f} | 🎯 {winrate}%
 
 TP: ${tp:,.0f}
 SL: ${sl:,.0f}
 
-Баланс: ${user['balance']:.2f}"""
+💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Мои сделки", callback_data="trades")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
