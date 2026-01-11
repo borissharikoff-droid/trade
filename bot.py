@@ -512,6 +512,19 @@ async def send_message_batch(bot, user_ids: List[int], text: str, keyboard=None,
     return sent
 
 # ==================== УТИЛИТЫ ====================
+def format_price(price: float) -> str:
+    """Умное форматирование цены в зависимости от величины"""
+    if price >= 1000:
+        return f"${price:,.0f}"      # $91,000
+    elif price >= 10:
+        return f"${price:.1f}"       # $45.2
+    elif price >= 1:
+        return f"${price:.2f}"       # $1.80
+    elif price >= 0.01:
+        return f"${price:.4f}"       # $0.0032
+    else:
+        return f"${price:.6f}"       # $0.000001
+
 def get_user(user_id: int) -> Dict:
     """Получить пользователя (с кэшированием)"""
     if user_id not in users_cache:
@@ -941,7 +954,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         current = pos.get('current', pos['entry'])
         
         text += f"<b>{ticker}</b> {dir_text} ${pos['amount']:.0f} {emoji}\n"
-        text += f"📍 ${current:,.0f} | TP: ${pos['tp']:,.0f} | SL: ${pos['sl']:,.0f}\n"
+        text += f"📍 {format_price(current)} | TP: {format_price(pos['tp'])} | SL: {format_price(pos['sl'])}\n"
         text += f"PNL: {pnl_str}\n\n"
         keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_{pos['id']}")])
     
@@ -1061,9 +1074,9 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         
         text = f"""🎯 <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE}
 
-💵 Вход: <b>${entry:,.0f}</b>
-✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
-🛡 SL: ${sl:,.0f} (-{sl_percent:.1f}%)
+💵 Вход: <b>{format_price(entry)}</b>
+✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
+🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${balance:.0f}"""
         
@@ -1175,9 +1188,9 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE} | ${amount:.0f}
 
-📍 Вход: ${entry:,.0f}
-✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
-🛡 SL: ${sl:,.0f} (-{sl_percent:.1f}%)
+📍 Вход: {format_price(entry)}
+✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
+🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 Баланс: ${user['balance']:.0f}"""
     
@@ -1349,9 +1362,9 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     
     text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE} | ${amount:.0f}
 
-📍 Вход: ${entry:,.0f}
-✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
-🛡 SL: ${sl:,.0f} (-{sl_percent:.1f}%)
+📍 Вход: {format_price(entry)}
+✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
+🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 Баланс: ${user['balance']:.0f}"""
     
