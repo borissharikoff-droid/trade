@@ -1176,9 +1176,10 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     positions_cache[user_id].append(position)
     
     # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
+    # На бирже открываем с плечом: $500 × x20 = $10,000 позиция
     hedge_ok = False
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(pos_id, symbol, direction, amount, tp=tp, sl=sl)
+        hedge_result = await hedge_open(pos_id, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
         if hedge_result:
             hedge_ok = True
             logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
@@ -1351,14 +1352,15 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     positions_cache[user_id].append(position)
     
     # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
+    # На бирже открываем с плечом: $500 × x20 = $10,000 позиция
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(pos_id, symbol, direction, amount, tp=tp, sl=sl)
+        hedge_result = await hedge_open(pos_id, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
         if hedge_result:
             logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
         else:
             logger.warning(f"[HEDGE] ✗ Failed to hedge position {pos_id}")
     
-    logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} (custom)")
+    logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom)")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_text = "LONG" if direction == "LONG" else "SHORT"
@@ -1425,14 +1427,16 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                         pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
                     else:
                         pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-                    pos['pnl'] = pos['amount'] * pnl_percent - pos['commission']
+                    # PNL с учётом плеча: $500 × x20 × 1% = $100
+                    pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos['commission']
             else:
                 # Локальный расчёт без Bybit
                 if pos['direction'] == "LONG":
                     pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
                 else:
                     pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-                pos['pnl'] = pos['amount'] * pnl_percent - pos['commission']
+                # PNL с учётом плеча: $500 × x20 × 1% = $100
+                pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos['commission']
             
             # Обновляем в БД
             db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
