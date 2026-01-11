@@ -866,9 +866,15 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправка сигнала с реальной аналитикой"""
     from analyzer import MarketAnalyzer
     
-    active_users = [uid for uid, u in users_cache.items() if u.get('trading') and u.get('balance', 0) >= MIN_DEPOSIT]
+    # Получаем активных юзеров из БД (не из кэша!)
+    rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
+    active_users = [row['user_id'] for row in rows] if rows else []
+    
     if not active_users:
+        logger.info("[SIGNAL] Нет активных юзеров с включённой торговлей")
         return
+    
+    logger.info(f"[SIGNAL] Активных юзеров: {len(active_users)}")
     
     # Анализируем несколько пар
     symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
@@ -1369,6 +1375,50 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text(text)
 
+async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Тест генерации сигнала"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    await update.message.reply_text("🔄 Генерирую тестовый сигнал...")
+    
+    from analyzer import MarketAnalyzer
+    analyzer = MarketAnalyzer()
+    
+    try:
+        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+        results = []
+        
+        for symbol in symbols:
+            analysis = await analyzer.analyze_signal(symbol)
+            if analysis:
+                results.append(f"✅ {symbol}: {analysis['direction']} (conf: {analysis['confidence']:.2%})")
+            else:
+                results.append(f"❌ {symbol}: Нет сигнала")
+        
+        # Проверяем активных юзеров
+        rows = run_sql("SELECT COUNT(*) as cnt FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="one")
+        active_count = rows['cnt'] if rows else 0
+        
+        text = f"""🧪 ТЕСТ СИГНАЛОВ
+
+{chr(10).join(results)}
+
+👥 Активных юзеров: {active_count}
+💰 Мин. депозит: ${MIN_DEPOSIT}
+
+Интервал сигналов: 60 сек"""
+        
+        await update.message.reply_text(text)
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+    finally:
+        await analyzer.close()
+
 async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест подключения к Bybit"""
     user_id = update.effective_user.id
@@ -1662,6 +1712,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("testbybit", test_bybit))
+    app.add_handler(CommandHandler("testsignal", test_signal))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("ref", referral_cmd))
