@@ -355,6 +355,11 @@ MIN_DEPOSIT = 1  # Минимальный депозит $1
 STARS_RATE = 50  # 50 звёзд = $1
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]  # ID админов
 REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
+COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
+ADMIN_CRYPTO_ID = os.getenv("ADMIN_CRYPTO_ID", "")  # CryptoBot ID админа для вывода комиссий
+
+# Счётчик накопленных комиссий (в памяти, сбрасывается при выводе)
+pending_commission = 0.0
 
 # ==================== BINANCE API ====================
 BINANCE_API = "https://api.binance.com/api/v3"
@@ -420,6 +425,91 @@ def check_rate_limit(user_id: int) -> bool:
         return True
     
     return False
+
+# ==================== КОМИССИИ (АВТО-ВЫВОД) ====================
+async def add_commission(amount: float):
+    """Добавить комиссию и вывести при достижении порога"""
+    global pending_commission
+    pending_commission += amount
+    
+    logger.info(f"[COMMISSION] +${amount:.2f}, накоплено: ${pending_commission:.2f}")
+    
+    # Авто-вывод при достижении порога
+    if pending_commission >= COMMISSION_WITHDRAW_THRESHOLD and ADMIN_CRYPTO_ID:
+        await withdraw_commission()
+
+async def withdraw_commission():
+    """Вывести накопленные комиссии на кошелёк админа"""
+    global pending_commission
+    
+    if pending_commission < 1:
+        return False
+    
+    amount = pending_commission
+    
+    # CryptoBot Transfer API
+    crypto_token = os.getenv("CRYPTO_BOT_TOKEN", "")
+    if not crypto_token or not ADMIN_CRYPTO_ID:
+        logger.warning("[COMMISSION] CryptoBot не настроен для вывода")
+        return False
+    
+    testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
+    base_url = "https://testnet-pay.crypt.bot" if testnet else "https://pay.crypt.bot"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Трансфер на CryptoBot ID админа
+            async with session.post(
+                f"{base_url}/api/transfer",
+                headers={"Crypto-Pay-API-Token": crypto_token},
+                json={
+                    "user_id": int(ADMIN_CRYPTO_ID),
+                    "asset": "USDT",
+                    "amount": str(round(amount, 2)),
+                    "spend_id": f"commission_{int(datetime.now().timestamp())}"
+                }
+            ) as resp:
+                data = await resp.json()
+                
+                if data.get("ok"):
+                    pending_commission = 0
+                    logger.info(f"[COMMISSION] ✅ Выведено ${amount:.2f} на CryptoBot ID {ADMIN_CRYPTO_ID}")
+                    return True
+                else:
+                    logger.error(f"[COMMISSION] ❌ Ошибка вывода: {data}")
+                    return False
+    except Exception as e:
+        logger.error(f"[COMMISSION] ❌ Ошибка: {e}")
+        return False
+
+# ==================== BATCH ОТПРАВКА (для 500+ юзеров) ====================
+async def send_message_batch(bot, user_ids: List[int], text: str, keyboard=None, parse_mode="HTML"):
+    """Отправить сообщение многим юзерам параллельно (батчами по 30)"""
+    BATCH_SIZE = 30  # Telegram rate limit: ~30 msg/sec
+    
+    async def send_one(user_id):
+        try:
+            await bot.send_message(
+                user_id, text, 
+                reply_markup=keyboard,
+                parse_mode=parse_mode
+            )
+            return True
+        except Exception as e:
+            logger.error(f"[BATCH] Error sending to {user_id}: {e}")
+            return False
+    
+    sent = 0
+    for i in range(0, len(user_ids), BATCH_SIZE):
+        batch = user_ids[i:i+BATCH_SIZE]
+        results = await asyncio.gather(*[send_one(uid) for uid in batch])
+        sent += sum(results)
+        
+        # Пауза между батчами чтобы не превысить лимиты
+        if i + BATCH_SIZE < len(user_ids):
+            await asyncio.sleep(1)
+    
+    return sent
 
 # ==================== УТИЛИТЫ ====================
 def get_user(user_id: int) -> Dict:
@@ -1002,6 +1092,9 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user['balance'] -= amount
     save_user(user_id)  # Сохраняем в БД
     
+    # Добавляем комиссию в накопитель (авто-вывод)
+    await add_commission(commission)
+    
     position = {
         'symbol': symbol,
         'direction': direction,
@@ -1174,6 +1267,9 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
     save_user(user_id)
+    
+    # Добавляем комиссию в накопитель (авто-вывод)
+    await add_commission(commission)
     
     position = {
         'symbol': symbol,
@@ -1407,6 +1503,47 @@ async def add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text(f"❌ Юзер {target_id} не найден")
     except (ValueError, IndexError):
         await update.message.reply_text("❌ Неверный формат. Пример: /addbalance 100")
+
+async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Статус и вывод комиссий (админ)"""
+    admin_id = update.effective_user.id
+    
+    if admin_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    stats = db_get_stats()
+    
+    text = f"""💰 <b>КОМИССИИ</b>
+
+📊 Всего заработано: <b>${stats['commissions']:.2f}</b>
+⏳ В ожидании вывода: <b>${pending_commission:.2f}</b>
+🎯 Порог вывода: ${COMMISSION_WITHDRAW_THRESHOLD}
+
+CryptoBot ID: {ADMIN_CRYPTO_ID or '❌ Не настроен'}"""
+    
+    keyboard = []
+    if pending_commission >= 1:
+        keyboard.append([InlineKeyboardButton(f"💸 Вывести ${pending_commission:.2f}", callback_data="withdraw_commission")])
+    
+    await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
+
+async def withdraw_commission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback для вывода комиссий"""
+    query = update.callback_query
+    await query.answer()
+    
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    
+    await query.edit_message_text("⏳ Выводим комиссию...")
+    
+    success = await withdraw_commission()
+    
+    if success:
+        await query.edit_message_text(f"✅ Комиссия выведена на CryptoBot!")
+    else:
+        await query.edit_message_text("❌ Ошибка вывода. Проверь настройки CRYPTO_BOT_TOKEN и ADMIN_CRYPTO_ID")
 
 async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест генерации сигнала"""
@@ -1769,6 +1906,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("addbalance", add_balance))
+    app.add_handler(CommandHandler("commission", commission_cmd))
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
@@ -1795,6 +1933,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(custom_amount_prompt, pattern="^custom\\|"))
     app.add_handler(CallbackQueryHandler(close_trade, pattern="^close_"))
     app.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
+    app.add_handler(CallbackQueryHandler(withdraw_commission_callback, pattern="^withdraw_commission$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
     
     # Обработка текста для своей суммы
