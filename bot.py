@@ -693,8 +693,8 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 
                 if not data.get("ok") or not data.get("result", {}).get("items"):
                     await query.answer("Платёж ещё не получен", show_alert=True)
-        return
-    
+                    return
+                
                 invoice = data["result"]["items"][0]
         
         if invoice.get("status") == "paid":
@@ -717,7 +717,7 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 if referrer_id:
                     db_add_referral_bonus(referrer_id, REFERRAL_BONUS)
                     try:
-    await context.bot.send_message(
+                        await context.bot.send_message(
                             referrer_id,
                             f"🎉 Твой реферал сделал депозит!\nБонус: +${REFERRAL_BONUS}"
                         )
@@ -1506,7 +1506,7 @@ async def delete_alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if db_delete_alert(alert_id, user_id):
         await update.message.reply_text(f"✅ Алерт #{alert_id} удалён")
-        else:
+    else:
         await update.message.reply_text("❌ Алерт не найден")
 
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
