@@ -1463,7 +1463,7 @@ async def delete_alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if db_delete_alert(alert_id, user_id):
         await update.message.reply_text(f"✅ Алерт #{alert_id} удалён")
-        else:
+    else:
         await update.message.reply_text("❌ Алерт не найден")
 
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
