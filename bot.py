@@ -351,7 +351,7 @@ init_db()
 
 # ==================== КОНФИГ ====================
 COMMISSION_PERCENT = 2.0  # Комиссия 2% за сделку
-MIN_DEPOSIT = 1  # Минимальный депозит $1
+MIN_DEPOSIT = 2  # Минимальный депозит $2
 STARS_RATE = 50  # 50 звёзд = $1
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]  # ID админов
 REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
@@ -884,7 +884,7 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     if not user['trading'] and user['balance'] < MIN_DEPOSIT:
         logger.info(f"[TOGGLE] User {user_id} - insufficient balance (${user['balance']:.2f})")
-        await query.answer(f"Минимальный баланс ${MIN_DEPOSIT}", show_alert=True)
+        await query.answer(f"❌ Недостаточно баланса!\n\nМинимум для торговли: ${MIN_DEPOSIT}\nВаш баланс: ${user['balance']:.2f}", show_alert=True)
         return
     
     new_state = not user['trading']
