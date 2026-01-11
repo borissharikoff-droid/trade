@@ -407,15 +407,22 @@ class BybitHedger:
         
         pos = positions[0]
         size = pos.get("size", "0")
+        pos_side = pos.get("side", "")  # Buy = LONG, Sell = SHORT
         
         if float(size) == 0:
             logger.info(f"[HEDGE] Позиция уже закрыта: {bybit_symbol}")
             return True
         
+        # Определяем сторону для закрытия по реальной позиции на Bybit
+        # Если позиция Buy (LONG) - закрываем Sell, если Sell (SHORT) - закрываем Buy
+        close_side = "Sell" if pos_side == "Buy" else "Buy"
+        
+        logger.info(f"[HEDGE] Bybit position: {bybit_symbol} side={pos_side} size={size}")
+        
         params = {
             "category": "linear",
             "symbol": bybit_symbol,
-            "side": side,
+            "side": close_side,
             "orderType": "Market",
             "qty": size,
             "timeInForce": "GTC",
@@ -423,7 +430,7 @@ class BybitHedger:
             "reduceOnly": True
         }
         
-        logger.info(f"[HEDGE] Закрываем: {bybit_symbol} {side} qty={size}")
+        logger.info(f"[HEDGE] Закрываем: {bybit_symbol} {close_side} qty={size}")
         
         result = await self._request("POST", "/v5/order/create", params)
         
