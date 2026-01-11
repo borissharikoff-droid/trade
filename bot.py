@@ -1488,7 +1488,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 📍 {format_price(pos['entry'])} → {format_price(pos['current'])}
 💰 Баланс: <b>${user['balance']:.0f}</b>"""
-                elif pnl == 0:
+                elif pos['pnl'] == 0:
                     text = f"""✅ <b>Сделка закрыта</b>
 
 {ticker}: <b>$0</b> (в безубыток)
@@ -1505,10 +1505,12 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 try:
                     await context.bot.send_message(
                         user_id, text,
+                        parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
                     )
-                except:
-                    pass
+                    logger.info(f"[AUTO-CLOSE] User {user_id} {reason} {ticker}: ${pos['pnl']:.2f}, Balance: ${user['balance']:.2f}")
+                except Exception as e:
+                    logger.error(f"[AUTO-CLOSE] Failed to notify user {user_id}: {e}")
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 def db_get_stats() -> Dict:
