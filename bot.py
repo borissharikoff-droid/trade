@@ -990,6 +990,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 {dir_emoji} {ticker} {dir_text}
 💵 ${amount:.0f} | 🎯 {winrate}%
+📍 Вход: <b>${entry:,.0f}</b>
 
 TP: ${tp:,.0f}
 SL: ${sl:,.0f}
@@ -1147,22 +1148,22 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} (custom)")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
-    dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
+    dir_emoji = "🟢" if direction == "LONG" else "🔴"
+    dir_text = "LONG" if direction == "LONG" else "SHORT"
     
-    text = f"""✅ Вы в сделке!
+    text = f"""✅ <b>Вы в сделке!</b>
 
-{dir_emoji} | {ticker}
-
-Сумма: ${amount:.2f}
-Шанс: {winrate}%
+{dir_emoji} {ticker} {dir_text}
+💵 ${amount:.2f} | 🎯 {winrate}%
+📍 Вход: <b>${entry:,.0f}</b>
 
 TP: ${tp:,.0f}
 SL: ${sl:,.0f}
 
-Баланс: ${user['balance']:.2f}"""
+💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Мои сделки", callback_data="trades")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def skip_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
