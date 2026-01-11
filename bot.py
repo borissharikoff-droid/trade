@@ -693,8 +693,8 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 
                 if not data.get("ok") or not data.get("result", {}).get("items"):
                     await query.answer("Платёж ещё не получен", show_alert=True)
-                    return
-                
+        return
+    
                 invoice = data["result"]["items"][0]
         
         if invoice.get("status") == "paid":
@@ -717,7 +717,7 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 if referrer_id:
                     db_add_referral_bonus(referrer_id, REFERRAL_BONUS)
                     try:
-                        await context.bot.send_message(
+    await context.bot.send_message(
                             referrer_id,
                             f"🎉 Твой реферал сделал депозит!\nБонус: +${REFERRAL_BONUS}"
                         )
@@ -1334,6 +1334,52 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text(text)
 
+async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Тест подключения к Bybit"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    from hedger import hedger
+    
+    await update.message.reply_text("🔄 Проверяю Bybit...")
+    
+    # Проверка настроек
+    api_key = os.getenv("BYBIT_API_KEY", "")
+    demo_mode = os.getenv("BYBIT_DEMO", "").lower() in ("true", "1", "yes")
+    testnet = os.getenv("BYBIT_TESTNET", "").lower() in ("true", "1", "yes")
+    
+    status = []
+    status.append(f"API Key: {'✅ Есть' if api_key else '❌ Нет'}")
+    status.append(f"Demo Mode: {'✅ Вкл' if demo_mode else '❌ Выкл'}")
+    status.append(f"Testnet: {'✅ Вкл' if testnet else '❌ Выкл'}")
+    status.append(f"URL: {hedger.base_url}")
+    status.append(f"Enabled: {'✅' if hedger.enabled else '❌'}")
+    
+    # Тест баланса
+    try:
+        balance = await hedger.get_balance()
+        if balance is not None:
+            status.append(f"\n💰 Баланс USDT: ${balance:,.2f}")
+        else:
+            status.append(f"\n❌ Не удалось получить баланс")
+    except Exception as e:
+        status.append(f"\n❌ Ошибка баланса: {e}")
+    
+    # Тест цены
+    try:
+        price = await hedger.get_price("BTC/USDT")
+        if price:
+            status.append(f"📊 BTC цена: ${price:,.2f}")
+        else:
+            status.append(f"❌ Не удалось получить цену")
+    except Exception as e:
+        status.append(f"❌ Ошибка цены: {e}")
+    
+    await update.message.reply_text("🔧 BYBIT TEST\n\n" + "\n".join(status))
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Рассылка всем пользователям"""
     user_id = update.effective_user.id
@@ -1397,8 +1443,8 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         alerts = db_get_user_alerts(user_id)
         if not alerts:
             await update.message.reply_text("🔔 У тебя нет активных алертов\n\nСоздать: /alert BTC 100000")
-            return
-        
+        return
+    
         text = "🔔 Твои алерты:\n\n"
         for a in alerts:
             ticker = a['symbol'].split("/")[0] if "/" in a['symbol'] else a['symbol']
@@ -1460,7 +1506,7 @@ async def delete_alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if db_delete_alert(alert_id, user_id):
         await update.message.reply_text(f"✅ Алерт #{alert_id} удалён")
-    else:
+        else:
         await update.message.reply_text("❌ Алерт не найден")
 
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1542,6 +1588,7 @@ def main() -> None:
     # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("ref", referral_cmd))
