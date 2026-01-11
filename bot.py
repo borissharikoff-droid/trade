@@ -1247,15 +1247,20 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
     
     if pnl >= 0:
-        text = f"""✅ <b>+${pnl_abs:.0f}</b> | {ticker}
+        text = f"""🎉 <b>Поздравляем!</b>
 
-💰 ${user['balance']:.0f}"""
+Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}!
+
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
     else:
-        text = f"""🛑 <b>-${pnl_abs:.0f}</b> | {ticker}
+        text = f"""📉 <b>Сделка закрыта</b>
 
-💰 ${user['balance']:.0f}"""
+{ticker}: <b>-${pnl_abs:.0f}</b>
+
+Не расстраивайтесь, следующая будет лучше! 💪
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
     
-    keyboard = [[InlineKeyboardButton("🔙 Меню", callback_data="back")]]
+    keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1471,15 +1476,19 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                 
                 if hit_tp:
-                    text = f"""✅ <b>+${pnl_abs:.0f}</b> | {ticker}
+                    text = f"""🎉 <b>Take Profit!</b>
 
-Вход → Выход: ${pos['entry']:,.0f} → ${pos['current']:,.0f}
-💰 ${user['balance']:.0f}"""
+Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
+
+📍 {format_price(pos['entry'])} → {format_price(pos['current'])}
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
                 else:
-                    text = f"""🛑 <b>-${pnl_abs:.0f}</b> | {ticker}
+                    text = f"""📉 <b>Stop Loss</b>
 
-Следующая компенсирует.
-💰 ${user['balance']:.0f}"""
+{ticker}: <b>-${pnl_abs:.0f}</b>
+
+Защитили от большего убытка. Следующая будет лучше! 💪
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
                 
                 try:
                     await context.bot.send_message(
