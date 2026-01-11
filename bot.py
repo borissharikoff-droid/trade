@@ -426,12 +426,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     balance = user['balance']
     trading_status = "🟢 ВКЛ" if user['trading'] else "🔴 ВЫКЛ"
     
-    text = f"""💰 Баланс: ${balance:.2f}
+    text = f"""<b>💰 Баланс:</b> ${balance:.2f}
 
-📊 Торговля: {trading_status}
+<b>📊 Авто-Торговля:</b> {trading_status}
+Включив Авто-торговлю, вам будут приходить сделки.
 
-Получайте сигналы с винрейтом 70-85%
-Комиссия: {COMMISSION_PERCENT}% за сделку"""
+Получайте сигналы с винрейтом 70-85%"""
     
     keyboard = [
         [InlineKeyboardButton(f"{'🔴 Выключить' if user['trading'] else '🟢 Включить'} торговлю", callback_data="toggle")],
@@ -443,11 +443,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
         except Exception:
-            await context.bot.send_message(user_id, text, reply_markup=reply_markup)
+            await context.bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode="HTML")
     else:
-        await context.bot.send_message(user_id, text, reply_markup=reply_markup)
+        await context.bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode="HTML")
 
 # ==================== ПОПОЛНЕНИЕ ====================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -455,9 +455,9 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     logger.info(f"[DEPOSIT] User {update.effective_user.id}")
     await query.answer()
     
-    text = f"""💳 Пополнение баланса
+    text = f"""<b>💳 Пополнение баланса</b>
 
-Минимум: ${MIN_DEPOSIT}
+<b>Минимум:</b> ${MIN_DEPOSIT}
 
 Выберите способ:"""
     
@@ -467,7 +467,7 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -772,20 +772,23 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
     if not user_positions:
-        text = f"""💼 Позиции
+        text = f"""<b>💼 Позиции</b>
 
 Нет активных сделок
 
 ───────────────
-Баланс: ${user['balance']:.2f}
-Профит: {profit_str}
-Побед: {wins}/{total_trades} ({winrate}%)"""
+<b>Баланс:</b> ${user['balance']:.2f}
+<b>Профит:</b> {profit_str}
+<b>Побед:</b> {wins}/{total_trades} ({winrate}%)"""
         
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить", callback_data="trades")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         return
     
-    text = "💼 Позиции\n\n"
+    text = "<b>💼 Позиции</b>\n\n"
     
     keyboard = []
     for pos in user_positions:
@@ -798,12 +801,13 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     text += f"""
 ───────────────
-Баланс: ${user['balance']:.2f}
-Профит: {profit_str}
-Побед: {wins}/{total_trades} ({winrate}%)"""
+<b>Баланс:</b> ${user['balance']:.2f}
+<b>Профит:</b> {profit_str}
+<b>Побед:</b> {wins}/{total_trades} ({winrate}%)"""
     
+    keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 # ==================== СИГНАЛЫ ====================
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -867,7 +871,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         d = 'L' if direction == "LONG" else 'S'
         dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
         
-        text = f"""📈 {ticker} {dir_emoji}
+        text = f"""📈 {winrate}% успех | {ticker} | {dir_emoji}
 
 Шанс: {winrate}%
 TP: ${tp:,.0f}
@@ -881,13 +885,13 @@ SL: ${sl:,.0f}"""
         for amt in amounts:
             keyboard.append([InlineKeyboardButton(
                 f"${amt}",
-                callback_data=f"e|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{amt}"
+                callback_data=f"e|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{amt}|{winrate}"
             )])
         
         # Кнопка своей суммы
         keyboard.append([InlineKeyboardButton(
             "💵 Своя сумма",
-            callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}"
+            callback_data=f"custom|{symbol}|{d}|{int(entry)}|{int(sl)}|{int(tp)}|{winrate}"
         )])
         
         keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
@@ -905,7 +909,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     user = get_user(user_id)
     
-    # e|SYM|D|ENTRY|SL|TP|AMT
+    # e|SYM|D|ENTRY|SL|TP|AMT|WINRATE
     data = query.data.split("|")
     if len(data) < 7:
         await query.edit_message_text("❌ Ошибка")
@@ -918,6 +922,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         sl = float(data[4])
         tp = float(data[5])
         amount = float(data[6])
+        winrate = int(data[7]) if len(data) > 7 else 75
     except (ValueError, IndexError):
         await query.edit_message_text("❌ Ошибка данных")
         return
@@ -955,11 +960,17 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
-    text = f"""✅ Сделка открыта!
+    dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
+    
+    text = f"""✅ Вы в сделке!
 
-{ticker} {direction}
+{dir_emoji} | {ticker}
+
 Сумма: ${amount:.0f}
-Комиссия: ${commission:.2f}
+Шанс: {winrate}%
+
+TP: ${tp:,.0f}
+SL: ${sl:,.0f}
 
 Баланс: ${user['balance']:.2f}"""
     
@@ -998,13 +1009,14 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     db_close_position(pos_id, pos['current'], pnl, 'MANUAL')
     user_positions.remove(pos)
     
-    emoji = "🟢" if pnl >= 0 else "🔴"
+    result_emoji = "🟢" if pnl >= 0 else "🔴"
     pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+    dir_emoji = "🟢 LONG" if pos['direction'] == "LONG" else "🔴 SHORT"
     
     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-    text = f"""{emoji} Сделка закрыта!
+    text = f"""{result_emoji} Сделка закрыта!
 
-{ticker} {pos['direction']}
+{ticker} {dir_emoji}
 P&L: {pnl_str}
 
 Баланс: ${user['balance']:.2f}"""
@@ -1017,7 +1029,7 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    # custom|SYM|D|ENTRY|SL|TP
+    # custom|SYM|D|ENTRY|SL|TP|WINRATE
     data = query.data.split("|")
     if len(data) < 6:
         await query.edit_message_text("❌ Ошибка")
@@ -1029,7 +1041,8 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
         'direction': data[2],
         'entry': data[3],
         'sl': data[4],
-        'tp': data[5]
+        'tp': data[5],
+        'winrate': data[6] if len(data) > 6 else '75'
     }
     
     user = get_user(update.effective_user.id)
@@ -1074,6 +1087,7 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     entry = float(trade['entry'])
     sl = float(trade['sl'])
     tp = float(trade['tp'])
+    winrate = int(trade.get('winrate', 75))
     
     # Комиссия за открытие
     commission = amount * (COMMISSION_PERCENT / 100)
@@ -1103,15 +1117,21 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} (custom)")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
-    text = f"""✅ Сделка открыта!
+    dir_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
+    
+    text = f"""✅ Вы в сделке!
 
-{ticker} {direction}
+{dir_emoji} | {ticker}
+
 Сумма: ${amount:.2f}
-Комиссия: ${commission:.2f}
+Шанс: {winrate}%
+
+TP: ${tp:,.0f}
+SL: ${sl:,.0f}
 
 Баланс: ${user['balance']:.2f}"""
     
-    keyboard = [[InlineKeyboardButton("💼 Мои позиции", callback_data="trades")]]
+    keyboard = [[InlineKeyboardButton("📊 Мои сделки", callback_data="trades")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def skip_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1180,14 +1200,22 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 db_close_position(pos['id'], pos['current'], pos['pnl'], reason)
                 user_positions.remove(pos)
                 
-                emoji = "🎯" if hit_tp else "🛡️"
-                result = "Take Profit" if hit_tp else "Stop Loss"
-                pnl_str = f"+${pos['pnl']:.2f}" if pos['pnl'] >= 0 else f"-${abs(pos['pnl']):.2f}"
+                pnl_abs = abs(pos['pnl'])
+                pnl_str = f"+${pos['pnl']:.2f}" if pos['pnl'] >= 0 else f"-${pnl_abs:.2f}"
+                dir_emoji = "🟢 LONG" if pos['direction'] == "LONG" else "🔴 SHORT"
                 
                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                text = f"""{emoji} {result}!
+                
+                if hit_tp:
+                    text = f"""🎯 +${pnl_abs:.0f} Take Profit!
 
-{ticker} {pos['direction']}
+{ticker} {dir_emoji}
+P&L: {pnl_str}
+Баланс: ${user['balance']:.2f}"""
+                else:
+                    text = f"""🛡️ -${pnl_abs:.0f} Stop Loss!
+
+{ticker} {dir_emoji}
 P&L: {pnl_str}
 Баланс: ${user['balance']:.2f}"""
                 
