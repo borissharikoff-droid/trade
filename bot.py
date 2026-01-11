@@ -1830,6 +1830,49 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     await update.message.reply_text(f"✅ Отправлено: {sent}\n❌ Ошибок: {failed}")
 
+async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Сброс: закрыть все позиции и установить баланс"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    # /reset [user_id] [balance] или /reset [balance]
+    if not context.args:
+        await update.message.reply_text("Использование:\n/reset 1500 — себе\n/reset 123456 1500 — юзеру\n/reset all 0 — всем закрыть позиции")
+        return
+    
+    try:
+        if context.args[0].lower() == "all":
+            # Закрыть все позиции у всех
+            run_sql("DELETE FROM positions")
+            positions_cache.clear()
+            await update.message.reply_text("✅ Все позиции закрыты у всех пользователей")
+            return
+        
+        if len(context.args) == 1:
+            target_id = user_id
+            balance = float(context.args[0])
+        else:
+            target_id = int(context.args[0])
+            balance = float(context.args[1])
+        
+        # Закрыть позиции пользователя
+        run_sql("DELETE FROM positions WHERE user_id = ?", (target_id,))
+        if target_id in positions_cache:
+            positions_cache[target_id] = []
+        
+        # Установить баланс
+        db_update_user(target_id, balance=balance)
+        if target_id in users_cache:
+            users_cache[target_id]['balance'] = balance
+        
+        await update.message.reply_text(f"✅ Готово!\n\n👤 User: {target_id}\n💰 Баланс: ${balance:.0f}\n📊 Позиции: закрыты")
+        
+    except (ValueError, IndexError) as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
 # ==================== РЕФЕРАЛЬНАЯ КОМАНДА ====================
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Реферальная ссылка"""
@@ -2012,6 +2055,7 @@ def main() -> None:
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
     app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("reset", reset_all))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("ref", referral_cmd))
     app.add_handler(CommandHandler("alert", alert_cmd))
