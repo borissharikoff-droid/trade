@@ -1104,59 +1104,59 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         await analyzer.close()
     
     # ==================== АВТО-ТОРГОВЛЯ ====================
-    if AUTO_TRADE_ENABLED and AUTO_TRADE_USER_ID:
-        auto_user = get_user(AUTO_TRADE_USER_ID)
-        auto_balance = auto_user['balance']
-        
-        if auto_balance >= AUTO_TRADE_MIN_BET:
-            # Рассчитываем ставку и плечо на основе уверенности
-            auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance)
+    try:
+        if AUTO_TRADE_ENABLED and AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
+            auto_user = get_user(AUTO_TRADE_USER_ID)
+            auto_balance = auto_user.get('balance', 0)
             
-            if auto_bet <= auto_balance:
-                ticker = symbol.split("/")[0]
+            if auto_balance >= AUTO_TRADE_MIN_BET:
+                # Рассчитываем ставку и плечо на основе уверенности
+                auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance)
                 
-                # Комиссия
-                commission = auto_bet * (COMMISSION_PERCENT / 100)
-                
-                # Обновляем баланс юзера
-                auto_user['balance'] -= auto_bet
-                new_balance = auto_user['balance']
-                save_user(AUTO_TRADE_USER_ID)
-                
-                # Добавляем комиссию в накопитель
-                await add_commission(commission)
-                
-                # Создаём позицию
-                position = {
-                    'symbol': symbol,
-                    'direction': direction,
-                    'entry': entry,
-                    'current': entry,
-                    'amount': auto_bet,
-                    'tp': tp,
-                    'sl': sl,
-                    'commission': commission,
-                    'pnl': -commission
-                }
-                
-                # Сохраняем в БД
-                pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
-                position['id'] = pos_id
-                
-                # Обновляем кэш
-                if AUTO_TRADE_USER_ID not in positions_cache:
-                    positions_cache[AUTO_TRADE_USER_ID] = []
-                positions_cache[AUTO_TRADE_USER_ID].append(position)
-                
-                # Хеджирование на Bybit
-                if await is_hedging_enabled():
-                    hedge_amount = auto_bet * auto_leverage  # Используем рассчитанный leverage
-                    hedge_result = await hedge_open(pos_id, symbol, direction, hedge_amount, tp=tp, sl=sl)
-                    if hedge_result:
-                        logger.info(f"[AUTO-TRADE] ✓ Hedge opened: {hedge_result}")
-                
-                # Уведомление
-                try:
+                if auto_bet <= auto_balance:
+                    ticker = symbol.split("/")[0]
+                    
+                    # Комиссия
+                    commission = auto_bet * (COMMISSION_PERCENT / 100)
+                    
+                    # Обновляем баланс юзера
+                    auto_user['balance'] -= auto_bet
+                    new_balance = auto_user['balance']
+                    save_user(AUTO_TRADE_USER_ID)
+                    
+                    # Добавляем комиссию в накопитель
+                    await add_commission(commission)
+                    
+                    # Создаём позицию
+                    position = {
+                        'symbol': symbol,
+                        'direction': direction,
+                        'entry': entry,
+                        'current': entry,
+                        'amount': auto_bet,
+                        'tp': tp,
+                        'sl': sl,
+                        'commission': commission,
+                        'pnl': -commission
+                    }
+                    
+                    # Сохраняем в БД
+                    pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
+                    position['id'] = pos_id
+                    
+                    # Обновляем кэш
+                    if AUTO_TRADE_USER_ID not in positions_cache:
+                        positions_cache[AUTO_TRADE_USER_ID] = []
+                    positions_cache[AUTO_TRADE_USER_ID].append(position)
+                    
+                    # Хеджирование на Bybit
+                    if await is_hedging_enabled():
+                        hedge_amount = auto_bet * auto_leverage
+                        hedge_result = await hedge_open(pos_id, symbol, direction, hedge_amount, tp=tp, sl=sl)
+                        if hedge_result:
+                            logger.info(f"[AUTO-TRADE] ✓ Hedge opened: {hedge_result}")
+                    
+                    # Уведомление
                     tp_percent = abs(tp - entry) / entry * 100
                     sl_percent = abs(sl - entry) / entry * 100
                     
@@ -1174,12 +1174,14 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML")
                     logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
-                except Exception as e:
-                    logger.error(f"[AUTO-TRADE] Notification error: {e}")
+                else:
+                    logger.info(f"[AUTO-TRADE] Skip: bet ${auto_bet} > balance ${auto_balance}")
             else:
-                logger.info(f"[AUTO-TRADE] Skip: bet ${auto_bet} > balance ${auto_balance}")
-        else:
-            logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
+                logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
+    except Exception as e:
+        logger.error(f"[AUTO-TRADE] Error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     
     # Отправляем активным юзерам
     for user_id in active_users:
