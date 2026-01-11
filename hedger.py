@@ -370,7 +370,11 @@ class BybitHedger:
         if result:
             positions = result.get("list", [])
             if positions:
-                return float(positions[0].get("unrealisedPnl", 0))
+                pnl_str = positions[0].get("unrealisedPnl", "0")
+                # Bybit может вернуть пустую строку
+                if pnl_str == "" or pnl_str is None:
+                    pnl_str = "0"
+                return float(pnl_str)
         
         return None
 
