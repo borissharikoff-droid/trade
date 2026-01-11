@@ -1506,6 +1506,30 @@ async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     await update.message.reply_text("🔧 BYBIT TEST\n\n" + "\n".join(status))
 
+async def test_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Тест открытия/закрытия хеджа"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    await update.message.reply_text("🔄 Тестирую хеджирование на BTC...")
+    
+    # Пробуем открыть минимальную позицию
+    result = await hedge_open(999999, "BTC/USDT", "LONG", 10.0)
+    
+    if result:
+        await update.message.reply_text(f"✅ Хедж ОТКРЫТ!\nOrder ID: {result}\n\n⏳ Закрываю через 5 сек...")
+        await asyncio.sleep(5)
+        close_result = await hedge_close(999999, "BTC/USDT", "LONG")
+        if close_result:
+            await update.message.reply_text("✅ Хедж ЗАКРЫТ!")
+        else:
+            await update.message.reply_text("❌ Ошибка закрытия")
+    else:
+        await update.message.reply_text("❌ Не удалось открыть хедж. Проверь логи Railway.")
+
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Рассылка всем пользователям"""
     user_id = update.effective_user.id
@@ -1712,6 +1736,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("testbybit", test_bybit))
+    app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("history", history_cmd))

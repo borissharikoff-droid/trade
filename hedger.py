@@ -121,12 +121,23 @@ class BybitHedger:
                 async with session.post(url, headers=headers, data=json.dumps(params)) as resp:
                     data = await resp.json()
             
-            logger.info(f"[BYBIT] Response: retCode={data.get('retCode')}, retMsg={data.get('retMsg')}")
+            ret_code = data.get('retCode')
+            ret_msg = data.get('retMsg')
+            logger.info(f"[BYBIT] Response: retCode={ret_code}, retMsg={ret_msg}")
             
-            if data.get("retCode") == 0:
+            if ret_code == 0:
                 return data.get("result")
+            elif ret_code == 10003:
+                logger.error(f"[BYBIT] ❌ API KEY INVALID! Проверь: 1) Ключ создан для Demo Trading 2) Включены права Unified Trading 3) IP не заблокирован")
+                return None
+            elif ret_code == 10004:
+                logger.error(f"[BYBIT] ❌ Неверная подпись! Возможно API Secret неправильный")
+                return None
+            elif ret_code == 110007:
+                logger.error(f"[BYBIT] ❌ Недостаточно баланса!")
+                return None
             else:
-                logger.error(f"[BYBIT] API Error: {data.get('retMsg')} (code: {data.get('retCode')})")
+                logger.error(f"[BYBIT] API Error: {ret_msg} (code: {ret_code})")
                 return None
                 
         except Exception as e:
@@ -192,6 +203,10 @@ class BybitHedger:
         Returns:
             order_id если успешно, None если ошибка
         """
+        logger.info(f"[HEDGE] === Попытка открыть хедж ===")
+        logger.info(f"[HEDGE] symbol={symbol}, direction={direction}, amount=${amount_usd}")
+        logger.info(f"[HEDGE] API Key: {self.api_key[:8]}... Demo: {self.demo}, Testnet: {self.testnet}")
+        
         if not self.enabled:
             logger.info(f"[HEDGE] Пропуск (Bybit не настроен): {symbol} {direction} ${amount_usd}")
             return None
