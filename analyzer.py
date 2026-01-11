@@ -2,12 +2,17 @@ import logging
 import asyncio
 import aiohttp
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 from binance.client import Client
 
 logger = logging.getLogger(__name__)
+
+# Оптимальные часы для торговли (UTC)
+# Лондон: 8-16, Нью-Йорк: 13-21, Азия: 0-8
+OPTIMAL_TRADING_HOURS = list(range(8, 22))  # 8:00 - 22:00 UTC (основная ликвидность)
+LOW_LIQUIDITY_HOURS = [2, 3, 4, 5]  # 2:00 - 6:00 UTC (азиатская ночь)
 
 
 class TechnicalIndicators:
@@ -244,6 +249,400 @@ class MarketAnalyzer:
         except Exception as e:
             logger.warning(f"[LSR] Ошибка: {e}")
         return 1.0
+    
+    # ==================== ORDER BOOK IMBALANCE ====================
+    
+    async def get_order_book_imbalance(self, symbol: str) -> Dict:
+        """Анализ дисбаланса ордербука - давление покупателей/продавцов"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            url = f"https://api.binance.com/api/v3/depth?symbol={binance_symbol}&limit=100"
+            data = await self._fetch_json(url, f"depth_{binance_symbol}")
+            
+            if data:
+                bids = data.get('bids', [])
+                asks = data.get('asks', [])
+                
+                # Суммарный объём на покупку и продажу
+                bid_volume = sum(float(b[1]) for b in bids[:50])
+                ask_volume = sum(float(a[1]) for a in asks[:50])
+                
+                total = bid_volume + ask_volume
+                if total == 0:
+                    return {'imbalance': 0, 'signal': 'NEUTRAL', 'bid_volume': 0, 'ask_volume': 0}
+                
+                # Imbalance: положительный = больше покупателей
+                imbalance = (bid_volume - ask_volume) / total
+                
+                # Сигнал
+                if imbalance > 0.15:
+                    signal = 'STRONG_BUY'
+                elif imbalance > 0.05:
+                    signal = 'BUY'
+                elif imbalance < -0.15:
+                    signal = 'STRONG_SELL'
+                elif imbalance < -0.05:
+                    signal = 'SELL'
+                else:
+                    signal = 'NEUTRAL'
+                
+                logger.info(f"[ORDERBOOK] {symbol}: Imbalance={imbalance:.2%}, Bid={bid_volume:.0f}, Ask={ask_volume:.0f}")
+                
+                return {
+                    'imbalance': imbalance,
+                    'signal': signal,
+                    'bid_volume': bid_volume,
+                    'ask_volume': ask_volume,
+                    'ratio': bid_volume / ask_volume if ask_volume > 0 else 1
+                }
+        except Exception as e:
+            logger.warning(f"[ORDERBOOK] Ошибка: {e}")
+        
+        return {'imbalance': 0, 'signal': 'NEUTRAL', 'bid_volume': 0, 'ask_volume': 0}
+    
+    # ==================== OPEN INTEREST CHANGE ====================
+    
+    async def get_open_interest_change(self, symbol: str) -> Dict:
+        """Изменение Open Interest - рост OI + рост цены = сильный тренд"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            url = f"https://fapi.binance.com/futures/data/openInterestHist?symbol={binance_symbol}&period=1h&limit=24"
+            data = await self._fetch_json(url, f"oi_hist_{binance_symbol}")
+            
+            if data and len(data) >= 2:
+                current_oi = float(data[-1]['sumOpenInterest'])
+                prev_oi = float(data[-2]['sumOpenInterest'])
+                oi_24h_ago = float(data[0]['sumOpenInterest']) if len(data) >= 24 else prev_oi
+                
+                # Изменение за час и за 24 часа
+                change_1h = (current_oi - prev_oi) / prev_oi if prev_oi > 0 else 0
+                change_24h = (current_oi - oi_24h_ago) / oi_24h_ago if oi_24h_ago > 0 else 0
+                
+                # Интерпретация
+                # OI растёт + цена растёт = бычий тренд усиливается
+                # OI растёт + цена падает = медвежий тренд усиливается
+                # OI падает + цена растёт = шорт-сквиз
+                # OI падает + цена падает = лонг-ликвидации
+                
+                logger.info(f"[OI_CHANGE] {symbol}: 1h={change_1h:.2%}, 24h={change_24h:.2%}")
+                
+                return {
+                    'current': current_oi,
+                    'change_1h': change_1h,
+                    'change_24h': change_24h,
+                    'rising': change_1h > 0.01,
+                    'falling': change_1h < -0.01
+                }
+        except Exception as e:
+            logger.warning(f"[OI_CHANGE] Ошибка: {e}")
+        
+        return {'current': 0, 'change_1h': 0, 'change_24h': 0, 'rising': False, 'falling': False}
+    
+    # ==================== CVD (Cumulative Volume Delta) ====================
+    
+    async def get_cvd(self, symbol: str) -> Dict:
+        """CVD - реальный спрос vs предложение на основе тиковых данных"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            # Получаем последние сделки
+            url = f"https://api.binance.com/api/v3/aggTrades?symbol={binance_symbol}&limit=1000"
+            data = await self._fetch_json(url, f"trades_{binance_symbol}")
+            
+            if data:
+                buy_volume = 0
+                sell_volume = 0
+                
+                for trade in data:
+                    qty = float(trade['q'])
+                    # isBuyerMaker = True означает, что покупатель был мейкером (лимитка)
+                    # т.е. продавец был тейкером (маркет ордер на продажу)
+                    if trade['m']:  # Buyer was maker = sell aggressor
+                        sell_volume += qty
+                    else:
+                        buy_volume += qty
+                
+                total = buy_volume + sell_volume
+                delta = buy_volume - sell_volume
+                delta_percent = delta / total if total > 0 else 0
+                
+                # Сигнал
+                if delta_percent > 0.1:
+                    signal = 'STRONG_BUY'
+                elif delta_percent > 0.03:
+                    signal = 'BUY'
+                elif delta_percent < -0.1:
+                    signal = 'STRONG_SELL'
+                elif delta_percent < -0.03:
+                    signal = 'SELL'
+                else:
+                    signal = 'NEUTRAL'
+                
+                logger.info(f"[CVD] {symbol}: Delta={delta_percent:.2%}, Buy={buy_volume:.0f}, Sell={sell_volume:.0f}")
+                
+                return {
+                    'delta': delta,
+                    'delta_percent': delta_percent,
+                    'buy_volume': buy_volume,
+                    'sell_volume': sell_volume,
+                    'signal': signal
+                }
+        except Exception as e:
+            logger.warning(f"[CVD] Ошибка: {e}")
+        
+        return {'delta': 0, 'delta_percent': 0, 'buy_volume': 0, 'sell_volume': 0, 'signal': 'NEUTRAL'}
+    
+    # ==================== WHALE ALERTS ====================
+    
+    async def check_whale_activity(self, symbol: str) -> Dict:
+        """Проверка крупных транзакций (киты)"""
+        try:
+            binance_symbol = symbol.replace('/', '')
+            # Получаем последние сделки
+            url = f"https://api.binance.com/api/v3/aggTrades?symbol={binance_symbol}&limit=500"
+            data = await self._fetch_json(url, f"whale_{binance_symbol}")
+            
+            if data:
+                # Считаем средний размер сделки
+                quantities = [float(t['q']) for t in data]
+                avg_qty = np.mean(quantities)
+                std_qty = np.std(quantities)
+                
+                # Ищем сделки > 3 стандартных отклонений (киты)
+                whale_threshold = avg_qty + 3 * std_qty
+                whale_trades = [t for t in data if float(t['q']) > whale_threshold]
+                
+                whale_buy = sum(float(t['q']) for t in whale_trades if not t['m'])
+                whale_sell = sum(float(t['q']) for t in whale_trades if t['m'])
+                
+                # Активность китов
+                whale_activity = len(whale_trades) / len(data) if data else 0
+                whale_bias = 'BUY' if whale_buy > whale_sell * 1.5 else ('SELL' if whale_sell > whale_buy * 1.5 else 'NEUTRAL')
+                
+                logger.info(f"[WHALE] {symbol}: {len(whale_trades)} whale trades, Bias={whale_bias}")
+                
+                return {
+                    'whale_trades_count': len(whale_trades),
+                    'whale_buy_volume': whale_buy,
+                    'whale_sell_volume': whale_sell,
+                    'whale_activity': whale_activity,
+                    'bias': whale_bias,
+                    'threshold': whale_threshold
+                }
+        except Exception as e:
+            logger.warning(f"[WHALE] Ошибка: {e}")
+        
+        return {'whale_trades_count': 0, 'whale_buy_volume': 0, 'whale_sell_volume': 0, 'whale_activity': 0, 'bias': 'NEUTRAL'}
+    
+    # ==================== LIQUIDATION ESTIMATE ====================
+    
+    async def estimate_liquidation_levels(self, symbol: str) -> Dict:
+        """Оценка уровней ликвидаций на основе OI и цены"""
+        try:
+            current_price = await self.get_price(symbol)
+            
+            # Типичные плечи: 5x, 10x, 20x, 50x, 100x
+            # Ликвидация лонга при падении на: 20%, 10%, 5%, 2%, 1%
+            # Ликвидация шорта при росте на: 20%, 10%, 5%, 2%, 1%
+            
+            leverages = [5, 10, 20, 50, 100]
+            liq_drops = [0.20, 0.10, 0.05, 0.02, 0.01]
+            
+            long_liquidations = []
+            short_liquidations = []
+            
+            for lev, drop in zip(leverages, liq_drops):
+                long_liq = current_price * (1 - drop)
+                short_liq = current_price * (1 + drop)
+                long_liquidations.append({'leverage': lev, 'price': long_liq})
+                short_liquidations.append({'leverage': lev, 'price': short_liq})
+            
+            # Ближайшие уровни
+            nearest_long_liq = current_price * 0.98  # -2% (x50 лонги)
+            nearest_short_liq = current_price * 1.02  # +2% (x50 шорты)
+            
+            # Магнит - цена часто идёт к уровням ликвидаций
+            # Если ближе к шортовым ликвидациям = магнит вверх
+            # Если ближе к лонговым ликвидациям = магнит вниз
+            
+            dist_to_long_liq = (current_price - nearest_long_liq) / current_price
+            dist_to_short_liq = (nearest_short_liq - current_price) / current_price
+            
+            if dist_to_short_liq < dist_to_long_liq:
+                magnet = 'UP'  # Шортовые ликвидации ближе
+            else:
+                magnet = 'DOWN'  # Лонговые ликвидации ближе
+            
+            logger.info(f"[LIQ] {symbol}: Magnet={magnet}, Long@${nearest_long_liq:.0f}, Short@${nearest_short_liq:.0f}")
+            
+            return {
+                'long_liquidations': long_liquidations,
+                'short_liquidations': short_liquidations,
+                'nearest_long_liq': nearest_long_liq,
+                'nearest_short_liq': nearest_short_liq,
+                'magnet': magnet,
+                'current_price': current_price
+            }
+        except Exception as e:
+            logger.warning(f"[LIQ] Ошибка: {e}")
+        
+        return {'magnet': 'NEUTRAL', 'long_liquidations': [], 'short_liquidations': []}
+    
+    # ==================== BTC CORRELATION ====================
+    
+    async def get_btc_correlation(self, symbol: str) -> Dict:
+        """Корреляция с BTC - если BTC падает, альты падают сильнее"""
+        if 'BTC' in symbol:
+            return {'correlation': 1.0, 'btc_trend': 'SELF', 'impact': 'NONE'}
+        
+        try:
+            # Получаем свечи BTC и альта
+            btc_klines = await self.get_klines('BTC/USDT', '1h', 24)
+            alt_klines = await self.get_klines(symbol, '1h', 24)
+            
+            if not btc_klines or not alt_klines or len(btc_klines) < 20 or len(alt_klines) < 20:
+                return {'correlation': 0.8, 'btc_trend': 'UNKNOWN', 'impact': 'NEUTRAL'}
+            
+            # Изменения цены
+            btc_changes = [float(btc_klines[i][4]) / float(btc_klines[i-1][4]) - 1 for i in range(1, len(btc_klines))]
+            alt_changes = [float(alt_klines[i][4]) / float(alt_klines[i-1][4]) - 1 for i in range(1, len(alt_klines))]
+            
+            # Корреляция
+            correlation = np.corrcoef(btc_changes[-20:], alt_changes[-20:])[0, 1]
+            
+            # Тренд BTC
+            btc_change_24h = (float(btc_klines[-1][4]) - float(btc_klines[0][4])) / float(btc_klines[0][4])
+            
+            if btc_change_24h > 0.02:
+                btc_trend = 'BULLISH'
+            elif btc_change_24h < -0.02:
+                btc_trend = 'BEARISH'
+            else:
+                btc_trend = 'NEUTRAL'
+            
+            # Влияние на альт
+            # Если корреляция высокая и BTC падает = негатив для альта
+            if correlation > 0.7:
+                if btc_trend == 'BEARISH':
+                    impact = 'NEGATIVE'
+                elif btc_trend == 'BULLISH':
+                    impact = 'POSITIVE'
+                else:
+                    impact = 'NEUTRAL'
+            else:
+                impact = 'LOW'  # Низкая корреляция, BTC мало влияет
+            
+            logger.info(f"[CORR] {symbol}: Corr={correlation:.2f}, BTC={btc_trend}, Impact={impact}")
+            
+            return {
+                'correlation': correlation,
+                'btc_trend': btc_trend,
+                'btc_change_24h': btc_change_24h,
+                'impact': impact
+            }
+        except Exception as e:
+            logger.warning(f"[CORR] Ошибка: {e}")
+        
+        return {'correlation': 0.8, 'btc_trend': 'UNKNOWN', 'impact': 'NEUTRAL'}
+    
+    # ==================== TIME FILTER ====================
+    
+    def check_trading_time(self) -> Dict:
+        """Проверка оптимального времени для торговли"""
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+        
+        is_optimal = hour in OPTIMAL_TRADING_HOURS
+        is_low_liquidity = hour in LOW_LIQUIDITY_HOURS
+        
+        # Сессии
+        if 8 <= hour < 16:
+            session = 'LONDON'
+        elif 13 <= hour < 21:
+            session = 'NEW_YORK'
+        elif 0 <= hour < 8:
+            session = 'ASIA'
+        else:
+            session = 'LATE'
+        
+        # Overlap (самая высокая ликвидность)
+        is_overlap = 13 <= hour < 16  # London + NY overlap
+        
+        logger.info(f"[TIME] Hour={hour} UTC, Session={session}, Optimal={is_optimal}, Overlap={is_overlap}")
+        
+        return {
+            'hour': hour,
+            'session': session,
+            'is_optimal': is_optimal,
+            'is_low_liquidity': is_low_liquidity,
+            'is_overlap': is_overlap,
+            'recommendation': 'TRADE' if is_optimal else ('AVOID' if is_low_liquidity else 'CAUTION')
+        }
+    
+    # ==================== ADAPTIVE TP/SL ====================
+    
+    async def calculate_adaptive_tpsl(self, symbol: str, direction: str, confidence: float) -> Dict:
+        """Адаптивные TP/SL на основе ATR (волатильности)"""
+        klines = await self.get_klines(symbol, '15m', 50)
+        
+        if not klines or len(klines) < 20:
+            # Fallback к фиксированным
+            return {
+                'sl_percent': 0.004,
+                'tp_percent': 0.007,
+                'atr': 0,
+                'volatility': 'UNKNOWN'
+            }
+        
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+        
+        # ATR
+        ind = TechnicalIndicators()
+        atr = ind.atr(highs, lows, closes, 14)
+        current_price = closes[-1]
+        
+        # ATR как % от цены
+        atr_percent = atr / current_price
+        
+        # Классификация волатильности
+        if atr_percent > 0.015:
+            volatility = 'HIGH'
+            sl_mult = 1.5
+            tp_mult = 2.0
+        elif atr_percent > 0.008:
+            volatility = 'MEDIUM'
+            sl_mult = 1.2
+            tp_mult = 1.5
+        else:
+            volatility = 'LOW'
+            sl_mult = 1.0
+            tp_mult = 1.2
+        
+        # Базовые значения для скальпинга x20
+        base_sl = 0.003  # 0.3%
+        base_tp = 0.006  # 0.6%
+        
+        # Адаптация под confidence
+        confidence_factor = 0.8 + confidence * 0.4  # 0.8-1.2
+        
+        sl_percent = base_sl * sl_mult
+        tp_percent = base_tp * tp_mult * confidence_factor
+        
+        # Risk/Reward ratio check (минимум 1.5)
+        if tp_percent / sl_percent < 1.5:
+            tp_percent = sl_percent * 1.5
+        
+        logger.info(f"[ADAPTIVE] {symbol}: ATR={atr_percent:.3%}, Vol={volatility}, SL={sl_percent:.3%}, TP={tp_percent:.3%}")
+        
+        return {
+            'sl_percent': sl_percent,
+            'tp_percent': tp_percent,
+            'atr': atr,
+            'atr_percent': atr_percent,
+            'volatility': volatility,
+            'risk_reward': tp_percent / sl_percent
+        }
     
     # ==================== FEAR & GREED INDEX ====================
     
@@ -778,17 +1177,33 @@ class MarketAnalyzer:
         """Комплексный анализ для генерации сигнала с глубоким анализом"""
         logger.info(f"[ANALYZER] ========== Глубокий анализ {symbol} ==========")
         
-        # Параллельный сбор ВСЕХ данных
+        # === TIME FILTER === (проверяем сразу)
+        time_check = self.check_trading_time()
+        if time_check['is_low_liquidity']:
+            logger.info(f"[ANALYZER] ⏰ Низкая ликвидность ({time_check['hour']}:00 UTC) - пропуск")
+            return None
+        
+        # Параллельный сбор ВСЕХ данных (расширенный)
         tech_task = self.analyze_technical(symbol)
         sentiment_task = self.analyze_sentiment(symbol)
         price_task = self.get_price(symbol)
         mtf_task = self.analyze_multi_timeframe(symbol)
         div_task = self.detect_divergence(symbol)
         sr_task = self.find_support_resistance(symbol)
+        orderbook_task = self.get_order_book_imbalance(symbol)
+        oi_task = self.get_open_interest_change(symbol)
+        cvd_task = self.get_cvd(symbol)
+        whale_task = self.check_whale_activity(symbol)
+        liq_task = self.estimate_liquidation_levels(symbol)
+        btc_corr_task = self.get_btc_correlation(symbol)
         
-        tech, sentiment, current_price, mtf, divergence, sr_levels = await asyncio.gather(
-            tech_task, sentiment_task, price_task, mtf_task, div_task, sr_task
+        results = await asyncio.gather(
+            tech_task, sentiment_task, price_task, mtf_task, div_task, sr_task,
+            orderbook_task, oi_task, cvd_task, whale_task, liq_task, btc_corr_task
         )
+        
+        tech, sentiment, current_price, mtf, divergence, sr_levels = results[:6]
+        orderbook, oi_change, cvd, whale, liquidations, btc_corr = results[6:]
         
         # === ГЛУБОКИЙ АНАЛИЗ КОНТЕКСТА ===
         market_context = self._analyze_market_context(
@@ -797,6 +1212,66 @@ class MarketAnalyzer:
              'funding_rate': sentiment['funding_rate'],
              'long_short_ratio': sentiment['long_short_ratio']}
         )
+        
+        # === НОВЫЕ ДАННЫЕ: Order Book, CVD, OI, Whales ===
+        
+        # Order Book Imbalance
+        if orderbook['signal'] == 'STRONG_BUY':
+            market_context['insights'].append(f"📗 Order Book: сильное давление покупателей ({orderbook['imbalance']:.1%})")
+            market_context['bullish_factors'] += 2
+        elif orderbook['signal'] == 'BUY':
+            market_context['bullish_factors'] += 1
+        elif orderbook['signal'] == 'STRONG_SELL':
+            market_context['insights'].append(f"📕 Order Book: сильное давление продавцов ({orderbook['imbalance']:.1%})")
+            market_context['bearish_factors'] += 2
+        elif orderbook['signal'] == 'SELL':
+            market_context['bearish_factors'] += 1
+        
+        # CVD (Cumulative Volume Delta)
+        if cvd['signal'] == 'STRONG_BUY':
+            market_context['insights'].append(f"💹 CVD: агрессивные покупки ({cvd['delta_percent']:.1%})")
+            market_context['bullish_factors'] += 2
+        elif cvd['signal'] == 'BUY':
+            market_context['bullish_factors'] += 1
+        elif cvd['signal'] == 'STRONG_SELL':
+            market_context['insights'].append(f"💹 CVD: агрессивные продажи ({cvd['delta_percent']:.1%})")
+            market_context['bearish_factors'] += 2
+        elif cvd['signal'] == 'SELL':
+            market_context['bearish_factors'] += 1
+        
+        # Open Interest Change
+        if oi_change['rising'] and oi_change['change_1h'] > 0.02:
+            market_context['insights'].append(f"📈 OI растёт +{oi_change['change_1h']:.1%} — новые позиции открываются")
+        elif oi_change['falling'] and oi_change['change_1h'] < -0.02:
+            market_context['warnings'].append(f"⚠️ OI падает {oi_change['change_1h']:.1%} — ликвидации или закрытия")
+        
+        # Whale Activity
+        if whale['bias'] == 'BUY' and whale['whale_trades_count'] > 5:
+            market_context['insights'].append(f"🐋 Киты покупают ({whale['whale_trades_count']} крупных сделок)")
+            market_context['bullish_factors'] += 2
+        elif whale['bias'] == 'SELL' and whale['whale_trades_count'] > 5:
+            market_context['insights'].append(f"🐋 Киты продают ({whale['whale_trades_count']} крупных сделок)")
+            market_context['bearish_factors'] += 2
+        
+        # Liquidation Magnet
+        if liquidations.get('magnet') == 'UP':
+            market_context['insights'].append("🧲 Ликвидации шортов близко — магнит вверх")
+            market_context['bullish_factors'] += 1
+        elif liquidations.get('magnet') == 'DOWN':
+            market_context['insights'].append("🧲 Ликвидации лонгов близко — магнит вниз")
+            market_context['bearish_factors'] += 1
+        
+        # BTC Correlation
+        if btc_corr['impact'] == 'NEGATIVE':
+            market_context['warnings'].append(f"⚠️ BTC падает, альт коррелирует ({btc_corr['correlation']:.0%}) — риск")
+            market_context['bearish_factors'] += 1
+        elif btc_corr['impact'] == 'POSITIVE':
+            market_context['insights'].append(f"📈 BTC растёт, альт коррелирует ({btc_corr['correlation']:.0%}) — попутный ветер")
+            market_context['bullish_factors'] += 1
+        
+        # Time bonus
+        if time_check['is_overlap']:
+            market_context['insights'].append("⏰ London/NY overlap — максимальная ликвидность")
         
         # Добавляем MTF анализ в контекст
         if mtf['confluence'] == "BULLISH" and mtf['aligned']:
@@ -928,13 +1403,25 @@ class MarketAnalyzer:
             'components': {
                 'technical': tech['score'],
                 'sentiment': sentiment['score'],
-                'context': context_score
+                'context': context_score,
+                'orderbook': orderbook['imbalance'],
+                'cvd': cvd['delta_percent'],
+                'mtf': mtf['score']
             },
             'indicators': tech['indicators'],
             'sentiment_data': {
                 'fear_greed': sentiment['fear_greed']['value'],
                 'funding_rate': sentiment['funding_rate'],
                 'long_short_ratio': sentiment['long_short_ratio']
+            },
+            'advanced_data': {
+                'orderbook': orderbook,
+                'cvd': cvd,
+                'oi_change': oi_change,
+                'whale': whale,
+                'liquidations': liquidations,
+                'btc_correlation': btc_corr,
+                'time': time_check
             },
             'market_context': market_context,
             'reasoning': reasoning,
@@ -947,19 +1434,17 @@ class MarketAnalyzer:
         return analysis
     
     async def calculate_entry_price(self, symbol: str, direction: str, analysis: Dict) -> Dict:
-        """Расчет Entry, SL, TP для СКАЛЬПИНГА (15-40 минут)"""
+        """Расчет Entry, SL, TP с АДАПТИВНЫМИ значениями на основе ATR"""
         
-        # Используем 5m для скальпинга
-        klines = await self.get_klines(symbol, '5m', 50)
         current_price = analysis.get('current_price', await self.get_price(symbol))
-        
         confidence = analysis.get('confidence', 0.5)
         
-        # СКАЛЬПИНГ: фиксированные проценты
-        # SL: 0.3-0.5% (зависит от уверенности)
-        # TP: 0.5-1.0% (зависит от уверенности)
-        sl_percent = 0.003 + (1 - confidence) * 0.002  # 0.3-0.5%
-        tp_percent = 0.005 + confidence * 0.005        # 0.5-1.0%
+        # === АДАПТИВНЫЕ TP/SL на основе волатильности ===
+        adaptive = await self.calculate_adaptive_tpsl(symbol, direction, confidence)
+        
+        sl_percent = adaptive['sl_percent']
+        tp_percent = adaptive['tp_percent']
+        volatility = adaptive['volatility']
         
         sl_distance = current_price * sl_percent
         tp_distance = current_price * tp_percent
@@ -973,18 +1458,25 @@ class MarketAnalyzer:
             stop_loss = entry + sl_distance
             take_profit = entry - tp_distance
         
-        # Win rate estimate для скальпинга x20 (выше из-за близких целей + строгих фильтров)
-        base_winrate = 68  # Выше для качественного скальпинга
-        confidence_bonus = confidence * 22
+        # Win rate estimate с учётом волатильности
+        base_winrate = 68
+        confidence_bonus = confidence * 20
         
         # Bonus for strong ADX (тренд)
         adx = analysis.get('indicators', {}).get('adx', 20)
         adx_bonus = 5 if adx > 25 else 0
         
-        success_rate = min(92, base_winrate + confidence_bonus + adx_bonus)
+        # Volatility adjustment
+        vol_bonus = 3 if volatility == 'LOW' else (-2 if volatility == 'HIGH' else 0)
         
-        logger.info(f"[SCALP] Entry=${entry:.2f}, SL=${stop_loss:.2f} ({sl_percent*100:.2f}%), TP=${take_profit:.2f} ({tp_percent*100:.2f}%)")
-        logger.info(f"[SCALP] WinRate={success_rate:.0f}%, Confidence={confidence:.2f}")
+        # R/R bonus
+        rr = adaptive.get('risk_reward', 1.5)
+        rr_bonus = 3 if rr > 2 else 0
+        
+        success_rate = min(92, base_winrate + confidence_bonus + adx_bonus + vol_bonus + rr_bonus)
+        
+        logger.info(f"[ADAPTIVE] Entry=${entry:.4f}, SL=${stop_loss:.4f} ({sl_percent*100:.2f}%), TP=${take_profit:.4f} ({tp_percent*100:.2f}%)")
+        logger.info(f"[ADAPTIVE] WinRate={success_rate:.0f}%, Vol={volatility}, R/R={rr:.1f}")
         
         return {
             'entry_price': entry,
@@ -992,7 +1484,9 @@ class MarketAnalyzer:
             'take_profit': take_profit,
             'success_rate': success_rate,
             'sl_percent': sl_percent,
-            'tp_percent': tp_percent
+            'tp_percent': tp_percent,
+            'volatility': volatility,
+            'risk_reward': rr
         }
     
     async def close(self):
