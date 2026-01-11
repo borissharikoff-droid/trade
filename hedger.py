@@ -128,16 +128,23 @@ class BybitHedger:
             if ret_code == 0:
                 return data.get("result")
             elif ret_code == 10003:
-                logger.error(f"[BYBIT] ❌ API KEY INVALID! Проверь: 1) Ключ создан для Demo Trading 2) Включены права Unified Trading 3) IP не заблокирован")
+                logger.error(f"[BYBIT] ❌ API KEY INVALID!")
                 return None
             elif ret_code == 10004:
-                logger.error(f"[BYBIT] ❌ Неверная подпись! Возможно API Secret неправильный")
+                logger.error(f"[BYBIT] ❌ Неверная подпись!")
                 return None
             elif ret_code == 110007:
                 logger.error(f"[BYBIT] ❌ Недостаточно баланса!")
                 return None
+            elif ret_code == 110073:
+                logger.error(f"[BYBIT] ❌ TP/SL слишком близко к цене! Пробуем без TP/SL...")
+                return None
+            elif ret_code == 110017:
+                logger.error(f"[BYBIT] ❌ Слишком маленький размер ордера!")
+                return None
             else:
                 logger.error(f"[BYBIT] API Error: {ret_msg} (code: {ret_code})")
+                logger.error(f"[BYBIT] Full response: {data}")
                 return None
                 
         except Exception as e:
@@ -259,6 +266,20 @@ class BybitHedger:
         logger.info(f"[HEDGE] Открываем: {bybit_symbol} {side} qty={qty} (${amount_usd}) TP={tp} SL={sl}")
         
         result = await self._request("POST", "/v5/order/create", params)
+        
+        # Если ошибка с TP/SL - пробуем без них
+        if result is None and (tp is not None or sl is not None):
+            logger.warning(f"[HEDGE] Пробуем открыть без TP/SL...")
+            params_no_tpsl = {
+                "category": "linear",
+                "symbol": bybit_symbol,
+                "side": side,
+                "orderType": "Market",
+                "qty": str(qty),
+                "timeInForce": "GTC",
+                "positionIdx": 0
+            }
+            result = await self._request("POST", "/v5/order/create", params_no_tpsl)
         
         if result:
             order_id = result.get("orderId")
