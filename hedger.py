@@ -9,6 +9,7 @@ import asyncio
 import hmac
 import hashlib
 import time
+import json
 from typing import Optional, Dict
 from datetime import datetime
 
@@ -63,11 +64,18 @@ class BybitHedger:
         if self._session and not self._session.closed:
             await self._session.close()
     
-    def _sign(self, params: dict) -> dict:
+    def _sign(self, params: dict, is_post: bool = False) -> dict:
         """Подпись запроса для Bybit V5 API"""
         timestamp = str(int(time.time() * 1000))
-        params_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-        sign_str = f"{timestamp}{self.api_key}{5000}{params_str}"
+        recv_window = "5000"
+        
+        # Для POST - JSON строка, для GET - query string
+        if is_post:
+            params_str = json.dumps(params) if params else ""
+        else:
+            params_str = "&".join(f"{k}={v}" for k, v in sorted(params.items())) if params else ""
+        
+        sign_str = f"{timestamp}{self.api_key}{recv_window}{params_str}"
         
         signature = hmac.new(
             self.api_secret.encode('utf-8'),
@@ -79,7 +87,7 @@ class BybitHedger:
             "X-BAPI-API-KEY": self.api_key,
             "X-BAPI-TIMESTAMP": timestamp,
             "X-BAPI-SIGN": signature,
-            "X-BAPI-RECV-WINDOW": "5000"
+            "X-BAPI-RECV-WINDOW": recv_window
         }
         
         # Для Demo Trading нужен специальный хедер
@@ -96,7 +104,8 @@ class BybitHedger:
         
         params = params or {}
         url = f"{self.base_url}{endpoint}"
-        headers = self._sign(params)
+        is_post = method.upper() == "POST"
+        headers = self._sign(params, is_post=is_post)
         headers["Content-Type"] = "application/json"
         
         logger.info(f"[BYBIT] {method} {endpoint} params={params}")
@@ -108,7 +117,8 @@ class BybitHedger:
                 async with session.get(url, headers=headers, params=params) as resp:
                     data = await resp.json()
             else:
-                async with session.post(url, headers=headers, json=params) as resp:
+                # POST с JSON body
+                async with session.post(url, headers=headers, data=json.dumps(params)) as resp:
                     data = await resp.json()
             
             logger.info(f"[BYBIT] Response: retCode={data.get('retCode')}, retMsg={data.get('retMsg')}")
