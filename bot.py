@@ -1321,8 +1321,8 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     if amount > user['balance']:
-        await update.message.reply_text(f"❌ Недостаточно средств. Баланс: ${user['balance']:.2f}")
-        return
+        await update.message.reply_text(f"❌ Недостаточно средств. Баланс: ${user['balance']:.2f}\n\n💡 Введи другую сумму:")
+        return  # pending_trade сохраняется, можно ввести снова
     
     trade = context.user_data.pop('pending_trade')
     

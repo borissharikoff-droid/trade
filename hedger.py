@@ -337,10 +337,39 @@ class BybitHedger:
             order_id = result.get("orderId")
             self.hedge_positions[position_id] = order_id
             logger.info(f"[HEDGE] ✓ Открыто: {order_id}")
+            
+            # Если TP/SL не были установлены при открытии - ставим через trading-stop
+            if tp is not None or sl is not None:
+                await self.set_trading_stop(bybit_symbol, direction, tp, sl)
+            
             return order_id
         else:
             logger.error(f"[HEDGE] ✗ Ошибка открытия позиции")
             return None
+    
+    async def set_trading_stop(self, bybit_symbol: str, direction: str, tp: float = None, sl: float = None) -> bool:
+        """Установить TP/SL для открытой позиции"""
+        params = {
+            "category": "linear",
+            "symbol": bybit_symbol,
+            "positionIdx": 0
+        }
+        
+        if tp is not None:
+            params["takeProfit"] = str(round(tp, 4))
+        if sl is not None:
+            params["stopLoss"] = str(round(sl, 4))
+        
+        logger.info(f"[HEDGE] Устанавливаем TP/SL: {bybit_symbol} TP={tp} SL={sl}")
+        
+        result = await self._request("POST", "/v5/position/trading-stop", params)
+        
+        if result is not None:
+            logger.info(f"[HEDGE] ✓ TP/SL установлены")
+            return True
+        else:
+            logger.warning(f"[HEDGE] ⚠️ Не удалось установить TP/SL")
+            return False
     
     async def close_hedge(self, position_id: int, symbol: str, direction: str) -> bool:
         """
