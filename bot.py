@@ -607,7 +607,11 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         from aiosend import CryptoPay
         is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
-        cp = CryptoPay(token=crypto_token, is_testnet=is_testnet)
+        logger.info(f"[CRYPTO] Testnet mode: {is_testnet}")
+        cp = CryptoPay(crypto_token)
+        if is_testnet:
+            cp._network = "testnet"
+            cp._base_url = "https://testnet-pay.crypt.bot/api"
         
         invoice = await cp.create_invoice(
             amount=amount,
@@ -667,7 +671,10 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         from aiosend import CryptoPay
         is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
-        cp = CryptoPay(token=crypto_token, is_testnet=is_testnet)
+        cp = CryptoPay(crypto_token)
+        if is_testnet:
+            cp._network = "testnet"
+            cp._base_url = "https://testnet-pay.crypt.bot/api"
         
         invoices = await cp.get_invoices(invoice_ids=[invoice_id])
         
