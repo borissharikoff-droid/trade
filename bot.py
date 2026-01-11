@@ -1,8 +1,11 @@
 import logging
 import os
 import random
+import aiohttp
+import sqlite3
+import json
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
@@ -13,36 +16,411 @@ load_dotenv()
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ==================== DATABASE ====================
+DB_PATH = os.environ.get("DB_PATH", "bot_data.db")
+
+def init_db():
+    """Инициализация SQLite базы"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        balance REAL DEFAULT 100.0,
+        total_deposit REAL DEFAULT 100.0,
+        total_profit REAL DEFAULT 0.0,
+        trading INTEGER DEFAULT 0,
+        referrer_id INTEGER,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        symbol TEXT,
+        direction TEXT,
+        entry REAL,
+        current REAL,
+        sl REAL,
+        tp REAL,
+        amount REAL,
+        commission REAL,
+        pnl REAL DEFAULT 0,
+        opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        symbol TEXT,
+        direction TEXT,
+        entry REAL,
+        exit_price REAL,
+        sl REAL,
+        tp REAL,
+        amount REAL,
+        commission REAL,
+        pnl REAL,
+        reason TEXT,
+        opened_at TEXT,
+        closed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+    )''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        symbol TEXT,
+        target_price REAL,
+        direction TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        triggered INTEGER DEFAULT 0,
+        FOREIGN KEY (user_id) REFERENCES users(user_id)
+    )''')
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"[DB] Initialized: {DB_PATH}")
+
+def db_get_user(user_id: int) -> Dict:
+    """Получить пользователя из БД"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT balance, total_deposit, total_profit, trading FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    
+    if not row:
+        c.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
+        conn.commit()
+        logger.info(f"[DB] New user {user_id} created")
+        row = (100.0, 100.0, 0.0, 0)
+    
+    conn.close()
+    return {
+        'balance': row[0],
+        'total_deposit': row[1],
+        'total_profit': row[2],
+        'trading': bool(row[3])
+    }
+
+def db_update_user(user_id: int, **kwargs):
+    """Обновить данные пользователя"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    for key, value in kwargs.items():
+        if key == 'trading':
+            value = 1 if value else 0
+        c.execute(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
+    
+    conn.commit()
+    conn.close()
+
+def db_get_positions(user_id: int) -> List[Dict]:
+    """Получить открытые позиции"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM positions WHERE user_id = ?", (user_id,))
+    rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
+def db_add_position(user_id: int, pos: Dict) -> int:
+    """Добавить позицию"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""INSERT INTO positions 
+        (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
+         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0)))
+    pos_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info(f"[DB] Position {pos_id} added for user {user_id}")
+    return pos_id
+
+def db_update_position(pos_id: int, **kwargs):
+    """Обновить позицию"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    for key, value in kwargs.items():
+        c.execute(f"UPDATE positions SET {key} = ? WHERE id = ?", (value, pos_id))
+    conn.commit()
+    conn.close()
+
+def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
+    """Закрыть позицию и перенести в историю"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Получаем позицию
+    c.execute("SELECT * FROM positions WHERE id = ?", (pos_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return
+    
+    # Переносим в историю
+    c.execute("""INSERT INTO history 
+        (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (row[1], row[2], row[3], row[4], exit_price, row[6], row[7], row[8], row[9], pnl, reason, row[11]))
+    
+    # Удаляем из активных
+    c.execute("DELETE FROM positions WHERE id = ?", (pos_id,))
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"[DB] Position {pos_id} closed: {reason}, PnL: ${pnl:.2f}")
+
+def db_get_history(user_id: int, limit: int = 20) -> List[Dict]:
+    """Получить историю сделок"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM history WHERE user_id = ? ORDER BY closed_at DESC LIMIT ?", (user_id, limit))
+    rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
+# ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
+def db_set_referrer(user_id: int, referrer_id: int) -> bool:
+    """Установить реферера для пользователя"""
+    if user_id == referrer_id:
+        return False
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Проверяем что у юзера ещё нет реферера
+    c.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    if row and row[0]:
+        conn.close()
+        return False
+    
+    # Проверяем что реферер существует
+    c.execute("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,))
+    if not c.fetchone():
+        conn.close()
+        return False
+    
+    c.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, user_id))
+    conn.commit()
+    conn.close()
+    logger.info(f"[REF] User {user_id} referred by {referrer_id}")
+    return True
+
+def db_get_referrer(user_id: int) -> Optional[int]:
+    """Получить реферера пользователя"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row and row[0] else None
+
+def db_get_referrals_count(user_id: int) -> int:
+    """Количество рефералов пользователя"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
+    count = c.fetchone()[0]
+    conn.close()
+    return count
+
+def db_add_referral_bonus(referrer_id: int, amount: float):
+    """Добавить реферальный бонус"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, referrer_id))
+    conn.commit()
+    conn.close()
+    
+    # Обновляем кэш
+    if referrer_id in users_cache:
+        users_cache[referrer_id]['balance'] += amount
+    
+    logger.info(f"[REF] Bonus ${amount} added to {referrer_id}")
+
+# ==================== АЛЕРТЫ ====================
+def db_add_alert(user_id: int, symbol: str, target_price: float, direction: str) -> int:
+    """Добавить алерт"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO alerts (user_id, symbol, target_price, direction) VALUES (?, ?, ?, ?)",
+        (user_id, symbol, target_price, direction)
+    )
+    alert_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    logger.info(f"[ALERT] Created #{alert_id} for {user_id}: {symbol} {direction} ${target_price}")
+    return alert_id
+
+def db_get_active_alerts() -> List[Dict]:
+    """Получить все активные алерты"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM alerts WHERE triggered = 0")
+    rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
+def db_get_user_alerts(user_id: int) -> List[Dict]:
+    """Получить алерты пользователя"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM alerts WHERE user_id = ? AND triggered = 0", (user_id,))
+    rows = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return rows
+
+def db_trigger_alert(alert_id: int):
+    """Пометить алерт как сработавший"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE alerts SET triggered = 1 WHERE id = ?", (alert_id,))
+    conn.commit()
+    conn.close()
+
+def db_delete_alert(alert_id: int, user_id: int) -> bool:
+    """Удалить алерт"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM alerts WHERE id = ? AND user_id = ?", (alert_id, user_id))
+    deleted = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return deleted
+
+# Инициализация БД при старте
+init_db()
+
 # ==================== КОНФИГ ====================
 COMMISSION_PERCENT = 2.0  # Комиссия 2% за сделку
 MIN_DEPOSIT = 10  # Минимальный депозит $10
 STARS_RATE = 50  # 50 звёзд = $1
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]  # ID админов
+REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
 
-# ==================== ДАННЫЕ ПОЛЬЗОВАТЕЛЕЙ ====================
-users: Dict[int, Dict] = {}
-positions: Dict[int, List[Dict]] = {}
-history: Dict[int, List[Dict]] = {}
+# ==================== BINANCE API ====================
+BINANCE_API = "https://api.binance.com/api/v3"
+
+async def get_real_price(symbol: str) -> Optional[float]:
+    """Получить реальную цену с Binance"""
+    try:
+        binance_symbol = symbol.replace("/", "")  # BTC/USDT -> BTCUSDT
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{BINANCE_API}/ticker/price?symbol={binance_symbol}") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return float(data['price'])
+    except Exception as e:
+        logger.error(f"[BINANCE] Price fetch error for {symbol}: {e}")
+    return None
+
+# Кэш цен для уменьшения запросов
+price_cache: Dict[str, Dict] = {}  # {symbol: {'price': float, 'time': datetime}}
+CACHE_TTL = 3  # секунд
+
+async def get_cached_price(symbol: str) -> Optional[float]:
+    """Получить цену с кэшированием"""
+    now = datetime.now()
+    
+    if symbol in price_cache:
+        cache = price_cache[symbol]
+        age = (now - cache['time']).total_seconds()
+        if age < CACHE_TTL:
+            return cache['price']
+    
+    price = await get_real_price(symbol)
+    if price:
+        price_cache[symbol] = {'price': price, 'time': now}
+    return price
+
+# ==================== ДАННЫЕ (кэш в памяти) ====================
+users_cache: Dict[int, Dict] = {}
+positions_cache: Dict[int, List[Dict]] = {}
+rate_limits: Dict[int, Dict] = {}  # {user_id: {'count': int, 'reset': datetime}}
+
+# ==================== RATE LIMITING ====================
+MAX_REQUESTS_PER_MINUTE = 30
+
+def check_rate_limit(user_id: int) -> bool:
+    """Проверка лимита запросов. Возвращает True если лимит превышен."""
+    now = datetime.now()
+    
+    if user_id not in rate_limits:
+        rate_limits[user_id] = {'count': 1, 'reset': now}
+        return False
+    
+    user_limit = rate_limits[user_id]
+    
+    # Сброс каждую минуту
+    if (now - user_limit['reset']).total_seconds() > 60:
+        rate_limits[user_id] = {'count': 1, 'reset': now}
+        return False
+    
+    user_limit['count'] += 1
+    
+    if user_limit['count'] > MAX_REQUESTS_PER_MINUTE:
+        return True
+    
+    return False
 
 # ==================== УТИЛИТЫ ====================
 def get_user(user_id: int) -> Dict:
-    if user_id not in users:
-        users[user_id] = {
-            'balance': 100.0,  # Тестовый баланс $100
-            'total_deposit': 100.0,
-            'total_profit': 0.0,
-            'trading': False
-        }
-        logger.info(f"[USER] New user {user_id} created with $100 test balance")
-    if user_id not in positions:
-        positions[user_id] = []
-    if user_id not in history:
-        history[user_id] = []
-    return users[user_id]
+    """Получить пользователя (с кэшированием)"""
+    if user_id not in users_cache:
+        users_cache[user_id] = db_get_user(user_id)
+    return users_cache[user_id]
+
+def save_user(user_id: int):
+    """Сохранить пользователя в БД"""
+    if user_id in users_cache:
+        user = users_cache[user_id]
+        db_update_user(user_id, 
+            balance=user['balance'],
+            total_deposit=user['total_deposit'],
+            total_profit=user['total_profit'],
+            trading=user['trading']
+        )
+
+def get_positions(user_id: int) -> List[Dict]:
+    """Получить позиции (с кэшированием)"""
+    if user_id not in positions_cache:
+        positions_cache[user_id] = db_get_positions(user_id)
+    return positions_cache[user_id]
 
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    
+    # Rate limiting
+    if check_rate_limit(user_id):
+        if update.callback_query:
+            await update.callback_query.answer("⏳ Слишком много запросов", show_alert=True)
+        return
+    
     logger.info(f"[START] User {user_id}")
+    
+    # Обработка реферальной ссылки
+    if context.args and len(context.args) > 0:
+        ref_arg = context.args[0]
+        if ref_arg.startswith("ref_"):
+            try:
+                referrer_id = int(ref_arg.replace("ref_", ""))
+                if db_set_referrer(user_id, referrer_id):
+                    logger.info(f"[REF] User {user_id} registered via referral from {referrer_id}")
+            except ValueError:
+                pass
+    
     user = get_user(user_id)
     
     balance = user['balance']
@@ -61,13 +439,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("📊 Мои сделки", callback_data="trades")]
     ]
     
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-        except:
-            await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await update.callback_query.edit_message_text(text, reply_markup=reply_markup)
+        except Exception:
+            await context.bot.send_message(user_id, text, reply_markup=reply_markup)
     else:
-        await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await context.bot.send_message(user_id, text, reply_markup=reply_markup)
 
 # ==================== ПОПОЛНЕНИЕ ====================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -122,7 +502,7 @@ async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     try:
         await query.message.delete()
-    except:
+    except Exception:
         pass
     
     await context.bot.send_invoice(
@@ -146,10 +526,27 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     stars = payment.total_amount
     usd = stars // STARS_RATE
     
+    # Проверяем первый депозит для реферального бонуса
+    is_first_deposit = user['total_deposit'] == 100  # Начальный баланс
+    
     user['balance'] += usd
     user['total_deposit'] += usd
+    save_user(user_id)
     
     logger.info(f"[PAYMENT] User {user_id} deposited ${usd} via Stars")
+    
+    # Реферальный бонус при первом депозите
+    if is_first_deposit:
+        referrer_id = db_get_referrer(user_id)
+        if referrer_id:
+            db_add_referral_bonus(referrer_id, REFERRAL_BONUS)
+            try:
+                await context.bot.send_message(
+                    referrer_id,
+                    f"🎉 Твой реферал сделал депозит!\nБонус: +${REFERRAL_BONUS}"
+                )
+            except:
+                pass
     
     text = f"""✅ Оплата прошла!
 
@@ -185,7 +582,7 @@ async def pay_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    
+
     amount_map = {"crypto_10": 10, "crypto_25": 25, "crypto_50": 50, "crypto_100": 100}
     amount = amount_map.get(query.data, 10)
     user_id = update.effective_user.id
@@ -270,10 +667,26 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             amount = info['amount']
             
             user = get_user(user_id)
+            is_first_deposit = user['total_deposit'] == 100
+            
             user['balance'] += amount
             user['total_deposit'] += amount
+            save_user(user_id)
             
             logger.info(f"[CRYPTO] User {user_id} deposited ${amount}")
+            
+            # Реферальный бонус
+            if is_first_deposit:
+                referrer_id = db_get_referrer(user_id)
+                if referrer_id:
+                    db_add_referral_bonus(referrer_id, REFERRAL_BONUS)
+                    try:
+                        await context.bot.send_message(
+                            referrer_id,
+                            f"🎉 Твой реферал сделал депозит!\nБонус: +${REFERRAL_BONUS}"
+                        )
+                    except:
+                        pass
             
             text = f"""✅ Оплата получена!
 
@@ -304,6 +717,7 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     
     user['trading'] = not user['trading']
+    save_user(user_id)  # Сохраняем в БД
     logger.info(f"[TOGGLE] User {user_id} trading = {user['trading']}")
     await start(update, context)
 
@@ -314,11 +728,12 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     user_id = update.effective_user.id
     user = get_user(user_id)
-    user_positions = positions.get(user_id, [])
+    user_positions = get_positions(user_id)
     
     if not user_positions:
         total_profit = user.get('total_profit', 0)
-        trades_count = len(history.get(user_id, []))
+        user_history = db_get_history(user_id)
+        trades_count = len(user_history)
         pnl_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
         
         text = f"""📊 Мои сделки
@@ -335,58 +750,92 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     keyboard = []
     for pos in user_positions:
-        emoji = "🟢" if pos['pnl'] >= 0 else "🔴"
-        pnl_str = f"+${pos['pnl']:.2f}" if pos['pnl'] >= 0 else f"-${abs(pos['pnl']):.2f}"
-        text += f"{emoji} {pos['symbol']} | ${pos['amount']:.0f} | {pnl_str}\n"
-        keyboard.append([InlineKeyboardButton(f"❌ Закрыть {pos['symbol']}", callback_data=f"close_{pos['id']}")])
+        pnl = pos.get('pnl', 0)
+        emoji = "🟢" if pnl >= 0 else "🔴"
+        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+        ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+        text += f"{emoji} {ticker} | ${pos['amount']:.0f} | {pnl_str}\n"
+        keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_{pos['id']}")])
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
 # ==================== СИГНАЛЫ ====================
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Отправка сигнала пользователям с торговлей"""
+    """Отправка сигнала с реальной аналитикой"""
+    from analyzer import MarketAnalyzer
     
-    active_users = [uid for uid, u in users.items() if u.get('trading') and u.get('balance', 0) >= MIN_DEPOSIT]
+    active_users = [uid for uid, u in users_cache.items() if u.get('trading') and u.get('balance', 0) >= MIN_DEPOSIT]
     if not active_users:
         return
     
-    symbols = ["BTC", "ETH", "SOL", "BNB"]
-    symbol = random.choice(symbols)
-    direction = random.choice(["LONG", "SHORT"])
-    winrate = random.randint(70, 85)
+    # Анализируем несколько пар
+    symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
     
-    prices = {"BTC": 95000, "ETH": 3300, "SOL": 200, "BNB": 700}
-    entry = prices[symbol] * random.uniform(0.99, 1.01)
+    analyzer = MarketAnalyzer()
+    best_signal = None
     
-    if direction == "LONG":
-        tp = entry * 1.03
-        sl = entry * 0.985
-    else:
-        tp = entry * 0.97
-        sl = entry * 1.015
+    try:
+        # Ищем лучший сигнал
+        for symbol in symbols:
+            analysis = await analyzer.analyze_signal(symbol)
+            if analysis:
+                if best_signal is None or analysis['confidence'] > best_signal['confidence']:
+                    best_signal = analysis
+        
+        if not best_signal:
+            logger.info("[SIGNAL] Нет качественных сигналов")
+            return
+        
+        # Получаем Entry, SL, TP
+        price_data = await analyzer.calculate_entry_price(
+            best_signal['symbol'], 
+            best_signal['direction'],
+            best_signal
+        )
+        
+        symbol = best_signal['symbol']
+        direction = best_signal['direction']
+        entry = price_data['entry_price']
+        sl = price_data['stop_loss']
+        tp = price_data['take_profit']
+        winrate = int(price_data['success_rate'])
+        
+        # Потенциальный профит
+        if direction == "LONG":
+            potential_profit = ((tp - entry) / entry) * 100
+        else:
+            potential_profit = ((entry - tp) / entry) * 100
+        
+    finally:
+        await analyzer.close()
     
-    potential_profit = 3.0  # ~3% потенциал
-    
+    # Отправляем активным юзерам
     for user_id in active_users:
         user = get_user(user_id)
         balance = user['balance']
         
-        # Предложить сумму от баланса
-        suggested = min(balance * 0.3, 100)  # 30% баланса или $100 макс
-        if suggested < 10:
+        if balance < 10:
             continue
         
         emoji = "🟢" if direction == "LONG" else "🔴"
+        ticker = symbol.split("/")[0]
         
-        text = f"""{emoji} {direction} {symbol}
+        # Индикаторы для текста
+        indicators = best_signal.get('indicators', {})
+        rsi = indicators.get('rsi', 50)
+        adx = indicators.get('adx', 25)
+        
+        text = f"""{emoji} {direction} {ticker}
 
 📊 Винрейт: {winrate}%
 💰 Потенциал: +{potential_profit:.1f}%
+📍 Вход: ${entry:,.2f}
+
+RSI: {rsi:.0f} | ADX: {adx:.0f}
 
 Сумма сделки:"""
         
-        # Кодируем: sym|dir|entry|sl|tp|amt
         d = 'L' if direction == "LONG" else 'S'
         amounts = [10, 25, 50, 100]
         amounts = [a for a in amounts if a <= balance]
@@ -414,6 +863,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         
         try:
             await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard))
+            logger.info(f"[SIGNAL] Sent {direction} {ticker} @ ${entry:.2f} (WR={winrate}%) to {user_id}")
         except Exception as e:
             logger.error(f"[SIGNAL] Error sending to {user_id}: {e}")
 
@@ -449,10 +899,9 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Комиссия за открытие
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
+    save_user(user_id)  # Сохраняем в БД
     
-    pos_id = len(positions[user_id]) + 1
     position = {
-        'id': pos_id,
         'symbol': symbol,
         'direction': direction,
         'amount': amount,
@@ -460,18 +909,24 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         'current': entry,
         'sl': sl,
         'tp': tp,
-        'pnl': -commission,  # Начинаем с минуса комиссии
-        'commission': commission,
-        'time': datetime.now()
+        'pnl': -commission,
+        'commission': commission
     }
     
-    positions[user_id].append(position)
+    pos_id = db_add_position(user_id, position)
+    position['id'] = pos_id
+    
+    # Обновляем кэш
+    if user_id not in positions_cache:
+        positions_cache[user_id] = []
+    positions_cache[user_id].append(position)
     
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}")
     
+    ticker = symbol.split("/")[0] if "/" in symbol else symbol
     text = f"""✅ Сделка открыта!
 
-{symbol} {direction}
+{ticker} {direction}
 Сумма: ${amount:.0f}
 Комиссия: ${commission:.2f}
 
@@ -486,6 +941,7 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     user_id = update.effective_user.id
     user = get_user(user_id)
+    user_positions = get_positions(user_id)
     
     try:
         pos_id = int(query.data.split("_")[1])
@@ -493,31 +949,31 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("Ошибка данных", show_alert=True)
         return
     
-    pos = next((p for p in positions[user_id] if p['id'] == pos_id), None)
+    pos = next((p for p in user_positions if p['id'] == pos_id), None)
     
     if not pos:
         await query.answer("Позиция не найдена", show_alert=True)
         return
     
     # Закрываем с текущим PnL
-    pnl = pos['pnl']
+    pnl = pos.get('pnl', 0)
     returned = pos['amount'] + pnl
     
     user['balance'] += returned
     user['total_profit'] += pnl
+    save_user(user_id)  # Сохраняем в БД
     
-    positions[user_id].remove(pos)
-    
-    pos['closed'] = datetime.now()
-    pos['final_pnl'] = pnl
-    history[user_id].append(pos)
+    # Закрываем в БД и удаляем из кэша
+    db_close_position(pos_id, pos['current'], pnl, 'MANUAL')
+    user_positions.remove(pos)
     
     emoji = "🟢" if pnl >= 0 else "🔴"
     pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
     
+    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
     text = f"""{emoji} Сделка закрыта!
 
-{pos['symbol']} {pos['direction']}
+{ticker} {pos['direction']}
 P&L: {pnl_str}
 
 Баланс: ${user['balance']:.2f}"""
@@ -542,14 +998,20 @@ async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обновление цен и PnL"""
-    for user_id, user_positions in positions.items():
+    """Обновление цен и PnL с реальными данными Binance"""
+    for user_id, user_positions in positions_cache.items():
         user = get_user(user_id)
         
         for pos in user_positions[:]:  # копия для безопасного удаления
-            # Случайное движение цены
-            change = random.uniform(-0.005, 0.006)  # небольшой положительный bias
-            pos['current'] = pos['entry'] * (1 + change)
+            # Получаем реальную цену с Binance
+            real_price = await get_cached_price(pos['symbol'])
+            
+            if real_price:
+                pos['current'] = real_price
+            else:
+                # Фоллбэк на симуляцию если API недоступен
+                change = random.uniform(-0.003, 0.004)
+                pos['current'] = pos['current'] * (1 + change)
             
             # PnL
             if pos['direction'] == "LONG":
@@ -558,6 +1020,9 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
             
             pos['pnl'] = pos['amount'] * pnl_percent - pos['commission']
+            
+            # Обновляем в БД
+            db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
             
             # Автозакрытие по TP/SL
             if pos['direction'] == "LONG":
@@ -571,20 +1036,20 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 returned = pos['amount'] + pos['pnl']
                 user['balance'] += returned
                 user['total_profit'] += pos['pnl']
+                save_user(user_id)  # Сохраняем баланс в БД
                 
-                pos['closed'] = datetime.now()
-                pos['final_pnl'] = pos['pnl']
-                pos['reason'] = 'TP' if hit_tp else 'SL'
-                history[user_id].append(pos)
+                reason = 'TP' if hit_tp else 'SL'
+                db_close_position(pos['id'], pos['current'], pos['pnl'], reason)
                 user_positions.remove(pos)
                 
                 emoji = "🎯" if hit_tp else "🛡️"
                 result = "Take Profit" if hit_tp else "Stop Loss"
                 pnl_str = f"+${pos['pnl']:.2f}" if pos['pnl'] >= 0 else f"-${abs(pos['pnl']):.2f}"
                 
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                 text = f"""{emoji} {result}!
 
-{pos['symbol']} {pos['direction']}
+{ticker} {pos['direction']}
 P&L: {pnl_str}
 Баланс: ${user['balance']:.2f}"""
                 
@@ -595,6 +1060,273 @@ P&L: {pnl_str}
                     )
                 except:
                     pass
+
+# ==================== АДМИН-ПАНЕЛЬ ====================
+def db_get_stats() -> Dict:
+    """Статистика для админов"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute("SELECT COUNT(*), SUM(balance), SUM(total_deposit), SUM(total_profit) FROM users")
+    row = c.fetchone()
+    users_count = row[0] or 0
+    total_balance = row[1] or 0
+    total_deposits = row[2] or 0
+    total_profit = row[3] or 0
+    
+    c.execute("SELECT COUNT(*) FROM users WHERE trading = 1")
+    active_traders = c.fetchone()[0] or 0
+    
+    c.execute("SELECT COUNT(*) FROM positions")
+    open_positions = c.fetchone()[0] or 0
+    
+    c.execute("SELECT COUNT(*), SUM(pnl) FROM history")
+    row = c.fetchone()
+    total_trades = row[0] or 0
+    realized_pnl = row[1] or 0
+    
+    # Комиссии (2% от суммы всех сделок)
+    c.execute("SELECT SUM(commission) FROM history")
+    commissions = c.fetchone()[0] or 0
+    c.execute("SELECT SUM(commission) FROM positions")
+    commissions += c.fetchone()[0] or 0
+    
+    conn.close()
+    
+    return {
+        'users': users_count,
+        'active_traders': active_traders,
+        'total_balance': total_balance,
+        'total_deposits': total_deposits,
+        'total_profit': total_profit,
+        'open_positions': open_positions,
+        'total_trades': total_trades,
+        'realized_pnl': realized_pnl,
+        'commissions': commissions
+    }
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Админ-панель"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    stats = db_get_stats()
+    
+    text = f"""📊 АДМИН-ПАНЕЛЬ
+
+👥 Пользователи: {stats['users']}
+🟢 Активных: {stats['active_traders']}
+
+💰 Общий баланс: ${stats['total_balance']:.2f}
+📥 Всего депозитов: ${stats['total_deposits']:.2f}
+📈 Общий профит: ${stats['total_profit']:.2f}
+
+📋 Открытых позиций: {stats['open_positions']}
+✅ Всего сделок: {stats['total_trades']}
+💵 Реализованный P&L: ${stats['realized_pnl']:.2f}
+
+🏦 Заработано комиссий: ${stats['commissions']:.2f}"""
+    
+    await update.message.reply_text(text)
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Рассылка всем пользователям"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /broadcast <сообщение>")
+        return
+    
+    message = " ".join(context.args)
+    
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    all_users = [row[0] for row in c.fetchall()]
+    conn.close()
+    
+    sent = 0
+    failed = 0
+    
+    for uid in all_users:
+        try:
+            await context.bot.send_message(uid, f"📢 {message}")
+            sent += 1
+        except:
+            failed += 1
+    
+    await update.message.reply_text(f"✅ Отправлено: {sent}\n❌ Ошибок: {failed}")
+
+# ==================== РЕФЕРАЛЬНАЯ КОМАНДА ====================
+async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Реферальная ссылка"""
+    user_id = update.effective_user.id
+    bot_username = (await context.bot.get_me()).username
+    
+    ref_count = db_get_referrals_count(user_id)
+    ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    
+    text = f"""🤝 Реферальная программа
+
+Приглашай друзей и получай ${REFERRAL_BONUS} за каждого!
+
+📊 Твои рефералы: {ref_count}
+💰 Бонус за реферала: ${REFERRAL_BONUS}
+
+🔗 Твоя ссылка:
+{ref_link}"""
+    
+    await update.message.reply_text(text)
+
+# ==================== АЛЕРТЫ КОМАНДЫ ====================
+async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Создать или показать алерты. /alert BTC 100000 или /alert"""
+    user_id = update.effective_user.id
+    
+    if not context.args or len(context.args) == 0:
+        # Показать алерты
+        alerts = db_get_user_alerts(user_id)
+        if not alerts:
+            await update.message.reply_text("🔔 У тебя нет активных алертов\n\nСоздать: /alert BTC 100000")
+            return
+        
+        text = "🔔 Твои алерты:\n\n"
+        for a in alerts:
+            ticker = a['symbol'].split("/")[0] if "/" in a['symbol'] else a['symbol']
+            direction = "⬆️" if a['direction'] == 'above' else "⬇️"
+            text += f"#{a['id']} {ticker} {direction} ${a['target_price']:,.0f}\n"
+        
+        text += "\nУдалить: /delalert <id>"
+        await update.message.reply_text(text)
+        return
+    
+    # Создать алерт: /alert BTC 100000
+    if len(context.args) < 2:
+        await update.message.reply_text("Использование: /alert BTC 100000")
+        return
+    
+    ticker = context.args[0].upper()
+    symbol = f"{ticker}/USDT"
+    
+    try:
+        target_price = float(context.args[1].replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("❌ Неверная цена")
+        return
+    
+    # Получаем текущую цену
+    current_price = await get_real_price(symbol)
+    if not current_price:
+        await update.message.reply_text(f"❌ Не найден {ticker}")
+        return
+    
+    # Определяем направление
+    direction = "above" if target_price > current_price else "below"
+    
+    alert_id = db_add_alert(user_id, symbol, target_price, direction)
+    
+    emoji = "⬆️" if direction == "above" else "⬇️"
+    text = f"""🔔 Алерт создан!
+
+{ticker} {emoji} ${target_price:,.0f}
+Сейчас: ${current_price:,.2f}
+
+Уведомим когда цена достигнет цели."""
+    
+    await update.message.reply_text(text)
+
+async def delete_alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удалить алерт: /delalert <id>"""
+    user_id = update.effective_user.id
+    
+    if not context.args:
+        await update.message.reply_text("Использование: /delalert <id>")
+        return
+    
+    try:
+        alert_id = int(context.args[0].replace("#", ""))
+    except ValueError:
+        await update.message.reply_text("❌ Неверный ID")
+        return
+    
+    if db_delete_alert(alert_id, user_id):
+        await update.message.reply_text(f"✅ Алерт #{alert_id} удалён")
+    else:
+        await update.message.reply_text("❌ Алерт не найден")
+
+async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job для проверки алертов"""
+    alerts = db_get_active_alerts()
+    
+    if not alerts:
+        return
+    
+    # Группируем по символам
+    symbols = set(a['symbol'] for a in alerts)
+    prices = {}
+    
+    for symbol in symbols:
+        price = await get_real_price(symbol)
+        if price:
+            prices[symbol] = price
+    
+    for alert in alerts:
+        symbol = alert['symbol']
+        if symbol not in prices:
+            continue
+        
+        current_price = prices[symbol]
+        target = alert['target_price']
+        direction = alert['direction']
+        
+        triggered = False
+        if direction == 'above' and current_price >= target:
+            triggered = True
+        elif direction == 'below' and current_price <= target:
+            triggered = True
+        
+        if triggered:
+            db_trigger_alert(alert['id'])
+            
+            ticker = symbol.split("/")[0] if "/" in symbol else symbol
+            emoji = "🚀" if direction == 'above' else "📉"
+            
+            text = f"""{emoji} АЛЕРТ!
+
+{ticker} достиг ${target:,.0f}
+Сейчас: ${current_price:,.2f}"""
+            
+            try:
+                await context.bot.send_message(alert['user_id'], text)
+                logger.info(f"[ALERT] Triggered #{alert['id']} for {alert['user_id']}")
+            except:
+                pass
+
+# ==================== ИСТОРИЯ СДЕЛОК ====================
+async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """История сделок пользователя"""
+    user_id = update.effective_user.id
+    trades = db_get_history(user_id, limit=10)
+    
+    if not trades:
+        await update.message.reply_text("📜 История пуста")
+        return
+    
+    text = "📜 Последние сделки:\n\n"
+    for t in trades:
+        emoji = "🟢" if t['pnl'] >= 0 else "🔴"
+        pnl_str = f"+${t['pnl']:.2f}" if t['pnl'] >= 0 else f"-${abs(t['pnl']):.2f}"
+        ticker = t['symbol'].split("/")[0] if "/" in t['symbol'] else t['symbol']
+        text += f"{emoji} {ticker} {t['direction']} | {pnl_str} | {t['reason']}\n"
+    
+    await update.message.reply_text(text)
 
 # ==================== MAIN ====================
 def main() -> None:
@@ -607,6 +1339,12 @@ def main() -> None:
     
     # Команды
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("broadcast", broadcast))
+    app.add_handler(CommandHandler("history", history_cmd))
+    app.add_handler(CommandHandler("ref", referral_cmd))
+    app.add_handler(CommandHandler("alert", alert_cmd))
+    app.add_handler(CommandHandler("delalert", delete_alert_cmd))
     
     # Оплата Stars
     app.add_handler(PreCheckoutQueryHandler(precheckout))
@@ -630,17 +1368,60 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(unknown_callback))
     
     # Jobs
+    # Error handler
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error(f"Exception: {context.error}", exc_info=context.error)
+        if update and hasattr(update, 'effective_user'):
+            try:
+                await context.bot.send_message(
+                    update.effective_user.id, 
+                    "⚠️ Произошла ошибка. Попробуйте позже."
+                )
+            except:
+                pass
+    
+    app.add_error_handler(error_handler)
+    
     if app.job_queue:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
         app.job_queue.run_repeating(send_signal, interval=60, first=10)
-        logger.info("[JOBS] JobQueue configured")
+        app.job_queue.run_repeating(check_alerts, interval=30, first=15)
+        logger.info("[JOBS] JobQueue configured (positions, signals, alerts)")
     else:
-        logger.warning("[JOBS] JobQueue NOT available! Install: pip install 'python-telegram-bot[job-queue]'")
+        logger.warning("[JOBS] JobQueue NOT available!")
     
     logger.info("=" * 40)
     logger.info("BOT STARTED")
     logger.info("=" * 40)
-    app.run_polling(drop_pending_updates=True)
+    
+    # Graceful shutdown
+    import signal as sig
+    
+    def shutdown(signum, frame):
+        logger.info("Shutting down gracefully...")
+        for user_id in users_cache:
+            save_user(user_id)
+        logger.info("Data saved. Goodbye!")
+    
+    sig.signal(sig.SIGTERM, shutdown)
+    sig.signal(sig.SIGINT, shutdown)
+    
+    # Выбор режима: webhook или polling
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+    PORT = int(os.getenv("PORT", 8443))
+    
+    if WEBHOOK_URL:
+        logger.info(f"[MODE] Webhook: {WEBHOOK_URL}")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=token,
+            webhook_url=f"{WEBHOOK_URL}/{token}",
+            drop_pending_updates=True
+        )
+    else:
+        logger.info("[MODE] Polling")
+        app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
