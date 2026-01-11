@@ -12,6 +12,8 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Labeled
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 from telegram.error import BadRequest
 
+from hedger import hedge_open, hedge_close, is_hedging_enabled
+
 load_dotenv()
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
@@ -552,7 +554,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
             except:
                 pass
-    
+        
     text = f"""✅ Оплата прошла!
 
 Зачислено: ${usd}
@@ -691,8 +693,8 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 
                 if not data.get("ok") or not data.get("result", {}).get("items"):
                     await query.answer("Платёж ещё не получен", show_alert=True)
-                    return
-                
+        return
+    
                 invoice = data["result"]["items"][0]
         
         if invoice.get("status") == "paid":
@@ -715,7 +717,7 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 if referrer_id:
                     db_add_referral_bonus(referrer_id, REFERRAL_BONUS)
                     try:
-                        await context.bot.send_message(
+    await context.bot.send_message(
                             referrer_id,
                             f"🎉 Твой реферал сделал депозит!\nБонус: +${REFERRAL_BONUS}"
                         )
@@ -973,6 +975,14 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         positions_cache[user_id] = []
     positions_cache[user_id].append(position)
     
+    # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit ===
+    if await is_hedging_enabled():
+        hedge_result = await hedge_open(pos_id, symbol, direction, amount)
+        if hedge_result:
+            logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
+        else:
+            logger.warning(f"[HEDGE] ✗ Failed to hedge position {pos_id}")
+    
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
@@ -1012,6 +1022,14 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not pos:
         await query.answer("Позиция не найдена", show_alert=True)
         return
+    
+    # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit ===
+    if await is_hedging_enabled():
+        hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'])
+        if hedge_result:
+            logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit")
+        else:
+            logger.warning(f"[HEDGE] ✗ Failed to close hedge for position {pos_id}")
     
     # Закрываем с текущим PnL
     pnl = pos.get('pnl', 0)
@@ -1207,6 +1225,11 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 hit_sl = pos['current'] >= pos['sl']
             
             if hit_tp or hit_sl:
+                # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit ===
+                if await is_hedging_enabled():
+                    await hedge_close(pos['id'], pos['symbol'], pos['direction'])
+                    logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit")
+                
                 returned = pos['amount'] + pos['pnl']
                 user['balance'] += returned
                 user['total_profit'] += pos['pnl']
@@ -1440,7 +1463,7 @@ async def delete_alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if db_delete_alert(alert_id, user_id):
         await update.message.reply_text(f"✅ Алерт #{alert_id} удалён")
-    else:
+        else:
         await update.message.reply_text("❌ Алерт не найден")
 
 async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
