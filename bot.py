@@ -1223,11 +1223,12 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("Позиция не найдена", show_alert=True)
         return
     
-    # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit ===
+    # === ХЕДЖИРОВАНИЕ: закрываем ЧАСТИЧНО позицию на Bybit (только долю юзера) ===
     if await is_hedging_enabled():
-        hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'])
+        user_amount_on_bybit = pos['amount'] * LEVERAGE  # Размер позиции юзера на Bybit
+        hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], user_amount_on_bybit)
         if hedge_result:
-            logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit")
+            logger.info(f"[HEDGE] ✓ Position {pos_id} partially closed on Bybit (${user_amount_on_bybit})")
         else:
             logger.warning(f"[HEDGE] ✗ Failed to close hedge for position {pos_id}")
     
@@ -1464,10 +1465,11 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 hit_sl = pos['current'] >= pos['sl']
             
             if hit_tp or hit_sl:
-                # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit ===
+                # === ХЕДЖИРОВАНИЕ: закрываем ЧАСТИЧНО позицию на Bybit (только долю юзера) ===
                 if await is_hedging_enabled():
-                    await hedge_close(pos['id'], pos['symbol'], pos['direction'])
-                    logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit")
+                    user_amount_on_bybit = pos['amount'] * LEVERAGE
+                    await hedge_close(pos['id'], pos['symbol'], pos['direction'], user_amount_on_bybit)
+                    logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit (${user_amount_on_bybit})")
                 
                 returned = pos['amount'] + pos['pnl']
                 user['balance'] += returned
@@ -1798,7 +1800,8 @@ async def test_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if result:
         await update.message.reply_text(f"✅ Хедж ОТКРЫТ!\nOrder ID: {result}\n\n⏳ Закрываю через 5 сек...")
         await asyncio.sleep(5)
-        close_result = await hedge_close(999999, "BTC/USDT", "LONG")
+        # Тест: закрываем на $10 (тестовая сумма)
+        close_result = await hedge_close(999999, "BTC/USDT", "LONG", 10.0)
         if close_result:
             await update.message.reply_text("✅ Хедж ЗАКРЫТ!")
         else:
