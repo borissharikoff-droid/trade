@@ -1246,10 +1246,16 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     pnl_abs = abs(pnl)
     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
     
-    if pnl >= 0:
+    if pnl > 0:
         text = f"""🎉 <b>Поздравляем!</b>
 
-Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}!
+Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
+
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
+    elif pnl == 0:
+        text = f"""✅ <b>Сделка закрыта</b>
+
+{ticker}: <b>$0</b> (в безубыток)
 
 💰 Баланс: <b>${user['balance']:.0f}</b>"""
     else:
@@ -1481,6 +1487,12 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
 
 📍 {format_price(pos['entry'])} → {format_price(pos['current'])}
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
+                elif pnl == 0:
+                    text = f"""✅ <b>Сделка закрыта</b>
+
+{ticker}: <b>$0</b> (в безубыток)
+
 💰 Баланс: <b>${user['balance']:.0f}</b>"""
                 else:
                     text = f"""📉 <b>Stop Loss</b>

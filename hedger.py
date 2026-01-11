@@ -151,9 +151,22 @@ class BybitHedger:
             logger.error(f"[BYBIT] Request error: {e}")
             return None
     
+    def _to_bybit_symbol(self, symbol: str) -> str:
+        """Конвертация символа в формат Bybit"""
+        # Маппинг символов (Binance -> Bybit)
+        SYMBOL_MAP = {
+            "MATIC": "POL",  # MATIC переименован в POL
+        }
+        
+        bybit_symbol = symbol.replace("/", "")
+        for old, new in SYMBOL_MAP.items():
+            bybit_symbol = bybit_symbol.replace(old, new)
+        
+        return bybit_symbol
+    
     async def get_price(self, symbol: str) -> Optional[float]:
         """Получить текущую цену"""
-        bybit_symbol = symbol.replace("/", "")  # BTC/USDT -> BTCUSDT
+        bybit_symbol = self._to_bybit_symbol(symbol)
         
         try:
             session = await self._get_session()
@@ -199,7 +212,7 @@ class BybitHedger:
     
     async def set_leverage(self, symbol: str, leverage: int = 20) -> bool:
         """Установить плечо для символа на Bybit"""
-        bybit_symbol = symbol.replace("/", "")
+        bybit_symbol = self._to_bybit_symbol(symbol)
         
         params = {
             "category": "linear",
@@ -243,7 +256,7 @@ class BybitHedger:
             logger.info(f"[HEDGE] Пропуск (Bybit не настроен): {symbol} {direction} ${amount_usd}")
             return None
         
-        bybit_symbol = symbol.replace("/", "")
+        bybit_symbol = self._to_bybit_symbol(symbol)
         side = "Buy" if direction == "LONG" else "Sell"
         
         # Устанавливаем плечо x20 перед открытием
@@ -258,18 +271,32 @@ class BybitHedger:
         # Количество в базовой валюте
         qty = amount_usd / price
         
-        # Округляем в зависимости от монеты
-        if "BTC" in symbol:
-            qty = round(qty, 3)
-        elif "ETH" in symbol:
-            qty = round(qty, 2)
-        else:
-            qty = round(qty, 1)
+        # Bybit контракты: точность и минимумы для каждой монеты
+        # https://bybit-exchange.github.io/docs/v5/enum#symbol
+        BYBIT_SPECS = {
+            "BTC": {"precision": 3, "min_qty": 0.001},
+            "ETH": {"precision": 2, "min_qty": 0.01},
+            "SOL": {"precision": 1, "min_qty": 0.1},
+            "BNB": {"precision": 2, "min_qty": 0.01},
+            "XRP": {"precision": 0, "min_qty": 1},
+            "DOGE": {"precision": 0, "min_qty": 1},
+            "AVAX": {"precision": 1, "min_qty": 0.1},
+            "LINK": {"precision": 1, "min_qty": 0.1},
+            "MATIC": {"precision": 0, "min_qty": 1},  # POL на Bybit
+            "ARB": {"precision": 0, "min_qty": 1},
+            "OP": {"precision": 1, "min_qty": 0.1},
+            "APT": {"precision": 1, "min_qty": 0.1},
+        }
         
-        # Минимальный размер
-        min_qty = 0.001 if "BTC" in symbol else 0.01
+        # Определяем спецификации для монеты
+        coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
+        spec = BYBIT_SPECS.get(coin, {"precision": 1, "min_qty": 0.1})
+        
+        qty = round(qty, spec["precision"])
+        min_qty = spec["min_qty"]
+        
         if qty < min_qty:
-            logger.warning(f"[HEDGE] Слишком маленький размер: {qty} < {min_qty}")
+            logger.warning(f"[HEDGE] Размер {qty} < min {min_qty}, увеличиваем")
             qty = min_qty
         
         params = {
@@ -330,7 +357,7 @@ class BybitHedger:
         if not self.enabled:
             return True
         
-        bybit_symbol = symbol.replace("/", "")
+        bybit_symbol = self._to_bybit_symbol(symbol)
         # Для закрытия LONG нужен Sell, для SHORT - Buy
         side = "Sell" if direction == "LONG" else "Buy"
         
@@ -385,7 +412,7 @@ class BybitHedger:
         if not self.enabled:
             return None
         
-        bybit_symbol = symbol.replace("/", "")
+        bybit_symbol = self._to_bybit_symbol(symbol)
         
         result = await self._request("GET", "/v5/position/list", {
             "category": "linear",
