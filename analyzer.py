@@ -878,26 +878,21 @@ class MarketAnalyzer:
                       context_score * context_weight +
                       mtf['score'] * mtf_weight)
         
-        # Определение направления
-        if total_score > 0.58:
+        # Определение направления (более мягкие пороги)
+        if total_score > 0.55:
             direction = "LONG"
-        elif total_score < 0.42:
+        elif total_score < 0.45:
             direction = "SHORT"
         else:
             logger.info(f"[ANALYZER] Нет четкого сигнала (score={total_score:.2f})")
             return None
         
-        # Проверка согласованности с контекстом
-        if direction == "LONG" and market_context['bias'] in ["SHORT", "STRONG_SHORT"]:
-            logger.info(f"[ANALYZER] Конфликт: сигнал LONG, но контекст медвежий")
+        # Проверка согласованности с контекстом (только сильные конфликты)
+        if direction == "LONG" and market_context['bias'] == "STRONG_SHORT":
+            logger.info(f"[ANALYZER] Конфликт: сигнал LONG, но контекст сильно медвежий")
             return None
-        if direction == "SHORT" and market_context['bias'] in ["LONG", "STRONG_LONG"]:
-            logger.info(f"[ANALYZER] Конфликт: сигнал SHORT, но контекст бычий")
-            return None
-        
-        # Нейтральный контекст — пропускаем
-        if market_context['bias'] == "NEUTRAL":
-            logger.info(f"[ANALYZER] Контекст нейтрален — пропускаем сигнал")
+        if direction == "SHORT" and market_context['bias'] == "STRONG_LONG":
+            logger.info(f"[ANALYZER] Конфликт: сигнал SHORT, но контекст сильно бычий")
             return None
         
         # Confidence с учётом силы контекста и MTF
@@ -907,8 +902,8 @@ class MarketAnalyzer:
         div_bonus = 0.1 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
         confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
-        # Минимальный порог
-        if confidence < 0.20:
+        # Минимальный порог (снижен для большего количества сигналов)
+        if confidence < 0.10:
             logger.info(f"[ANALYZER] Низкая уверенность ({confidence:.2%})")
             return None
         
