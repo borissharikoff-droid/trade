@@ -2,7 +2,6 @@ import logging
 import os
 import random
 import aiohttp
-import sqlite3
 import json
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -20,174 +19,259 @@ logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ==================== DATABASE ====================
+DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_PATH = os.environ.get("DB_PATH", "bot_data.db")
 
-def init_db():
-    """Инициализация SQLite базы"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+# Определяем тип БД
+USE_POSTGRES = DATABASE_URL is not None
+
+if USE_POSTGRES:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    logger.info("[DB] Using PostgreSQL")
+else:
+    import sqlite3
+    logger.info("[DB] Using SQLite")
+
+def get_connection():
+    """Получить подключение к БД"""
+    if USE_POSTGRES:
+        return psycopg2.connect(DATABASE_URL)
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+def run_sql(query: str, params: tuple = (), fetch: str = None):
+    """
+    Выполнить SQL запрос с автоматической конвертацией placeholder'ов
+    fetch: None, 'one', 'all', 'id' (lastrowid)
+    """
+    conn = get_connection()
     
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        balance REAL DEFAULT 100.0,
-        total_deposit REAL DEFAULT 100.0,
-        total_profit REAL DEFAULT 0.0,
-        trading INTEGER DEFAULT 0,
-        referrer_id INTEGER,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )''')
+    if USE_POSTGRES:
+        query = query.replace("?", "%s")
+        if fetch == 'all' or fetch == 'one':
+            c = conn.cursor(cursor_factory=RealDictCursor)
+        else:
+            c = conn.cursor()
+    else:
+        c = conn.cursor()
     
-    c.execute('''CREATE TABLE IF NOT EXISTS positions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        symbol TEXT,
-        direction TEXT,
-        entry REAL,
-        current REAL,
-        sl REAL,
-        tp REAL,
-        amount REAL,
-        commission REAL,
-        pnl REAL DEFAULT 0,
-        opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(user_id)
-    )''')
+    c.execute(query, params)
     
-    c.execute('''CREATE TABLE IF NOT EXISTS history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        symbol TEXT,
-        direction TEXT,
-        entry REAL,
-        exit_price REAL,
-        sl REAL,
-        tp REAL,
-        amount REAL,
-        commission REAL,
-        pnl REAL,
-        reason TEXT,
-        opened_at TEXT,
-        closed_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users(user_id)
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS alerts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        symbol TEXT,
-        target_price REAL,
-        direction TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        triggered INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users(user_id)
-    )''')
+    result = None
+    if fetch == "one":
+        row = c.fetchone()
+        result = dict(row) if row else None
+    elif fetch == "all":
+        rows = c.fetchall()
+        result = [dict(r) for r in rows] if rows else []
+    elif fetch == "id":
+        if USE_POSTGRES:
+            # Для PostgreSQL используем RETURNING id
+            result = c.fetchone()[0] if 'RETURNING' in query.upper() else None
+        else:
+            result = c.lastrowid
     
     conn.commit()
     conn.close()
-    logger.info(f"[DB] Initialized: {DB_PATH}")
+    return result
+
+def init_db():
+    """Инициализация базы данных"""
+    conn = get_connection()
+    c = conn.cursor()
+    
+    if USE_POSTGRES:
+        # PostgreSQL синтаксис
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
+            balance REAL DEFAULT 100.0,
+            total_deposit REAL DEFAULT 100.0,
+            total_profit REAL DEFAULT 0.0,
+            trading INTEGER DEFAULT 0,
+            referrer_id BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS positions (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            symbol TEXT,
+            direction TEXT,
+            entry REAL,
+            current REAL,
+            sl REAL,
+            tp REAL,
+            amount REAL,
+            commission REAL,
+            pnl REAL DEFAULT 0,
+            opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS history (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            symbol TEXT,
+            direction TEXT,
+            entry REAL,
+            exit_price REAL,
+            sl REAL,
+            tp REAL,
+            amount REAL,
+            commission REAL,
+            pnl REAL,
+            reason TEXT,
+            opened_at TIMESTAMP,
+            closed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS alerts (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            symbol TEXT,
+            target_price REAL,
+            direction TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            triggered INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+    else:
+        # SQLite синтаксис
+        c.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            balance REAL DEFAULT 100.0,
+            total_deposit REAL DEFAULT 100.0,
+            total_profit REAL DEFAULT 0.0,
+            trading INTEGER DEFAULT 0,
+            referrer_id INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            symbol TEXT,
+            direction TEXT,
+            entry REAL,
+            current REAL,
+            sl REAL,
+            tp REAL,
+            amount REAL,
+            commission REAL,
+            pnl REAL DEFAULT 0,
+            opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            symbol TEXT,
+            direction TEXT,
+            entry REAL,
+            exit_price REAL,
+            sl REAL,
+            tp REAL,
+            amount REAL,
+            commission REAL,
+            pnl REAL,
+            reason TEXT,
+            opened_at TEXT,
+            closed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+        
+        c.execute('''CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            symbol TEXT,
+            target_price REAL,
+            direction TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            triggered INTEGER DEFAULT 0,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )''')
+    
+    conn.commit()
+    conn.close()
+    db_type = "PostgreSQL" if USE_POSTGRES else f"SQLite ({DB_PATH})"
+    logger.info(f"[DB] Initialized: {db_type}")
 
 def db_get_user(user_id: int) -> Dict:
     """Получить пользователя из БД"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT balance, total_deposit, total_profit, trading FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
+    row = run_sql("SELECT balance, total_deposit, total_profit, trading FROM users WHERE user_id = ?", (user_id,), fetch="one")
     
     if not row:
-        c.execute("INSERT INTO users (user_id) VALUES (?)", (user_id,))
-        conn.commit()
+        run_sql("INSERT INTO users (user_id) VALUES (?)", (user_id,))
         logger.info(f"[DB] New user {user_id} created")
-        row = (100.0, 100.0, 0.0, 0)
+        return {'balance': 100.0, 'total_deposit': 100.0, 'total_profit': 0.0, 'trading': False}
     
-    conn.close()
     return {
-        'balance': row[0],
-        'total_deposit': row[1],
-        'total_profit': row[2],
-        'trading': bool(row[3])
+        'balance': row['balance'],
+        'total_deposit': row['total_deposit'],
+        'total_profit': row['total_profit'],
+        'trading': bool(row['trading'])
     }
 
 def db_update_user(user_id: int, **kwargs):
     """Обновить данные пользователя"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
     for key, value in kwargs.items():
         if key == 'trading':
             value = 1 if value else 0
-        c.execute(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
-    
-    conn.commit()
-    conn.close()
+        run_sql(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
 
 def db_get_positions(user_id: int) -> List[Dict]:
     """Получить открытые позиции"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT * FROM positions WHERE user_id = ?", (user_id,))
-    rows = [dict(row) for row in c.fetchall()]
-    conn.close()
-    return rows
+    return run_sql("SELECT * FROM positions WHERE user_id = ?", (user_id,), fetch="all")
 
 def db_add_position(user_id: int, pos: Dict) -> int:
     """Добавить позицию"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""INSERT INTO positions 
-        (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+    if USE_POSTGRES:
+        query = """INSERT INTO positions 
+            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+    else:
+        query = """INSERT INTO positions 
+            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    
+    pos_id = run_sql(query,
         (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
-         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0)))
-    pos_id = c.lastrowid
-    conn.commit()
-    conn.close()
+         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0)), fetch="id")
     logger.info(f"[DB] Position {pos_id} added for user {user_id}")
     return pos_id
 
 def db_update_position(pos_id: int, **kwargs):
     """Обновить позицию"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
     for key, value in kwargs.items():
-        c.execute(f"UPDATE positions SET {key} = ? WHERE id = ?", (value, pos_id))
-    conn.commit()
-    conn.close()
+        run_sql(f"UPDATE positions SET {key} = ? WHERE id = ?", (value, pos_id))
 
 def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     """Закрыть позицию и перенести в историю"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
     # Получаем позицию
-    c.execute("SELECT * FROM positions WHERE id = ?", (pos_id,))
-    row = c.fetchone()
-    if not row:
-        conn.close()
+    pos = run_sql("SELECT * FROM positions WHERE id = ?", (pos_id,), fetch="one")
+    if not pos:
         return
     
     # Переносим в историю
-    c.execute("""INSERT INTO history 
+    run_sql("""INSERT INTO history 
         (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (row[1], row[2], row[3], row[4], exit_price, row[6], row[7], row[8], row[9], pnl, reason, row[11]))
+        (pos['user_id'], pos['symbol'], pos['direction'], pos['entry'], exit_price, 
+         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pnl, reason, pos['opened_at']))
     
     # Удаляем из активных
-    c.execute("DELETE FROM positions WHERE id = ?", (pos_id,))
+    run_sql("DELETE FROM positions WHERE id = ?", (pos_id,))
     
-    conn.commit()
-    conn.close()
     logger.info(f"[DB] Position {pos_id} closed: {reason}, PnL: ${pnl:.2f}")
 
 def db_get_history(user_id: int, limit: int = 20) -> List[Dict]:
     """Получить историю сделок"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT * FROM history WHERE user_id = ? ORDER BY closed_at DESC LIMIT ?", (user_id, limit))
-    rows = [dict(row) for row in c.fetchall()]
-    conn.close()
-    return rows
+    return run_sql("SELECT * FROM history WHERE user_id = ? ORDER BY closed_at DESC LIMIT ?", (user_id, limit), fetch="all")
 
 # ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
 def db_set_referrer(user_id: int, referrer_id: int) -> bool:
@@ -195,53 +279,33 @@ def db_set_referrer(user_id: int, referrer_id: int) -> bool:
     if user_id == referrer_id:
         return False
     
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    
     # Проверяем что у юзера ещё нет реферера
-    c.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    if row and row[0]:
-        conn.close()
+    row = run_sql("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,), fetch="one")
+    if row and row.get('referrer_id'):
         return False
     
     # Проверяем что реферер существует
-    c.execute("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,))
-    if not c.fetchone():
-        conn.close()
+    ref = run_sql("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetch="one")
+    if not ref:
         return False
     
-    c.execute("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, user_id))
-    conn.commit()
-    conn.close()
+    run_sql("UPDATE users SET referrer_id = ? WHERE user_id = ?", (referrer_id, user_id))
     logger.info(f"[REF] User {user_id} referred by {referrer_id}")
     return True
 
 def db_get_referrer(user_id: int) -> Optional[int]:
     """Получить реферера пользователя"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row and row[0] else None
+    row = run_sql("SELECT referrer_id FROM users WHERE user_id = ?", (user_id,), fetch="one")
+    return row['referrer_id'] if row and row.get('referrer_id') else None
 
 def db_get_referrals_count(user_id: int) -> int:
     """Количество рефералов пользователя"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
-    count = c.fetchone()[0]
-    conn.close()
-    return count
+    row = run_sql("SELECT COUNT(*) as cnt FROM users WHERE referrer_id = ?", (user_id,), fetch="one")
+    return row['cnt'] if row else 0
 
 def db_add_referral_bonus(referrer_id: int, amount: float):
     """Добавить реферальный бонус"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, referrer_id))
-    conn.commit()
-    conn.close()
+    run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, referrer_id))
     
     # Обновляем кэш
     if referrer_id in users_cache:
@@ -252,55 +316,34 @@ def db_add_referral_bonus(referrer_id: int, amount: float):
 # ==================== АЛЕРТЫ ====================
 def db_add_alert(user_id: int, symbol: str, target_price: float, direction: str) -> int:
     """Добавить алерт"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(
-        "INSERT INTO alerts (user_id, symbol, target_price, direction) VALUES (?, ?, ?, ?)",
-        (user_id, symbol, target_price, direction)
-    )
-    alert_id = c.lastrowid
-    conn.commit()
-    conn.close()
+    if USE_POSTGRES:
+        query = "INSERT INTO alerts (user_id, symbol, target_price, direction) VALUES (?, ?, ?, ?) RETURNING id"
+    else:
+        query = "INSERT INTO alerts (user_id, symbol, target_price, direction) VALUES (?, ?, ?, ?)"
+    alert_id = run_sql(query, (user_id, symbol, target_price, direction), fetch="id")
     logger.info(f"[ALERT] Created #{alert_id} for {user_id}: {symbol} {direction} ${target_price}")
     return alert_id
 
 def db_get_active_alerts() -> List[Dict]:
     """Получить все активные алерты"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT * FROM alerts WHERE triggered = 0")
-    rows = [dict(row) for row in c.fetchall()]
-    conn.close()
-    return rows
+    return run_sql("SELECT * FROM alerts WHERE triggered = 0", fetch="all")
 
 def db_get_user_alerts(user_id: int) -> List[Dict]:
     """Получить алерты пользователя"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute("SELECT * FROM alerts WHERE user_id = ? AND triggered = 0", (user_id,))
-    rows = [dict(row) for row in c.fetchall()]
-    conn.close()
-    return rows
+    return run_sql("SELECT * FROM alerts WHERE user_id = ? AND triggered = 0", (user_id,), fetch="all")
 
 def db_trigger_alert(alert_id: int):
     """Пометить алерт как сработавший"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE alerts SET triggered = 1 WHERE id = ?", (alert_id,))
-    conn.commit()
-    conn.close()
+    run_sql("UPDATE alerts SET triggered = 1 WHERE id = ?", (alert_id,))
 
 def db_delete_alert(alert_id: int, user_id: int) -> bool:
     """Удалить алерт"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("DELETE FROM alerts WHERE id = ? AND user_id = ?", (alert_id, user_id))
-    deleted = c.rowcount > 0
-    conn.commit()
-    conn.close()
-    return deleted
+    # Для проверки удаления нужен отдельный запрос
+    before = run_sql("SELECT COUNT(*) as cnt FROM alerts WHERE id = ? AND user_id = ?", (alert_id, user_id), fetch="one")
+    if before and before['cnt'] > 0:
+        run_sql("DELETE FROM alerts WHERE id = ? AND user_id = ?", (alert_id, user_id))
+        return True
+    return False
 
 # Инициализация БД при старте
 init_db()
@@ -1266,34 +1309,26 @@ P&L: {pnl_str}
 # ==================== АДМИН-ПАНЕЛЬ ====================
 def db_get_stats() -> Dict:
     """Статистика для админов"""
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
+    row = run_sql("SELECT COUNT(*) as cnt, SUM(balance) as bal, SUM(total_deposit) as dep, SUM(total_profit) as prof FROM users", fetch="one")
+    users_count = row['cnt'] or 0 if row else 0
+    total_balance = row['bal'] or 0 if row else 0
+    total_deposits = row['dep'] or 0 if row else 0
+    total_profit = row['prof'] or 0 if row else 0
     
-    c.execute("SELECT COUNT(*), SUM(balance), SUM(total_deposit), SUM(total_profit) FROM users")
-    row = c.fetchone()
-    users_count = row[0] or 0
-    total_balance = row[1] or 0
-    total_deposits = row[2] or 0
-    total_profit = row[3] or 0
+    row = run_sql("SELECT COUNT(*) as cnt FROM users WHERE trading = 1", fetch="one")
+    active_traders = row['cnt'] or 0 if row else 0
     
-    c.execute("SELECT COUNT(*) FROM users WHERE trading = 1")
-    active_traders = c.fetchone()[0] or 0
+    row = run_sql("SELECT COUNT(*) as cnt FROM positions", fetch="one")
+    open_positions = row['cnt'] or 0 if row else 0
     
-    c.execute("SELECT COUNT(*) FROM positions")
-    open_positions = c.fetchone()[0] or 0
+    row = run_sql("SELECT COUNT(*) as cnt, SUM(pnl) as pnl FROM history", fetch="one")
+    total_trades = row['cnt'] or 0 if row else 0
+    realized_pnl = row['pnl'] or 0 if row else 0
     
-    c.execute("SELECT COUNT(*), SUM(pnl) FROM history")
-    row = c.fetchone()
-    total_trades = row[0] or 0
-    realized_pnl = row[1] or 0
-    
-    # Комиссии (2% от суммы всех сделок)
-    c.execute("SELECT SUM(commission) FROM history")
-    commissions = c.fetchone()[0] or 0
-    c.execute("SELECT SUM(commission) FROM positions")
-    commissions += c.fetchone()[0] or 0
-    
-    conn.close()
+    row = run_sql("SELECT SUM(commission) as com FROM history", fetch="one")
+    commissions = row['com'] or 0 if row else 0
+    row = run_sql("SELECT SUM(commission) as com FROM positions", fetch="one")
+    commissions += row['com'] or 0 if row else 0
     
     return {
         'users': users_count,
@@ -1435,11 +1470,8 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     message = " ".join(context.args)
     
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users")
-    all_users = [row[0] for row in c.fetchall()]
-    conn.close()
+    rows = run_sql("SELECT user_id FROM users", fetch="all")
+    all_users = [row['user_id'] for row in rows] if rows else []
     
     sent = 0
     failed = 0
