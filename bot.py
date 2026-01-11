@@ -956,6 +956,11 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pass  # Сообщение не изменилось
 
 # ==================== СИГНАЛЫ ====================
+# Кэш последних сигналов для предотвращения дубликатов
+last_signals: Dict[str, Dict] = {}  # {symbol: {'direction': str, 'price': float, 'time': datetime}}
+SIGNAL_COOLDOWN = 300  # 5 минут между одинаковыми сигналами
+PRICE_CHANGE_THRESHOLD = 0.005  # 0.5% изменение цены для нового сигнала
+
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправка сигнала с реальной аналитикой"""
     from analyzer import MarketAnalyzer
@@ -1001,6 +1006,27 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         sl = price_data['stop_loss']
         tp = price_data['take_profit']
         winrate = int(price_data['success_rate'])
+        
+        # === ПРОВЕРКА НА ДУБЛИКАТ СИГНАЛА ===
+        now = datetime.now()
+        if symbol in last_signals:
+            last = last_signals[symbol]
+            time_diff = (now - last['time']).total_seconds()
+            price_diff = abs(entry - last['price']) / last['price']
+            
+            # Пропускаем если: тот же символ + направление + <5 мин + цена не изменилась на 0.5%+
+            if (last['direction'] == direction and 
+                time_diff < SIGNAL_COOLDOWN and 
+                price_diff < PRICE_CHANGE_THRESHOLD):
+                logger.info(f"[SIGNAL] Пропуск дубликата: {symbol} {direction} (прошло {time_diff:.0f}с, изменение {price_diff*100:.2f}%)")
+                return
+        
+        # Сохраняем этот сигнал
+        last_signals[symbol] = {
+            'direction': direction,
+            'price': entry,
+            'time': now
+        }
         
         # Потенциальный профит
         if direction == "LONG":
