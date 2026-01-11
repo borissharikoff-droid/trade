@@ -971,8 +971,8 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ==================== СИГНАЛЫ ====================
 # Кэш последних сигналов для предотвращения дубликатов
 last_signals: Dict[str, Dict] = {}  # {symbol: {'direction': str, 'price': float, 'time': datetime}}
-SIGNAL_COOLDOWN = 180  # 3 минуты между одинаковыми сигналами (было 5)
-PRICE_CHANGE_THRESHOLD = 0.003  # 0.3% изменение цены для нового сигнала (было 0.5%)
+SIGNAL_COOLDOWN = 60  # 1 минута между одинаковыми сигналами
+PRICE_CHANGE_THRESHOLD = 0.002  # 0.2% изменение цены для нового сигнала
 LEVERAGE = 20  # Плечо x20
 
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:

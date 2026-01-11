@@ -878,10 +878,10 @@ class MarketAnalyzer:
                       context_score * context_weight +
                       mtf['score'] * mtf_weight)
         
-        # Определение направления (более мягкие пороги)
-        if total_score > 0.55:
+        # Определение направления (агрессивные пороги для скальпинга)
+        if total_score > 0.52:
             direction = "LONG"
-        elif total_score < 0.45:
+        elif total_score < 0.48:
             direction = "SHORT"
         else:
             logger.info(f"[ANALYZER] Нет четкого сигнала (score={total_score:.2f})")
