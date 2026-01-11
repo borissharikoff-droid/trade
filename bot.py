@@ -877,16 +877,23 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     user_id = update.effective_user.id
     logger.info(f"[TOGGLE] User {user_id}")
+    
+    # Принудительно читаем из БД чтобы избежать рассинхрона
+    users_cache.pop(user_id, None)
     user = get_user(user_id)
     
     if not user['trading'] and user['balance'] < MIN_DEPOSIT:
-        logger.info(f"[TOGGLE] User {user_id} - insufficient balance")
+        logger.info(f"[TOGGLE] User {user_id} - insufficient balance (${user['balance']:.2f})")
         await query.answer(f"Минимальный баланс ${MIN_DEPOSIT}", show_alert=True)
         return
     
-    user['trading'] = not user['trading']
-    save_user(user_id)  # Сохраняем в БД
-    logger.info(f"[TOGGLE] User {user_id} trading = {user['trading']}")
+    new_state = not user['trading']
+    user['trading'] = new_state
+    
+    # Сохраняем напрямую в БД
+    db_update_user(user_id, trading=new_state)
+    logger.info(f"[TOGGLE] User {user_id} trading = {new_state}")
+    
     await start(update, context)
 
 async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -930,14 +937,16 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         emoji = "🟢" if pnl >= 0 else "🔴"
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-        text += f"{ticker}  ${pos['amount']:.0f}  →  PNL: {pnl_str}{emoji}\n"
+        dir_text = "L" if pos['direction'] == "LONG" else "S"
+        current = pos.get('current', pos['entry'])
+        
+        text += f"<b>{ticker}</b> {dir_text} ${pos['amount']:.0f} {emoji}\n"
+        text += f"📍 ${current:,.0f} | TP: ${pos['tp']:,.0f} | SL: ${pos['sl']:,.0f}\n"
+        text += f"PNL: {pnl_str}\n\n"
         keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_{pos['id']}")])
     
-    text += f"""
-───────────────
-<b>Баланс:</b> ${user['balance']:.2f}
-<b>Профит:</b> {profit_str}
-<b>Побед:</b> {wins}/{total_trades} ({winrate}%)"""
+    text += f"""───────────────
+💰 ${user['balance']:.2f} | {wins}/{total_trades} ({winrate}%)"""
     
     keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
@@ -1130,13 +1139,16 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}")
     
     dir_text = "LONG" if direction == "LONG" else "SHORT"
+    tp_percent = abs(tp - entry) / entry * 100
+    sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""✅ <b>{ticker} {dir_text}</b> | ${amount:.0f}
+    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x10 | ${amount:.0f}
 
-📍 ${entry:,.0f} → ${tp:,.0f}
-🛡 SL: ${sl:,.0f}
+📍 Вход: ${entry:,.0f}
+✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
+🛡 SL: ${sl:,.0f} (-{sl_percent:.1f}%)
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1300,15 +1312,17 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} (custom)")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
-    dir_emoji = "🟢" if direction == "LONG" else "🔴"
     dir_text = "LONG" if direction == "LONG" else "SHORT"
+    tp_percent = abs(tp - entry) / entry * 100
+    sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""✅ <b>{ticker} {dir_text}</b> | ${amount:.0f}
+    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x10 | ${amount:.0f}
 
-📍 ${entry:,.0f} → ${tp:,.0f}
-🛡 SL: ${sl:,.0f}
+📍 Вход: ${entry:,.0f}
+✅ TP: ${tp:,.0f} (+{tp_percent:.1f}%)
+🛡 SL: ${sl:,.0f} (-{sl_percent:.1f}%)
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
