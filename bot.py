@@ -1315,40 +1315,46 @@ def calculate_auto_bet(confidence: float, balance: float) -> tuple:
     """
     Рассчитать размер ставки и плечо на основе уверенности
     
+    Стратегия: консервативный размер для минимизации убытков,
+    но увеличиваем при высокой уверенности для максимизации профита.
+    
     Returns:
         (bet_amount, leverage)
     """
-    # Уверенность от 50% до 90%
+    # Базовое плечо (фиксированное для предсказуемости)
+    leverage = LEVERAGE  # Используем глобальное плечо
+    
+    # Уверенность от 28% до 95% (после фильтров)
     # Чем выше уверенность - тем больше ставка
     
     if confidence >= 85:
-        # Очень высокая уверенность - агрессивная ставка
-        bet_percent = 0.25  # 25% от баланса
-        leverage = 25
-    elif confidence >= 80:
-        # Высокая уверенность
-        bet_percent = 0.20  # 20% от баланса
-        leverage = 20
+        # Очень высокая уверенность - максимальная ставка
+        bet_percent = 0.15  # 15% от баланса (было 25%)
     elif confidence >= 75:
+        # Высокая уверенность
+        bet_percent = 0.12  # 12% от баланса
+    elif confidence >= 65:
         # Хорошая уверенность
-        bet_percent = 0.15  # 15% от баланса
-        leverage = 20
-    elif confidence >= 70:
-        # Средняя уверенность
         bet_percent = 0.10  # 10% от баланса
-        leverage = 15
-    else:
-        # Низкая уверенность - консервативно
+    elif confidence >= 55:
+        # Средняя уверенность
+        bet_percent = 0.07  # 7% от баланса
+    elif confidence >= 45:
+        # Умеренная уверенность
         bet_percent = 0.05  # 5% от баланса
-        leverage = 10
+    else:
+        # Низкая уверенность - минимальная ставка
+        bet_percent = 0.03  # 3% от баланса
     
     bet = balance * bet_percent
     
     # Ограничения
     bet = max(AUTO_TRADE_MIN_BET, min(AUTO_TRADE_MAX_BET, bet))
     
-    # Не ставить больше баланса
-    bet = min(bet, balance * 0.9)
+    # Не ставить больше 20% баланса за раз (защита от слива)
+    bet = min(bet, balance * 0.20)
+    
+    logger.info(f"[BET] Confidence={confidence}%, bet_percent={bet_percent*100}%, bet=${bet:.0f}")
     
     return round(bet, 0), leverage
 

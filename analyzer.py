@@ -1868,39 +1868,57 @@ class MarketAnalyzer:
             
             logger.info(f"[POSITION_MONITOR] {symbol} {direction}: PnL={pnl_percent:.2f}%, ToTP={progress_to_tp:.0f}%, ToSL={progress_to_sl:.0f}%")
             
-            # === TRAILING STOP: если в хорошем профите - двигаем SL в безубыток ===
-            if pnl_percent > 0.8:  # Более 0.8% профита
-                if direction == "LONG":
-                    breakeven_sl = entry * 1.001  # Чуть выше входа
-                    if current_sl < breakeven_sl:
-                        adjustment['should_adjust_sl'] = True
-                        adjustment['new_sl'] = breakeven_sl
-                        adjustment['reason'] = "Trailing: SL в безубыток"
-                        adjustment['action'] = 'ADJUST_SL'
-                else:
-                    breakeven_sl = entry * 0.999
-                    if current_sl > breakeven_sl:
-                        adjustment['should_adjust_sl'] = True
-                        adjustment['new_sl'] = breakeven_sl
-                        adjustment['reason'] = "Trailing: SL в безубыток"
-                        adjustment['action'] = 'ADJUST_SL'
+            # === УЛУЧШЕННЫЙ TRAILING STOP ===
+            # Логика: чем больше профит, тем агрессивнее защищаем
             
-            # === СИЛЬНЫЙ ПРОФИТ: агрессивный trailing ===
-            if pnl_percent > 1.5:  # Более 1.5% профита
-                # Двигаем SL на 50% от профита
+            trailing_applied = False
+            trailing_percent = 0  # Какую долю профита защищаем
+            
+            if pnl_percent > 3.0:
+                # Очень сильный профит: защищаем 75%
+                trailing_percent = 0.75
+                trailing_applied = True
+            elif pnl_percent > 2.0:
+                # Сильный профит: защищаем 65%
+                trailing_percent = 0.65
+                trailing_applied = True
+            elif pnl_percent > 1.5:
+                # Хороший профит: защищаем 55%
+                trailing_percent = 0.55
+                trailing_applied = True
+            elif pnl_percent > 1.0:
+                # Умеренный профит: защищаем 40%
+                trailing_percent = 0.40
+                trailing_applied = True
+            elif pnl_percent > 0.6:
+                # Небольшой профит: в безубыток + маленький бонус
+                trailing_percent = 0.15
+                trailing_applied = True
+            
+            if trailing_applied:
                 if direction == "LONG":
-                    new_trailing_sl = entry + (current_price - entry) * 0.5
-                    if new_trailing_sl > adjustment['new_sl']:
+                    profit_distance = current_price - entry
+                    new_trailing_sl = entry + profit_distance * trailing_percent
+                    # SL не может быть ниже entry (минимум breakeven)
+                    new_trailing_sl = max(new_trailing_sl, entry * 1.001)
+                    
+                    if new_trailing_sl > current_sl:
                         adjustment['should_adjust_sl'] = True
                         adjustment['new_sl'] = new_trailing_sl
-                        adjustment['reason'] = f"Trailing: фиксируем {pnl_percent/2:.1f}% профита"
+                        protected_profit = (new_trailing_sl - entry) / entry * 100
+                        adjustment['reason'] = f"Trailing: защита {protected_profit:.2f}% профита ({trailing_percent*100:.0f}% от {pnl_percent:.1f}%)"
                         adjustment['action'] = 'ADJUST_SL'
-                else:
-                    new_trailing_sl = entry - (entry - current_price) * 0.5
-                    if new_trailing_sl < adjustment['new_sl']:
+                else:  # SHORT
+                    profit_distance = entry - current_price
+                    new_trailing_sl = entry - profit_distance * trailing_percent
+                    # SL не может быть выше entry (минимум breakeven)
+                    new_trailing_sl = min(new_trailing_sl, entry * 0.999)
+                    
+                    if new_trailing_sl < current_sl:
                         adjustment['should_adjust_sl'] = True
                         adjustment['new_sl'] = new_trailing_sl
-                        adjustment['reason'] = f"Trailing: фиксируем {pnl_percent/2:.1f}% профита"
+                        protected_profit = (entry - new_trailing_sl) / entry * 100
+                        adjustment['reason'] = f"Trailing: защита {protected_profit:.2f}% профита ({trailing_percent*100:.0f}% от {pnl_percent:.1f}%)"
                         adjustment['action'] = 'ADJUST_SL'
             
             # === МАНИПУЛЯЦИЯ В НАШУ СТОРОНУ: можно расширить TP ===
