@@ -582,6 +582,50 @@ class BybitHedger:
         
         logger.info(f"[BYBIT] Closed PnL: {len(closed_positions)} records")
         return closed_positions
+    
+    async def get_last_order_price(self, symbol: str, side: str = None) -> Optional[Dict]:
+        """
+        Получить цену последнего исполненного ордера
+        
+        Args:
+            symbol: Торговая пара (BTC/USDT)
+            side: 'Sell' для закрытия LONG, 'Buy' для закрытия SHORT (опционально)
+        
+        Returns:
+            {'price': float, 'qty': float, 'order_id': str} или None
+        """
+        if not self.enabled:
+            return None
+        
+        bybit_symbol = self._to_bybit_symbol(symbol)
+        
+        params = {
+            "category": "linear",
+            "symbol": bybit_symbol,
+            "orderStatus": "Filled",
+            "limit": 5
+        }
+        
+        result = await self._request("GET", "/v5/order/history", params)
+        
+        if result:
+            orders = result.get("list", [])
+            for order in orders:
+                # Если указан side, фильтруем
+                if side and order.get("side") != side:
+                    continue
+                
+                avg_price = order.get("avgPrice", "0")
+                if avg_price and float(avg_price) > 0:
+                    logger.info(f"[BYBIT] Last order {bybit_symbol}: price=${avg_price}, qty={order.get('qty')}")
+                    return {
+                        'price': float(avg_price),
+                        'qty': float(order.get("qty", 0)),
+                        'order_id': order.get("orderId", ""),
+                        'side': order.get("side", "")
+                    }
+        
+        return None
 
 
 # Глобальный экземпляр

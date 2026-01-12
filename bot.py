@@ -1100,6 +1100,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     # === ГРУППИРУЕМ ПОЗИЦИИ ПО СИМВОЛУ ДЛЯ ЗАКРЫТИЯ НА BYBIT ===
     # Bybit хранит одну позицию на символ, поэтому закрываем один раз за группу
+    close_prices = {}  # (symbol, direction) -> close_price
     if await is_hedging_enabled():
         by_symbol = {}
         for pos in user_positions:
@@ -1108,7 +1109,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 by_symbol[key] = []
             by_symbol[key].append(pos)
         
-        # Закрываем на Bybit по символам (один запрос на символ)
+        # Закрываем на Bybit по символам и получаем реальные цены
         for (symbol, direction), positions in by_symbol.items():
             total_qty = sum(p.get('bybit_qty', 0) for p in positions)
             if total_qty > 0:
@@ -1118,6 +1119,13 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 # Если bybit_qty не сохранён, закрываем всю позицию на Bybit
                 await hedge_close(positions[0]['id'], symbol, direction, None)
                 logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} (full)")
+            
+            # Получаем реальную цену закрытия
+            close_side = "Sell" if direction == "LONG" else "Buy"
+            order_info = await hedger.get_last_order_price(symbol, close_side)
+            if order_info and order_info.get('price'):
+                close_prices[(symbol, direction)] = order_info['price']
+                logger.info(f"[CLOSE_ALL] Real close price {symbol}: ${order_info['price']:.4f}")
     
     # === ЗАКРЫВАЕМ ВСЕ ПОЗИЦИИ В БД ===
     total_pnl = 0
@@ -1127,7 +1135,16 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     losers = 0
     
     for pos in user_positions[:]:
-        pnl = pos.get('pnl', 0)
+        # Получаем реальную цену закрытия если есть
+        close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
+        
+        # Пересчитываем PnL с реальной ценой
+        if pos['direction'] == "LONG":
+            pnl_percent = (close_price - pos['entry']) / pos['entry']
+        else:
+            pnl_percent = (pos['entry'] - close_price) / pos['entry']
+        pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
+        
         returned = pos['amount'] + pnl
         
         # Обновляем статистику
@@ -1140,8 +1157,8 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         elif pnl < 0:
             losers += 1
         
-        # Закрываем в БД
-        db_close_position(pos['id'], pos.get('current', pos['entry']), pnl, 'CLOSE_ALL')
+        # Закрываем в БД с реальной ценой
+        db_close_position(pos['id'], close_price, pnl, 'CLOSE_ALL')
     
     # Обновляем баланс
     user['balance'] += total_returned
@@ -1737,17 +1754,30 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     
     # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit используя сохранённый qty ===
+    close_price = pos.get('current', pos['entry'])
     if await is_hedging_enabled():
         bybit_qty = pos.get('bybit_qty', 0)
         if bybit_qty > 0:
             hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], bybit_qty)
             if hedge_result:
                 logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit (qty={bybit_qty})")
+                
+                # Получаем реальную цену закрытия с Bybit
+                close_side = "Sell" if pos['direction'] == "LONG" else "Buy"
+                order_info = await hedger.get_last_order_price(pos['symbol'], close_side)
+                if order_info and order_info.get('price'):
+                    close_price = order_info['price']
+                    logger.info(f"[HEDGE] Real close price: ${close_price:.4f}")
             else:
                 logger.warning(f"[HEDGE] ✗ Failed to close hedge for position {pos_id}")
     
-    # Закрываем с текущим PnL
-    pnl = pos.get('pnl', 0)
+    # Пересчитываем PnL с реальной ценой закрытия
+    if pos['direction'] == "LONG":
+        pnl_percent = (close_price - pos['entry']) / pos['entry']
+    else:
+        pnl_percent = (pos['entry'] - close_price) / pos['entry']
+    pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
+    
     returned = pos['amount'] + pnl
     
     user['balance'] += returned
@@ -1818,6 +1848,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     ticker = to_close[0]['symbol'].split("/")[0] if "/" in to_close[0]['symbol'] else to_close[0]['symbol']
     
     # === ГРУППИРУЕМ ПО СИМВОЛУ ДЛЯ BYBIT ===
+    close_prices = {}  # symbol -> close_price
     if await is_hedging_enabled():
         by_symbol = {}
         for pos in to_close:
@@ -1826,26 +1857,42 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
                 by_symbol[key] = []
             by_symbol[key].append(pos)
         
-        # Закрываем на Bybit по символам
+        # Закрываем на Bybit по символам и получаем реальные цены
         for (symbol, direction), positions in by_symbol.items():
             total_qty = sum(p.get('bybit_qty', 0) for p in positions)
             if total_qty > 0:
                 await hedge_close(positions[0]['id'], symbol, direction, total_qty)
                 logger.info(f"[CLOSE_STACKED] Bybit closed {symbol} {direction} qty={total_qty}")
+                
+                # Получаем реальную цену закрытия
+                close_side = "Sell" if direction == "LONG" else "Buy"
+                order_info = await hedger.get_last_order_price(symbol, close_side)
+                if order_info and order_info.get('price'):
+                    close_prices[(symbol, direction)] = order_info['price']
+                    logger.info(f"[CLOSE_STACKED] Real close price {symbol}: ${order_info['price']:.4f}")
     
     # === ЗАКРЫВАЕМ В БД ===
     total_pnl = 0
     total_returned = 0
     
     for pos in to_close:
-        pnl = pos.get('pnl', 0)
+        # Получаем реальную цену закрытия если есть
+        close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
+        
+        # Пересчитываем PnL с реальной ценой
+        if pos['direction'] == "LONG":
+            pnl_percent = (close_price - pos['entry']) / pos['entry']
+        else:
+            pnl_percent = (pos['entry'] - close_price) / pos['entry']
+        pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
+        
         returned = pos['amount'] + pnl
         
         total_pnl += pnl
         total_returned += returned
         
         # Закрываем в БД
-        db_close_position(pos['id'], pos.get('current', pos['entry']), pnl, 'MANUAL')
+        db_close_position(pos['id'], close_price, pnl, 'MANUAL')
         user_positions.remove(pos)
     
     # Обновляем баланс
@@ -2064,13 +2111,23 @@ async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обновление цен и PnL с реальными данными Binance + адаптивное управление"""
+    """Обновление цен и PnL с реальными данными Bybit (если хеджирование) или Binance"""
     for user_id, user_positions in positions_cache.items():
         user = get_user(user_id)
         
         for pos in user_positions[:]:  # копия для безопасного удаления
-            # Получаем реальную цену с Binance
-            real_price = await get_cached_price(pos['symbol'])
+            real_price = None
+            
+            # Если хеджирование включено - берём markPrice с Bybit (точнее для PnL)
+            if await is_hedging_enabled():
+                bybit_data = await hedger.get_position_data(pos['symbol'])
+                if bybit_data and bybit_data.get('current'):
+                    real_price = bybit_data['current']  # markPrice с Bybit
+                    logger.debug(f"[UPDATE] {pos['symbol']}: using Bybit price ${real_price:.4f}")
+            
+            # Fallback на Binance если Bybit недоступен
+            if not real_price:
+                real_price = await get_cached_price(pos['symbol'])
             
             if real_price:
                 pos['current'] = real_price
