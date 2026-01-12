@@ -108,6 +108,7 @@ def init_db():
             amount REAL,
             commission REAL,
             pnl REAL DEFAULT 0,
+            bybit_qty REAL DEFAULT 0,
             opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )''')
@@ -164,6 +165,7 @@ def init_db():
             amount REAL,
             commission REAL,
             pnl REAL DEFAULT 0,
+            bybit_qty REAL DEFAULT 0,
             opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )''')
@@ -198,6 +200,22 @@ def init_db():
         )''')
     
     conn.commit()
+    
+    # Миграция: добавляем bybit_qty если колонки нет
+    try:
+        if USE_POSTGRES:
+            c.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS bybit_qty REAL DEFAULT 0")
+        else:
+            # SQLite не поддерживает IF NOT EXISTS для ALTER, проверяем вручную
+            c.execute("PRAGMA table_info(positions)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'bybit_qty' not in columns:
+                c.execute("ALTER TABLE positions ADD COLUMN bybit_qty REAL DEFAULT 0")
+        conn.commit()
+        logger.info("[DB] Migration: bybit_qty column ensured")
+    except Exception as e:
+        logger.warning(f"[DB] Migration warning: {e}")
+    
     conn.close()
     db_type = "PostgreSQL" if USE_POSTGRES else f"SQLite ({DB_PATH})"
     logger.info(f"[DB] Initialized: {db_type}")
@@ -232,17 +250,17 @@ def db_get_positions(user_id: int) -> List[Dict]:
 def db_add_position(user_id: int, pos: Dict) -> int:
     """Добавить позицию"""
     if USE_POSTGRES:
-        query = """INSERT INTO positions 
-            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+        query = """INSERT INTO positions
+            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
     else:
-        query = """INSERT INTO positions 
-            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
-    
+        query = """INSERT INTO positions
+            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
     pos_id = run_sql(query,
         (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
-         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0)), fetch="id")
+         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0)), fetch="id")
     logger.info(f"[DB] Position {pos_id} added for user {user_id}")
     return pos_id
 
@@ -912,66 +930,70 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Синхронизация позиций с Bybit - закрывает позиции которые закрылись на бирже
-    
+    Проверяет размер позиции, а не только наличие символа.
+
     Returns:
         Количество синхронизированных (закрытых) позиций
     """
     if not await is_hedging_enabled():
         return 0
-    
+
     user_positions = get_positions(user_id)
     if not user_positions:
         return 0
-    
+
     user = get_user(user_id)
     synced = 0
-    
+
     # Получаем все открытые позиции на Bybit
     bybit_positions = await hedger.get_all_positions()
-    bybit_symbols = {pos['symbol'] for pos in bybit_positions}
-    
+    # Словарь: symbol -> size (размер позиции)
+    bybit_sizes = {pos['symbol']: float(pos.get('size', 0)) for pos in bybit_positions}
+
     # Получаем закрытые позиции за последние 7 дней
     closed_pnl = await hedger.get_closed_pnl(limit=100)
-    
+
     for pos in user_positions[:]:
         bybit_symbol = pos['symbol'].replace("/", "")
-        
-        # Проверяем есть ли эта позиция на Bybit
-        if bybit_symbol not in bybit_symbols:
-            # Позиция закрыта на Bybit - ищем PnL в истории
-            real_pnl = None
+        bybit_size = bybit_sizes.get(bybit_symbol, 0)
+        expected_qty = pos.get('bybit_qty', 0)
+
+        # Проверяем закрыта ли позиция:
+        # 1. Размер на Bybit = 0
+        # 2. Или размер сильно меньше ожидаемого (позиция закрылась по TP/SL)
+        is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1)
+
+        if is_closed:
+            # Позиция закрыта на Bybit - рассчитываем PnL локально
+            # (Bybit PnL общий для всей позиции, не подходит для отдельных записей бота)
+            real_pnl = pos.get('pnl', 0)
             
-            # Пробуем найти закрытую позицию по символу
+            # Пробуем найти закрытую позицию по символу для уточнения
             for closed in closed_pnl:
                 if closed['symbol'] == bybit_symbol:
-                    # Нашли закрытую позицию
-                    real_pnl = closed['closed_pnl']
-                    logger.info(f"[SYNC] Found closed position: {bybit_symbol}, PnL: ${real_pnl:.2f}")
+                    logger.info(f"[SYNC] Found closed position: {bybit_symbol}, Bybit PnL: ${closed['closed_pnl']:.2f}")
                     break
-            
-            # Если не нашли точный PnL - используем последний известный
-            if real_pnl is None:
-                real_pnl = pos.get('pnl', 0)
-                logger.info(f"[SYNC] Using cached PnL for {bybit_symbol}: ${real_pnl:.2f}")
-            
+
+            logger.info(f"[SYNC] Closing {bybit_symbol}: bybit_size={bybit_size}, expected_qty={expected_qty}, PnL=${real_pnl:.2f}")
+
             # Закрываем позицию в боте
             returned = pos['amount'] + real_pnl
             user['balance'] += returned
             user['total_profit'] += real_pnl
             save_user(user_id)
-            
+
             # Переносим в историю
             db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
             user_positions.remove(pos)
-            
+
             synced += 1
             logger.info(f"[SYNC] Position {pos['id']} synced: {pos['symbol']} PnL=${real_pnl:.2f}")
-            
+
             # Отправляем уведомление
             try:
                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                 pnl_abs = abs(real_pnl)
-                
+
                 if real_pnl > 0:
                     text = f"""🎉 <b>Сделка закрылась на Bybit!</b>
 
@@ -985,14 +1007,14 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
 
 Не расстраивайтесь! 💪
 💰 Баланс: <b>${user['balance']:.0f}</b>"""
-                
+
                 await context.bot.send_message(user_id, text, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"[SYNC] Failed to notify user {user_id}: {e}")
-    
+
     if synced > 0:
         logger.info(f"[SYNC] User {user_id}: synced {synced} positions from Bybit")
-    
+
     return synced
 
 
@@ -1072,6 +1094,28 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     await query.edit_message_text("⏳ Закрываем все позиции...")
     
+    # === ГРУППИРУЕМ ПОЗИЦИИ ПО СИМВОЛУ ДЛЯ ЗАКРЫТИЯ НА BYBIT ===
+    # Bybit хранит одну позицию на символ, поэтому закрываем один раз за группу
+    if await is_hedging_enabled():
+        by_symbol = {}
+        for pos in user_positions:
+            key = (pos['symbol'], pos['direction'])
+            if key not in by_symbol:
+                by_symbol[key] = []
+            by_symbol[key].append(pos)
+        
+        # Закрываем на Bybit по символам (один запрос на символ)
+        for (symbol, direction), positions in by_symbol.items():
+            total_qty = sum(p.get('bybit_qty', 0) for p in positions)
+            if total_qty > 0:
+                await hedge_close(positions[0]['id'], symbol, direction, total_qty)
+                logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} qty={total_qty}")
+            else:
+                # Если bybit_qty не сохранён, закрываем всю позицию на Bybit
+                await hedge_close(positions[0]['id'], symbol, direction, None)
+                logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} (full)")
+    
+    # === ЗАКРЫВАЕМ ВСЕ ПОЗИЦИИ В БД ===
     total_pnl = 0
     total_returned = 0
     closed_count = 0
@@ -1081,11 +1125,6 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     for pos in user_positions[:]:
         pnl = pos.get('pnl', 0)
         returned = pos['amount'] + pnl
-        
-        # Закрываем хедж на Bybit
-        if await is_hedging_enabled():
-            user_amount_on_bybit = pos['amount'] * LEVERAGE
-            await hedge_close(pos['id'], pos['symbol'], pos['direction'], user_amount_on_bybit)
         
         # Обновляем статистику
         total_pnl += pnl
@@ -1376,6 +1415,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if AUTO_TRADE_ENABLED and AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
             auto_user = get_user(AUTO_TRADE_USER_ID)
+            auto_positions = get_positions(AUTO_TRADE_USER_ID)
             auto_balance = auto_user.get('balance', 0)
             
             if auto_balance >= AUTO_TRADE_MIN_BET:
@@ -1396,34 +1436,65 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     # Добавляем комиссию в накопитель
                     await add_commission(commission)
                     
-                    # Создаём позицию (конвертируем numpy в float для PostgreSQL)
-                    position = {
-                        'symbol': symbol,
-                        'direction': direction,
-                        'entry': float(entry),
-                        'current': float(entry),
-                        'amount': float(auto_bet),
-                        'tp': float(tp),
-                        'sl': float(sl),
-                        'commission': float(commission),
-                        'pnl': float(-commission)
-                    }
-                    
-                    # Сохраняем в БД
-                    pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
-                    position['id'] = pos_id
-                    
-                    # Обновляем кэш
-                    if AUTO_TRADE_USER_ID not in positions_cache:
-                        positions_cache[AUTO_TRADE_USER_ID] = []
-                    positions_cache[AUTO_TRADE_USER_ID].append(position)
+                    # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
+                    existing = None
+                    for p in auto_positions:
+                        if p['symbol'] == symbol and p['direction'] == direction:
+                            existing = p
+                            break
                     
                     # Хеджирование на Bybit
+                    bybit_qty = 0
                     if await is_hedging_enabled():
                         hedge_amount = float(auto_bet * auto_leverage)
-                        hedge_result = await hedge_open(pos_id, symbol, direction, hedge_amount, tp=float(tp), sl=float(sl))
+                        hedge_result = await hedge_open(0, symbol, direction, hedge_amount, tp=float(tp), sl=float(sl))
                         if hedge_result:
-                            logger.info(f"[AUTO-TRADE] ✓ Hedge opened: {hedge_result}")
+                            bybit_qty = hedge_result.get('qty', 0)
+                            logger.info(f"[AUTO-TRADE] ✓ Hedge opened: qty={bybit_qty}")
+                    
+                    if existing:
+                        # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
+                        old_amount = existing['amount']
+                        new_amount = old_amount + float(auto_bet)
+                        new_entry_price = (existing['entry'] * old_amount + float(entry) * float(auto_bet)) / new_amount
+                        new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
+                        
+                        existing['amount'] = new_amount
+                        existing['entry'] = new_entry_price
+                        existing['commission'] = existing.get('commission', 0) + float(commission)
+                        existing['bybit_qty'] = new_bybit_qty
+                        existing['pnl'] = -existing['commission']
+                        
+                        db_update_position(existing['id'], 
+                            amount=new_amount, 
+                            entry=new_entry_price, 
+                            commission=existing['commission'],
+                            bybit_qty=new_bybit_qty,
+                            pnl=existing['pnl']
+                        )
+                        pos_id = existing['id']
+                        logger.info(f"[AUTO-TRADE] Added to existing position {pos_id}")
+                    else:
+                        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ ===
+                        position = {
+                            'symbol': symbol,
+                            'direction': direction,
+                            'entry': float(entry),
+                            'current': float(entry),
+                            'amount': float(auto_bet),
+                            'tp': float(tp),
+                            'sl': float(sl),
+                            'commission': float(commission),
+                            'pnl': float(-commission),
+                            'bybit_qty': bybit_qty
+                        }
+                        
+                        pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
+                        position['id'] = pos_id
+                        
+                        if AUTO_TRADE_USER_ID not in positions_cache:
+                            positions_cache[AUTO_TRADE_USER_ID] = []
+                        positions_cache[AUTO_TRADE_USER_ID].append(position)
                     
                     # Уведомление
                     tp_percent = abs(tp - entry) / entry * 100
@@ -1511,16 +1582,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    
+
     user_id = update.effective_user.id
     user = get_user(user_id)
-    
+    user_positions = get_positions(user_id)
+
     # e|SYM|D|ENTRY|SL|TP|AMT|WINRATE
     data = query.data.split("|")
     if len(data) < 7:
         await query.edit_message_text("❌ Ошибка")
         return
-    
+
     try:
         symbol = data[1]
         direction = "LONG" if data[2] == 'L' else "SHORT"
@@ -1532,56 +1604,97 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except (ValueError, IndexError):
         await query.edit_message_text("❌ Ошибка данных")
         return
-    
+
     # Проверка баланса
     if user['balance'] < amount:
         await query.answer("Недостаточно средств", show_alert=True)
         return
-    
+
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
-    
+
     # === ПОКАЗЫВАЕМ "ОТКРЫВАЕМ..." ===
     await query.edit_message_text(f"⏳ Открываем {dir_emoji} {ticker} на ${amount:.0f}...")
-    
+
     # Комиссия за открытие
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
     save_user(user_id)  # Сохраняем в БД
-    
+
     # Добавляем комиссию в накопитель (авто-вывод)
     await add_commission(commission)
-    
-    position = {
-        'symbol': symbol,
-        'direction': direction,
-        'amount': amount,
-        'entry': entry,
-        'current': entry,
-        'sl': sl,
-        'tp': tp,
-        'pnl': -commission,
-        'commission': commission
-    }
-    
-    pos_id = db_add_position(user_id, position)
-    position['id'] = pos_id
-    
-    # Обновляем кэш
-    if user_id not in positions_cache:
-        positions_cache[user_id] = []
-    positions_cache[user_id].append(position)
-    
-    # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
-    # Размер позиции = сумма × плечо ($1000 × 20 = $20,000 позиция)
-    hedge_ok = False
+
+    # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
+    existing = None
+    for p in user_positions:
+        if p['symbol'] == symbol and p['direction'] == direction:
+            existing = p
+            break
+
+    # === ХЕДЖИРОВАНИЕ: открываем на Bybit ===
+    bybit_qty = 0
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(pos_id, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
+        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
         if hedge_result:
-            hedge_ok = True
-            logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
+            bybit_qty = hedge_result.get('qty', 0)
+            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}")
         else:
-            logger.warning(f"[HEDGE] ✗ Failed to hedge position {pos_id}")
+            logger.warning(f"[HEDGE] ✗ Failed to hedge")
+
+    if existing:
+        # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
+        old_amount = existing['amount']
+        new_amount = old_amount + amount
+        
+        # Weighted average entry price
+        new_entry = (existing['entry'] * old_amount + entry * amount) / new_amount
+        
+        # Добавляем qty к существующему
+        new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
+        
+        # Обновляем позицию
+        existing['amount'] = new_amount
+        existing['entry'] = new_entry
+        existing['commission'] = existing.get('commission', 0) + commission
+        existing['bybit_qty'] = new_bybit_qty
+        # Пересчитываем PnL
+        existing['pnl'] = -existing['commission']
+        
+        # Обновляем в БД
+        db_update_position(existing['id'], 
+            amount=new_amount, 
+            entry=new_entry, 
+            commission=existing['commission'],
+            bybit_qty=new_bybit_qty,
+            pnl=existing['pnl']
+        )
+        
+        pos_id = existing['id']
+        logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol}, total=${new_amount}")
+    else:
+        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ ===
+        position = {
+            'symbol': symbol,
+            'direction': direction,
+            'amount': amount,
+            'entry': entry,
+            'current': entry,
+            'sl': sl,
+            'tp': tp,
+            'pnl': -commission,
+            'commission': commission,
+            'bybit_qty': bybit_qty
+        }
+
+        pos_id = db_add_position(user_id, position)
+        position['id'] = pos_id
+
+        # Обновляем кэш
+        if user_id not in positions_cache:
+            positions_cache[user_id] = []
+        positions_cache[user_id].append(position)
+        
+        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}, bybit_qty={bybit_qty}")
     
     logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}")
     
@@ -1620,14 +1733,15 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("Позиция не найдена", show_alert=True)
         return
     
-    # === ХЕДЖИРОВАНИЕ: закрываем ЧАСТИЧНО позицию на Bybit (только долю юзера) ===
+    # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit используя сохранённый qty ===
     if await is_hedging_enabled():
-        user_amount_on_bybit = pos['amount'] * LEVERAGE  # Размер позиции юзера на Bybit
-        hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], user_amount_on_bybit)
-        if hedge_result:
-            logger.info(f"[HEDGE] ✓ Position {pos_id} partially closed on Bybit (${user_amount_on_bybit})")
-        else:
-            logger.warning(f"[HEDGE] ✗ Failed to close hedge for position {pos_id}")
+        bybit_qty = pos.get('bybit_qty', 0)
+        if bybit_qty > 0:
+            hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], bybit_qty)
+            if hedge_result:
+                logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit (qty={bybit_qty})")
+            else:
+                logger.warning(f"[HEDGE] ✗ Failed to close hedge for position {pos_id}")
     
     # Закрываем с текущим PnL
     pnl = pos.get('pnl', 0)
@@ -1698,18 +1812,31 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     
     await query.edit_message_text("⏳ Закрываем позиции...")
     
+    ticker = to_close[0]['symbol'].split("/")[0] if "/" in to_close[0]['symbol'] else to_close[0]['symbol']
+    
+    # === ГРУППИРУЕМ ПО СИМВОЛУ ДЛЯ BYBIT ===
+    if await is_hedging_enabled():
+        by_symbol = {}
+        for pos in to_close:
+            key = (pos['symbol'], pos['direction'])
+            if key not in by_symbol:
+                by_symbol[key] = []
+            by_symbol[key].append(pos)
+        
+        # Закрываем на Bybit по символам
+        for (symbol, direction), positions in by_symbol.items():
+            total_qty = sum(p.get('bybit_qty', 0) for p in positions)
+            if total_qty > 0:
+                await hedge_close(positions[0]['id'], symbol, direction, total_qty)
+                logger.info(f"[CLOSE_STACKED] Bybit closed {symbol} {direction} qty={total_qty}")
+    
+    # === ЗАКРЫВАЕМ В БД ===
     total_pnl = 0
     total_returned = 0
-    ticker = to_close[0]['symbol'].split("/")[0] if "/" in to_close[0]['symbol'] else to_close[0]['symbol']
     
     for pos in to_close:
         pnl = pos.get('pnl', 0)
         returned = pos['amount'] + pnl
-        
-        # Закрываем хедж на Bybit
-        if await is_hedging_enabled():
-            user_amount_on_bybit = pos['amount'] * LEVERAGE
-            await hedge_close(pos['id'], pos['symbol'], pos['direction'], user_amount_on_bybit)
         
         total_pnl += pnl
         total_returned += returned
@@ -1788,26 +1915,27 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     """Обработка введённой суммы"""
     if 'pending_trade' not in context.user_data:
         return
-    
+
     user_id = update.effective_user.id
     user = get_user(user_id)
-    
+    user_positions = get_positions(user_id)
+
     try:
         amount = float(update.message.text.replace(",", ".").replace("$", "").strip())
     except ValueError:
         await update.message.reply_text("❌ Введи число")
         return
-    
+
     if amount < 1:
         await update.message.reply_text("❌ Минимум $1")
         return
-    
+
     if amount > user['balance']:
         await update.message.reply_text(f"❌ Недостаточно средств. Баланс: ${user['balance']:.2f}\n\n💡 Введи другую сумму:")
         return  # pending_trade сохраняется, можно ввести снова
-    
+
     trade = context.user_data.pop('pending_trade')
-    
+
     # Выполняем сделку
     symbol = trade['symbol']
     direction = "LONG" if trade['direction'] == 'L' else "SHORT"
@@ -1815,45 +1943,85 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     sl = float(trade['sl'])
     tp = float(trade['tp'])
     winrate = int(trade.get('winrate', 75))
-    
+
     # Комиссия за открытие
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
     save_user(user_id)
-    
+
     # Добавляем комиссию в накопитель (авто-вывод)
     await add_commission(commission)
-    
-    position = {
-        'symbol': symbol,
-        'direction': direction,
-        'amount': amount,
-        'entry': entry,
-        'current': entry,
-        'sl': sl,
-        'tp': tp,
-        'pnl': -commission,
-        'commission': commission
-    }
-    
-    pos_id = db_add_position(user_id, position)
-    position['id'] = pos_id
-    
-    # Обновляем кэш
-    if user_id not in positions_cache:
-        positions_cache[user_id] = []
-    positions_cache[user_id].append(position)
-    
-    # === ХЕДЖИРОВАНИЕ: открываем реальную позицию на Bybit с TP/SL ===
-    # Размер позиции = сумма × плечо ($1000 × 20 = $20,000 позиция)
+
+    # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
+    existing = None
+    for p in user_positions:
+        if p['symbol'] == symbol and p['direction'] == direction:
+            existing = p
+            break
+
+    # === ХЕДЖИРОВАНИЕ: открываем на Bybit ===
+    bybit_qty = 0
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(pos_id, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
+        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
         if hedge_result:
-            logger.info(f"[HEDGE] ✓ Position {pos_id} hedged on Bybit: {hedge_result}")
+            bybit_qty = hedge_result.get('qty', 0)
+            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}")
         else:
-            logger.warning(f"[HEDGE] ✗ Failed to hedge position {pos_id}")
-    
-    logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom)")
+            logger.warning(f"[HEDGE] ✗ Failed to hedge")
+
+    if existing:
+        # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
+        old_amount = existing['amount']
+        new_amount = old_amount + amount
+        
+        # Weighted average entry price
+        new_entry = (existing['entry'] * old_amount + entry * amount) / new_amount
+        
+        # Добавляем qty к существующему
+        new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
+        
+        # Обновляем позицию
+        existing['amount'] = new_amount
+        existing['entry'] = new_entry
+        existing['commission'] = existing.get('commission', 0) + commission
+        existing['bybit_qty'] = new_bybit_qty
+        existing['pnl'] = -existing['commission']
+        
+        # Обновляем в БД
+        db_update_position(existing['id'], 
+            amount=new_amount, 
+            entry=new_entry, 
+            commission=existing['commission'],
+            bybit_qty=new_bybit_qty,
+            pnl=existing['pnl']
+        )
+        
+        pos_id = existing['id']
+        logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol} (custom), total=${new_amount}")
+    else:
+        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ ===
+        position = {
+            'symbol': symbol,
+            'direction': direction,
+            'amount': amount,
+            'entry': entry,
+            'current': entry,
+            'sl': sl,
+            'tp': tp,
+            'pnl': -commission,
+            'commission': commission,
+            'bybit_qty': bybit_qty
+        }
+
+        pos_id = db_add_position(user_id, position)
+        position['id'] = pos_id
+
+        # Обновляем кэш
+        if user_id not in positions_cache:
+            positions_cache[user_id] = []
+        positions_cache[user_id].append(position)
+        
+        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom), bybit_qty={bybit_qty}")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_text = "LONG" if direction == "LONG" else "SHORT"
@@ -1908,31 +2076,12 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 change = random.uniform(-0.003, 0.004)
                 pos['current'] = pos['current'] * (1 + change)
             
-            # PnL - берём реальные данные с Bybit если хеджирование включено
-            if await is_hedging_enabled():
-                bybit_data = await hedger.get_position_data(pos['symbol'])
-                if bybit_data and bybit_data.get('pnl') is not None:
-                    # Используем реальные данные с Bybit
-                    pos['pnl'] = bybit_data['pnl']
-                    pos['current'] = bybit_data['current']
-                    # Обновляем entry если сильно отличается (слиппедж)
-                    if abs(pos['entry'] - bybit_data['entry']) / pos['entry'] > 0.001:
-                        logger.info(f"[SYNC] Entry update: {pos['entry']:.4f} -> {bybit_data['entry']:.4f}")
-                        pos['entry'] = bybit_data['entry']
-                else:
-                    # Фоллбэк на локальный расчёт
-                    if pos['direction'] == "LONG":
-                        pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
-                    else:
-                        pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-                    pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos['commission']
+            # PnL - ВСЕГДА рассчитываем локально (Bybit PnL общий для всей позиции, не для отдельной записи бота)
+            if pos['direction'] == "LONG":
+                pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
             else:
-                # Локальный расчёт без Bybit
-                if pos['direction'] == "LONG":
-                    pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
-                else:
-                    pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-                pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos['commission']
+                pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
+            pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
             
             # Обновляем в БД
             db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
@@ -1946,11 +2095,12 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 hit_sl = pos['current'] >= pos['sl']
             
             if hit_tp or hit_sl:
-                # === ХЕДЖИРОВАНИЕ: закрываем ЧАСТИЧНО позицию на Bybit (только долю юзера) ===
+                # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit используя сохранённый qty ===
                 if await is_hedging_enabled():
-                    user_amount_on_bybit = pos['amount'] * LEVERAGE
-                    await hedge_close(pos['id'], pos['symbol'], pos['direction'], user_amount_on_bybit)
-                    logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit (${user_amount_on_bybit})")
+                    bybit_qty = pos.get('bybit_qty', 0)
+                    if bybit_qty > 0:
+                        await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
+                        logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit (qty={bybit_qty})")
                 
                 returned = pos['amount'] + pos['pnl']
                 user['balance'] += returned
@@ -2339,10 +2489,11 @@ async def test_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     result = await hedge_open(999999, "BTC/USDT", "LONG", 10.0)
     
     if result:
-        await update.message.reply_text(f"✅ Хедж ОТКРЫТ!\nOrder ID: {result}\n\n⏳ Закрываю через 5 сек...")
+        qty = result.get('qty', 0)
+        await update.message.reply_text(f"✅ Хедж ОТКРЫТ!\nOrder ID: {result.get('order_id')}\nQty: {qty}\n\n⏳ Закрываю через 5 сек...")
         await asyncio.sleep(5)
-        # Тест: закрываем на $10 (тестовая сумма)
-        close_result = await hedge_close(999999, "BTC/USDT", "LONG", 10.0)
+        # Тест: закрываем используя qty из открытия
+        close_result = await hedge_close(999999, "BTC/USDT", "LONG", qty if qty > 0 else None)
         if close_result:
             await update.message.reply_text("✅ Хедж ЗАКРЫТ!")
         else:

@@ -233,7 +233,7 @@ class BybitHedger:
             logger.info(f"[BYBIT] Плечо уже установлено или ошибка")
             return True  # Продолжаем в любом случае
     
-    async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float, tp: float = None, sl: float = None) -> Optional[str]:
+    async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float, tp: float = None, sl: float = None) -> Optional[Dict]:
         """
         Открыть хедж-позицию на Bybit с TP/SL
         
@@ -246,7 +246,7 @@ class BybitHedger:
             sl: Stop Loss цена
         
         Returns:
-            order_id если успешно, None если ошибка
+            {'order_id': str, 'qty': float} если успешно, None если ошибка
         """
         logger.info(f"[HEDGE] === Попытка открыть хедж ===")
         logger.info(f"[HEDGE] symbol={symbol}, direction={direction}, amount=${amount_usd}")
@@ -337,13 +337,14 @@ class BybitHedger:
         if result:
             order_id = result.get("orderId")
             self.hedge_positions[position_id] = order_id
-            logger.info(f"[HEDGE] ✓ Открыто: {order_id}")
+            logger.info(f"[HEDGE] ✓ Открыто: {order_id}, qty={qty}")
             
             # Если TP/SL не были установлены при открытии - ставим через trading-stop
             if tp is not None or sl is not None:
                 await self.set_trading_stop(bybit_symbol, direction, tp, sl)
             
-            return order_id
+            # Возвращаем Dict с order_id и реальным qty
+            return {'order_id': order_id, 'qty': qty}
         else:
             logger.error(f"[HEDGE] ✗ Ошибка открытия позиции")
             return None
@@ -372,7 +373,7 @@ class BybitHedger:
             logger.warning(f"[HEDGE] ⚠️ Не удалось установить TP/SL")
             return False
     
-    async def close_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float = None) -> bool:
+    async def close_hedge(self, position_id: int, symbol: str, direction: str, bybit_qty: float = None) -> bool:
         """
         Закрыть хедж-позицию (частично или полностью)
         
@@ -380,7 +381,7 @@ class BybitHedger:
             position_id: ID позиции юзера
             symbol: Торговая пара
             direction: LONG или SHORT (оригинальное направление)
-            amount_usd: Сумма в USD для частичного закрытия (None = закрыть всё)
+            bybit_qty: Количество в базовой валюте для закрытия (None = закрыть всю позицию на Bybit)
         
         Returns:
             True если успешно
@@ -408,7 +409,6 @@ class BybitHedger:
         pos = positions[0]
         total_size = float(pos.get("size", "0"))
         pos_side = pos.get("side", "")  # Buy = LONG, Sell = SHORT
-        mark_price = float(pos.get("markPrice", "0"))
         
         if total_size == 0:
             logger.info(f"[HEDGE] Позиция уже закрыта: {bybit_symbol}")
@@ -417,48 +417,22 @@ class BybitHedger:
         # Определяем сторону для закрытия
         close_side = "Sell" if pos_side == "Buy" else "Buy"
         
-        # Рассчитываем qty для закрытия
-        if amount_usd and mark_price > 0:
-            # Частичное закрытие - только доля юзера
-            close_qty = amount_usd / mark_price
-            
-            # Применяем точность для монеты
-            BYBIT_SPECS = {
-                "BTC": {"precision": 3, "min_qty": 0.001},
-                "ETH": {"precision": 2, "min_qty": 0.01},
-                "SOL": {"precision": 1, "min_qty": 0.1},
-                "BNB": {"precision": 2, "min_qty": 0.01},
-                "XRP": {"precision": 0, "min_qty": 1},
-                "DOGE": {"precision": 0, "min_qty": 1},
-                "AVAX": {"precision": 1, "min_qty": 0.1},
-                "LINK": {"precision": 1, "min_qty": 0.1},
-                "POL": {"precision": 0, "min_qty": 1},
-                "ARB": {"precision": 0, "min_qty": 1},
-                "OP": {"precision": 1, "min_qty": 0.1},
-                "APT": {"precision": 1, "min_qty": 0.1},
-                "PEPE": {"precision": 0, "min_qty": 1},
-            }
-            
-            coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
-            spec = BYBIT_SPECS.get(coin, {"precision": 1, "min_qty": 0.1})
-            
-            close_qty = round(close_qty, spec["precision"])
+        # Определяем qty для закрытия
+        if bybit_qty and bybit_qty > 0:
+            # Используем переданное qty напрямую
+            close_qty = bybit_qty
             
             # Не закрываем больше чем есть
             if close_qty > total_size:
                 close_qty = total_size
-                logger.info(f"[HEDGE] Закрываем всю позицию (запрошено больше чем есть)")
+                logger.info(f"[HEDGE] Закрываем всю позицию (запрошено {bybit_qty}, есть {total_size})")
             
-            # Минимальный размер
-            if close_qty < spec["min_qty"]:
-                close_qty = spec["min_qty"]
-                
             close_qty_str = str(close_qty)
         else:
-            # Полное закрытие
+            # Полное закрытие всей позиции
             close_qty_str = str(total_size)
         
-        logger.info(f"[HEDGE] Bybit: {bybit_symbol} total={total_size}, closing={close_qty_str} (user amount=${amount_usd})")
+        logger.info(f"[HEDGE] Bybit: {bybit_symbol} total={total_size}, closing={close_qty_str}")
         
         params = {
             "category": "linear",
@@ -477,7 +451,7 @@ class BybitHedger:
         
         if result:
             self.hedge_positions.pop(position_id, None)
-            logger.info(f"[HEDGE] ✓ Частично закрыто: {bybit_symbol} qty={close_qty_str}")
+            logger.info(f"[HEDGE] ✓ Закрыто: {bybit_symbol} qty={close_qty_str}")
             return True
         else:
             logger.error(f"[HEDGE] ✗ Ошибка закрытия")
@@ -614,14 +588,14 @@ class BybitHedger:
 hedger = BybitHedger()
 
 
-async def hedge_open(position_id: int, symbol: str, direction: str, amount: float, tp: float = None, sl: float = None) -> Optional[str]:
-    """Wrapper для открытия хеджа с TP/SL"""
+async def hedge_open(position_id: int, symbol: str, direction: str, amount: float, tp: float = None, sl: float = None) -> Optional[Dict]:
+    """Wrapper для открытия хеджа с TP/SL. Возвращает {'order_id': str, 'qty': float}"""
     return await hedger.open_hedge(position_id, symbol, direction, amount, tp, sl)
 
 
-async def hedge_close(position_id: int, symbol: str, direction: str, amount_usd: float = None) -> bool:
-    """Wrapper для закрытия хеджа (частичного или полного)"""
-    return await hedger.close_hedge(position_id, symbol, direction, amount_usd)
+async def hedge_close(position_id: int, symbol: str, direction: str, bybit_qty: float = None) -> bool:
+    """Wrapper для закрытия хеджа. bybit_qty - количество в базовой валюте (None = закрыть всё)"""
+    return await hedger.close_hedge(position_id, symbol, direction, bybit_qty)
 
 
 async def is_hedging_enabled() -> bool:
