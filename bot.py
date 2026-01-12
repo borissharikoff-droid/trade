@@ -909,6 +909,247 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await start(update, context)
 
+async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Синхронизация позиций с Bybit - закрывает позиции которые закрылись на бирже
+    
+    Returns:
+        Количество синхронизированных (закрытых) позиций
+    """
+    if not await is_hedging_enabled():
+        return 0
+    
+    user_positions = get_positions(user_id)
+    if not user_positions:
+        return 0
+    
+    user = get_user(user_id)
+    synced = 0
+    
+    # Получаем все открытые позиции на Bybit
+    bybit_positions = await hedger.get_all_positions()
+    bybit_symbols = {pos['symbol'] for pos in bybit_positions}
+    
+    # Получаем закрытые позиции за последние 7 дней
+    closed_pnl = await hedger.get_closed_pnl(limit=100)
+    
+    for pos in user_positions[:]:
+        bybit_symbol = pos['symbol'].replace("/", "")
+        
+        # Проверяем есть ли эта позиция на Bybit
+        if bybit_symbol not in bybit_symbols:
+            # Позиция закрыта на Bybit - ищем PnL в истории
+            real_pnl = None
+            
+            # Пробуем найти закрытую позицию по символу
+            for closed in closed_pnl:
+                if closed['symbol'] == bybit_symbol:
+                    # Нашли закрытую позицию
+                    real_pnl = closed['closed_pnl']
+                    logger.info(f"[SYNC] Found closed position: {bybit_symbol}, PnL: ${real_pnl:.2f}")
+                    break
+            
+            # Если не нашли точный PnL - используем последний известный
+            if real_pnl is None:
+                real_pnl = pos.get('pnl', 0)
+                logger.info(f"[SYNC] Using cached PnL for {bybit_symbol}: ${real_pnl:.2f}")
+            
+            # Закрываем позицию в боте
+            returned = pos['amount'] + real_pnl
+            user['balance'] += returned
+            user['total_profit'] += real_pnl
+            save_user(user_id)
+            
+            # Переносим в историю
+            db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
+            user_positions.remove(pos)
+            
+            synced += 1
+            logger.info(f"[SYNC] Position {pos['id']} synced: {pos['symbol']} PnL=${real_pnl:.2f}")
+            
+            # Отправляем уведомление
+            try:
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                pnl_abs = abs(real_pnl)
+                
+                if real_pnl > 0:
+                    text = f"""🎉 <b>Сделка закрылась на Bybit!</b>
+
+Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
+
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
+                else:
+                    text = f"""📉 <b>Сделка закрылась на Bybit</b>
+
+{ticker}: <b>-${pnl_abs:.0f}</b>
+
+Не расстраивайтесь! 💪
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
+                
+                await context.bot.send_message(user_id, text, parse_mode="HTML")
+            except Exception as e:
+                logger.error(f"[SYNC] Failed to notify user {user_id}: {e}")
+    
+    if synced > 0:
+        logger.info(f"[SYNC] User {user_id}: synced {synced} positions from Bybit")
+    
+    return synced
+
+
+def stack_positions(positions: List[Dict]) -> List[Dict]:
+    """
+    Группирует одинаковые позиции (тот же символ + направление) в одну
+    
+    Для отображения - в БД остаются раздельными
+    """
+    if not positions:
+        return []
+    
+    # Группируем по (symbol, direction)
+    groups = {}
+    for pos in positions:
+        key = (pos['symbol'], pos['direction'])
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(pos)
+    
+    stacked = []
+    for (symbol, direction), group in groups.items():
+        if len(group) == 1:
+            # Одна позиция - возвращаем как есть
+            stacked.append(group[0])
+        else:
+            # Несколько позиций - объединяем
+            total_amount = sum(p['amount'] for p in group)
+            total_pnl = sum(p.get('pnl', 0) for p in group)
+            
+            # Weighted average entry price
+            weighted_entry = sum(p['entry'] * p['amount'] for p in group) / total_amount if total_amount > 0 else group[0]['entry']
+            
+            # Используем последнюю текущую цену
+            current = group[-1].get('current', group[-1]['entry'])
+            
+            # TP/SL берём от первой позиции (они обычно одинаковые)
+            tp = group[0].get('tp', 0)
+            sl = group[0].get('sl', 0)
+            
+            # Собираем ID всех позиций для закрытия
+            position_ids = [p['id'] for p in group]
+            
+            stacked.append({
+                'id': position_ids[0],  # Главный ID для отображения
+                'position_ids': position_ids,  # Все ID для закрытия
+                'symbol': symbol,
+                'direction': direction,
+                'entry': weighted_entry,
+                'current': current,
+                'amount': total_amount,
+                'tp': tp,
+                'sl': sl,
+                'pnl': total_pnl,
+                'commission': sum(p.get('commission', 0) for p in group),
+                'stacked_count': len(group)  # Сколько позиций объединено
+            })
+    
+    return stacked
+
+
+async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Закрыть все открытые позиции пользователя"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    user_positions = get_positions(user_id)
+    
+    if not user_positions:
+        await query.edit_message_text(
+            "📭 Нет открытых сделок",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
+        )
+        return
+    
+    await query.edit_message_text("⏳ Закрываем все позиции...")
+    
+    total_pnl = 0
+    total_returned = 0
+    closed_count = 0
+    winners = 0
+    losers = 0
+    
+    for pos in user_positions[:]:
+        pnl = pos.get('pnl', 0)
+        returned = pos['amount'] + pnl
+        
+        # Закрываем хедж на Bybit
+        if await is_hedging_enabled():
+            user_amount_on_bybit = pos['amount'] * LEVERAGE
+            await hedge_close(pos['id'], pos['symbol'], pos['direction'], user_amount_on_bybit)
+        
+        # Обновляем статистику
+        total_pnl += pnl
+        total_returned += returned
+        closed_count += 1
+        
+        if pnl > 0:
+            winners += 1
+        elif pnl < 0:
+            losers += 1
+        
+        # Закрываем в БД
+        db_close_position(pos['id'], pos.get('current', pos['entry']), pnl, 'CLOSE_ALL')
+    
+    # Обновляем баланс
+    user['balance'] += total_returned
+    user['total_profit'] += total_pnl
+    save_user(user_id)
+    
+    # Очищаем кэш позиций
+    positions_cache[user_id] = []
+    
+    # Формируем итоговое сообщение
+    pnl_abs = abs(total_pnl)
+    
+    if total_pnl > 0:
+        text = f"""🎉 <b>Отличная работа!</b>
+
+Вы закрыли <b>{closed_count}</b> сделок
+
+📊 <b>Результат:</b>
+✅ Прибыльных: {winners}
+❌ Убыточных: {losers}
+
+💰 <b>Итого: +${pnl_abs:.0f}</b>
+
+Так держать! 🚀
+💵 Баланс: <b>${user['balance']:.0f}</b>"""
+    elif total_pnl < 0:
+        text = f"""📊 <b>Сделки закрыты</b>
+
+Закрыто: <b>{closed_count}</b> сделок
+
+📈 Прибыльных: {winners}
+📉 Убыточных: {losers}
+
+💔 <b>Итого: -${pnl_abs:.0f}</b>
+
+Не сдавайтесь! Рынок всегда даёт шансы 💪
+💵 Баланс: <b>${user['balance']:.0f}</b>"""
+    else:
+        text = f"""📊 <b>Сделки закрыты</b>
+
+Закрыто: <b>{closed_count}</b> сделок
+
+В безубыток! Неплохо 👍
+💵 Баланс: <b>${user['balance']:.0f}</b>"""
+    
+    keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    
+    logger.info(f"[CLOSE_ALL] User {user_id}: closed {closed_count} positions, total PnL: ${total_pnl:.2f}")
+
+
 async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     logger.info(f"[TRADES] User {update.effective_user.id}")
@@ -916,6 +1157,12 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     user_id = update.effective_user.id
     user = get_user(user_id)
+    
+    # Синхронизация с Bybit при обновлении
+    synced = await sync_bybit_positions(user_id, context)
+    if synced > 0:
+        logger.info(f"[TRADES] Synced {synced} positions from Bybit")
+    
     user_positions = get_positions(user_id)
     
     # Статистика побед
@@ -942,10 +1189,13 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             pass  # Сообщение не изменилось
         return
     
+    # Стакаем одинаковые позиции для отображения
+    stacked = stack_positions(user_positions)
+    
     text = "<b>💼 Позиции</b>\n\n"
     
     keyboard = []
-    for pos in user_positions:
+    for pos in stacked:
         pnl = pos.get('pnl', 0)
         emoji = "🟢" if pnl >= 0 else "🔴"
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
@@ -953,13 +1203,32 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         dir_text = "L" if pos['direction'] == "LONG" else "S"
         current = pos.get('current', pos['entry'])
         
-        text += f"<b>{ticker}</b> {dir_text} ${pos['amount']:.0f} {emoji}\n"
+        # Показываем количество стакнутых позиций
+        stack_info = f" x{pos['stacked_count']}" if pos.get('stacked_count', 1) > 1 else ""
+        
+        text += f"<b>{ticker}</b> {dir_text} ${pos['amount']:.0f}{stack_info} {emoji}\n"
         text += f"📍 {format_price(current)} | TP: {format_price(pos['tp'])} | SL: {format_price(pos['sl'])}\n"
         text += f"PNL: {pnl_str}\n\n"
-        keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_{pos['id']}")])
+        
+        # Для стакнутых позиций передаём все ID через запятую
+        if pos.get('position_ids'):
+            close_data = f"closestack_{','.join(str(pid) for pid in pos['position_ids'])}"
+        else:
+            close_data = f"close_{pos['id']}"
+        
+        keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=close_data)])
+    
+    # Общий PnL
+    total_pnl = sum(p.get('pnl', 0) for p in user_positions)
+    total_pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
     
     text += f"""───────────────
+📊 Всего PnL: <b>{total_pnl_str}</b>
 💰 ${user['balance']:.2f} | {wins}/{total_trades} ({winrate}%)"""
+    
+    # Кнопка закрыть все (если больше 1 позиции)
+    if len(user_positions) > 0:
+        keyboard.append([InlineKeyboardButton("❌ Закрыть все", callback_data="close_all")])
     
     keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
@@ -1393,6 +1662,90 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 {ticker}: <b>-${pnl_abs:.0f}</b>
 
 Не расстраивайтесь, следующая будет лучше! 💪
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
+    
+    keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Закрыть несколько стакнутых позиций одним нажатием"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    user_positions = get_positions(user_id)
+    
+    try:
+        # closestack_1,2,3 -> [1, 2, 3]
+        ids_str = query.data.replace("closestack_", "")
+        position_ids = [int(pid) for pid in ids_str.split(",")]
+    except (ValueError, IndexError):
+        await query.answer("Ошибка данных", show_alert=True)
+        return
+    
+    if not position_ids:
+        await query.answer("Позиции не найдены", show_alert=True)
+        return
+    
+    # Находим все позиции для закрытия
+    to_close = [p for p in user_positions if p['id'] in position_ids]
+    
+    if not to_close:
+        await query.answer("Позиции не найдены", show_alert=True)
+        return
+    
+    await query.edit_message_text("⏳ Закрываем позиции...")
+    
+    total_pnl = 0
+    total_returned = 0
+    ticker = to_close[0]['symbol'].split("/")[0] if "/" in to_close[0]['symbol'] else to_close[0]['symbol']
+    
+    for pos in to_close:
+        pnl = pos.get('pnl', 0)
+        returned = pos['amount'] + pnl
+        
+        # Закрываем хедж на Bybit
+        if await is_hedging_enabled():
+            user_amount_on_bybit = pos['amount'] * LEVERAGE
+            await hedge_close(pos['id'], pos['symbol'], pos['direction'], user_amount_on_bybit)
+        
+        total_pnl += pnl
+        total_returned += returned
+        
+        # Закрываем в БД
+        db_close_position(pos['id'], pos.get('current', pos['entry']), pnl, 'MANUAL')
+        user_positions.remove(pos)
+    
+    # Обновляем баланс
+    user['balance'] += total_returned
+    user['total_profit'] += total_pnl
+    save_user(user_id)
+    
+    pnl_abs = abs(total_pnl)
+    
+    if total_pnl > 0:
+        text = f"""🎉 <b>Поздравляем!</b>
+
+Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
+Закрыто позиций: {len(to_close)}
+
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
+    elif total_pnl == 0:
+        text = f"""✅ <b>Сделки закрыты</b>
+
+{ticker}: <b>$0</b> (в безубыток)
+Закрыто позиций: {len(to_close)}
+
+💰 Баланс: <b>${user['balance']:.0f}</b>"""
+    else:
+        text = f"""📉 <b>Сделки закрыты</b>
+
+{ticker}: <b>-${pnl_abs:.0f}</b>
+Закрыто позиций: {len(to_close)}
+
+Не расстраивайтесь! 💪
 💰 Баланс: <b>${user['balance']:.0f}</b>"""
     
     keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
@@ -2273,7 +2626,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(show_trades, pattern="^(trades|my_positions|refresh_positions)$"))
     app.add_handler(CallbackQueryHandler(enter_trade, pattern="^e\\|"))
     app.add_handler(CallbackQueryHandler(custom_amount_prompt, pattern="^custom\\|"))
-    app.add_handler(CallbackQueryHandler(close_trade, pattern="^close_"))
+    app.add_handler(CallbackQueryHandler(close_all_trades, pattern="^close_all$"))
+    app.add_handler(CallbackQueryHandler(close_stacked_trades, pattern="^closestack_"))
+    app.add_handler(CallbackQueryHandler(close_trade, pattern="^close_\\d+$"))
     app.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
     app.add_handler(CallbackQueryHandler(withdraw_commission_callback, pattern="^withdraw_commission$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))

@@ -10,7 +10,7 @@ import hmac
 import hashlib
 import time
 import json
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from datetime import datetime
 
 import aiohttp
@@ -533,6 +533,81 @@ class BybitHedger:
                 }
         
         return None
+    
+    async def get_all_positions(self) -> List[Dict]:
+        """Получить все открытые позиции на Bybit"""
+        if not self.enabled:
+            return []
+        
+        result = await self._request("GET", "/v5/position/list", {
+            "category": "linear",
+            "settleCoin": "USDT"
+        })
+        
+        positions = []
+        if result:
+            for pos in result.get("list", []):
+                size = float(pos.get("size", 0))
+                if size > 0:
+                    pnl_str = pos.get("unrealisedPnl", "0") or "0"
+                    entry_str = pos.get("avgPrice", "0") or "0"
+                    mark_str = pos.get("markPrice", "0") or "0"
+                    
+                    positions.append({
+                        'symbol': pos.get("symbol", ""),
+                        'entry': float(entry_str),
+                        'current': float(mark_str),
+                        'pnl': float(pnl_str),
+                        'size': size,
+                        'side': pos.get("side", ""),  # Buy = LONG, Sell = SHORT
+                        'leverage': pos.get("leverage", "1")
+                    })
+        
+        logger.info(f"[BYBIT] All positions: {len(positions)} open")
+        return positions
+    
+    async def get_closed_pnl(self, symbol: str = None, limit: int = 50) -> List[Dict]:
+        """
+        Получить закрытые позиции с Bybit за последние 7 дней
+        
+        Args:
+            symbol: Конкретный символ (None = все)
+            limit: Максимум записей
+        
+        Returns:
+            Список закрытых позиций с PnL
+        """
+        if not self.enabled:
+            return []
+        
+        params = {
+            "category": "linear",
+            "limit": limit
+        }
+        
+        if symbol:
+            params["symbol"] = self._to_bybit_symbol(symbol)
+        
+        result = await self._request("GET", "/v5/position/closed-pnl", params)
+        
+        closed_positions = []
+        if result:
+            for item in result.get("list", []):
+                closed_positions.append({
+                    'symbol': item.get("symbol", ""),
+                    'side': item.get("side", ""),  # Buy = закрытие шорта, Sell = закрытие лонга
+                    'qty': float(item.get("qty", 0)),
+                    'entry_price': float(item.get("avgEntryPrice", 0)),
+                    'exit_price': float(item.get("avgExitPrice", 0)),
+                    'closed_pnl': float(item.get("closedPnl", 0)),
+                    'leverage': item.get("leverage", "1"),
+                    'order_id': item.get("orderId", ""),
+                    'created_time': int(item.get("createdTime", 0)),
+                    'updated_time': int(item.get("updatedTime", 0))
+                })
+        
+        logger.info(f"[BYBIT] Closed PnL: {len(closed_positions)} records")
+        return closed_positions
 
 
 # Глобальный экземпляр
