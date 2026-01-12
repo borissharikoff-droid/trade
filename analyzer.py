@@ -10,9 +10,10 @@ from binance.client import Client
 logger = logging.getLogger(__name__)
 
 # Оптимальные часы для торговли (UTC)
-# Лондон: 8-16, Нью-Йорк: 13-21, Азия: 0-8
-OPTIMAL_TRADING_HOURS = list(range(8, 22))  # 8:00 - 22:00 UTC (основная ликвидность)
-LOW_LIQUIDITY_HOURS = [2, 3, 4, 5]  # 2:00 - 6:00 UTC (азиатская ночь)
+# Лондон: 8-16, Нью-Йорк: 13-21
+# Лучшее время: EU+US overlap 13-16 UTC
+OPTIMAL_TRADING_HOURS = list(range(7, 21))  # 7:00 - 21:00 UTC (EU + US сессии)
+LOW_LIQUIDITY_HOURS = [0, 1, 2, 3, 4, 5, 6, 22, 23]  # Ночь/ранее утро - пропускаем
 
 
 class TechnicalIndicators:

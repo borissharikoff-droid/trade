@@ -296,6 +296,28 @@ def db_get_history(user_id: int, limit: int = 20) -> List[Dict]:
     """Получить историю сделок"""
     return run_sql("SELECT * FROM history WHERE user_id = ? ORDER BY closed_at DESC LIMIT ?", (user_id, limit), fetch="all")
 
+def db_get_user_stats(user_id: int) -> Dict:
+    """Полная статистика пользователя по ВСЕМ сделкам"""
+    row = run_sql("""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+            SUM(pnl) as total_pnl
+        FROM history WHERE user_id = ?
+    """, (user_id,), fetch="one")
+    
+    if not row:
+        return {'total': 0, 'wins': 0, 'losses': 0, 'winrate': 0, 'total_pnl': 0}
+    
+    total = int(row['total'] or 0)
+    wins = int(row['wins'] or 0)
+    losses = int(row['losses'] or 0)
+    total_pnl = float(row['total_pnl'] or 0)
+    winrate = int(wins / total * 100) if total > 0 else 0
+    
+    return {'total': total, 'wins': wins, 'losses': losses, 'winrate': winrate, 'total_pnl': total_pnl}
+
 # ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
 def db_set_referrer(user_id: int, referrer_id: int) -> bool:
     """Установить реферера для пользователя"""
@@ -1225,11 +1247,11 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     user_positions = get_positions(user_id)
     
-    # Статистика побед
-    user_history = db_get_history(user_id)
-    wins = len([t for t in user_history if t['pnl'] > 0])
-    total_trades = len(user_history)
-    winrate = int((wins / total_trades * 100)) if total_trades > 0 else 0
+    # Статистика побед - по ВСЕМ сделкам, не только последним 20
+    stats = db_get_user_stats(user_id)
+    wins = stats['wins']
+    total_trades = stats['total']
+    winrate = stats['winrate']
     total_profit = user.get('total_profit', 0)
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
