@@ -13,8 +13,12 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.error import BadRequest
 
 from hedger import hedge_open, hedge_close, is_hedging_enabled, hedger
+from analyzer import MarketAnalyzer
 
 load_dotenv()
+
+# Глобальный analyzer для переиспользования
+analyzer = MarketAnalyzer()
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -1333,8 +1337,8 @@ def calculate_auto_bet(confidence: float, balance: float) -> tuple:
 
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправка сигнала с реальной аналитикой"""
-    from analyzer import MarketAnalyzer
-    
+    global analyzer
+
     # Получаем активных юзеров из БД (не из кэша!)
     rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
     active_users = [row['user_id'] for row in rows] if rows else []
@@ -1352,7 +1356,6 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         "MATIC/USDT", "ARB/USDT", "OP/USDT", "APT/USDT"
     ]
     
-    analyzer = MarketAnalyzer()
     best_signal = None
     
     try:
@@ -2061,7 +2064,7 @@ async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обновление цен и PnL с реальными данными Binance"""
+    """Обновление цен и PnL с реальными данными Binance + адаптивное управление"""
     for user_id, user_positions in positions_cache.items():
         user = get_user(user_id)
         
@@ -2085,6 +2088,61 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
             
             # Обновляем в БД
             db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
+            
+            # === АДАПТИВНОЕ УПРАВЛЕНИЕ ПОЗИЦИЕЙ ===
+            # Проверяем нужно ли сдвинуть SL/TP
+            try:
+                adjustment = await analyzer.analyze_position_adjustment(
+                    pos['symbol'], pos['direction'], pos['entry'], pos['sl'], pos['tp']
+                )
+                
+                # Применяем trailing stop / расширение SL при манипуляциях
+                if adjustment['should_adjust_sl'] and adjustment['new_sl'] != pos['sl']:
+                    old_sl = pos['sl']
+                    pos['sl'] = adjustment['new_sl']
+                    db_update_position(pos['id'], sl=pos['sl'])
+                    
+                    # Обновляем на Bybit если хеджирование включено
+                    if await is_hedging_enabled():
+                        await hedger.set_trading_stop(
+                            pos['symbol'].replace("/", ""), 
+                            pos['direction'], 
+                            tp=pos['tp'], 
+                            sl=pos['sl']
+                        )
+                    
+                    logger.info(f"[ADAPTIVE] Position {pos['id']}: SL {old_sl:.4f} -> {pos['sl']:.4f} ({adjustment['reason']})")
+                
+                if adjustment['should_adjust_tp'] and adjustment['new_tp'] != pos['tp']:
+                    old_tp = pos['tp']
+                    pos['tp'] = adjustment['new_tp']
+                    db_update_position(pos['id'], tp=pos['tp'])
+                    
+                    if await is_hedging_enabled():
+                        await hedger.set_trading_stop(
+                            pos['symbol'].replace("/", ""), 
+                            pos['direction'], 
+                            tp=pos['tp'], 
+                            sl=pos['sl']
+                        )
+                    
+                    logger.info(f"[ADAPTIVE] Position {pos['id']}: TP {old_tp:.4f} -> {pos['tp']:.4f} ({adjustment['reason']})")
+                
+                # Критическая рекомендация - закрыть раньше
+                if adjustment['action'] == 'CLOSE_EARLY' and adjustment['urgency'] == 'CRITICAL':
+                    # Отправляем уведомление пользователю
+                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    try:
+                        await context.bot.send_message(
+                            user_id,
+                            f"⚠️ <b>Рекомендация:</b> закрыть {ticker}\n\n{adjustment['reason']}",
+                            parse_mode="HTML"
+                        )
+                    except:
+                        pass
+                        
+            except Exception as e:
+                logger.warning(f"[ADAPTIVE] Ошибка: {e}")
             
             # Автозакрытие по TP/SL
             if pos['direction'] == "LONG":
@@ -2294,8 +2352,7 @@ async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text("🔄 Генерирую тестовый сигнал...")
     
-    from analyzer import MarketAnalyzer
-    analyzer = MarketAnalyzer()
+    global analyzer
     
     try:
         symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]

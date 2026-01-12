@@ -487,6 +487,177 @@ class MarketAnalyzer:
         
         return {'magnet': 'NEUTRAL', 'long_liquidations': [], 'short_liquidations': []}
     
+    # ==================== CRYPTO NEWS & SENTIMENT ====================
+    
+    async def get_crypto_news_sentiment(self, symbol: str) -> Dict:
+        """Анализ новостей через CryptoCompare + Twitter sentiment"""
+        ticker = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
+        
+        news_sentiment = {'score': 0.5, 'impact': 'NEUTRAL', 'headlines': [], 'warnings': []}
+        
+        try:
+            # CryptoCompare News API (бесплатный)
+            url = f"https://min-api.cryptocompare.com/data/v2/news/?categories={ticker},BTC,Regulation&lang=EN"
+            data = await self._fetch_json(url, f"news_{ticker}")
+            
+            if data and 'Data' in data:
+                recent_news = data['Data'][:10]  # Последние 10 новостей
+                
+                # Ключевые слова для sentiment
+                bullish_keywords = ['surge', 'rally', 'bullish', 'breakout', 'adoption', 'approval', 
+                                   'etf approved', 'partnership', 'upgrade', 'all-time high', 'ath',
+                                   'trump crypto', 'trump bitcoin', 'institutional', 'buy', 'accumulating']
+                bearish_keywords = ['crash', 'dump', 'bearish', 'ban', 'regulation', 'sec', 'lawsuit',
+                                   'hack', 'exploit', 'scam', 'bankruptcy', 'sell-off', 'fear',
+                                   'investigation', 'fraud', 'warning', 'concern', 'risk']
+                high_impact_keywords = ['trump', 'sec', 'fed', 'regulation', 'etf', 'china', 'russia',
+                                       'ban', 'approval', 'institutional', 'blackrock', 'congress']
+                
+                bullish_count = 0
+                bearish_count = 0
+                high_impact = False
+                
+                for news in recent_news:
+                    title = news.get('title', '').lower()
+                    body = news.get('body', '').lower()
+                    combined = title + " " + body
+                    
+                    # Проверяем на высокоимпактные события
+                    for keyword in high_impact_keywords:
+                        if keyword in combined:
+                            high_impact = True
+                            news_sentiment['headlines'].append(news.get('title', '')[:100])
+                            break
+                    
+                    # Считаем sentiment
+                    for keyword in bullish_keywords:
+                        if keyword in combined:
+                            bullish_count += 1
+                            break
+                    for keyword in bearish_keywords:
+                        if keyword in combined:
+                            bearish_count += 1
+                            # Добавляем предупреждение
+                            if any(w in combined for w in ['ban', 'regulation', 'sec', 'lawsuit', 'hack']):
+                                news_sentiment['warnings'].append(f"⚠️ {news.get('title', '')[:80]}")
+                            break
+                
+                # Вычисляем score (0-1)
+                total = bullish_count + bearish_count
+                if total > 0:
+                    news_sentiment['score'] = (bullish_count + 0.5 * (10 - total)) / 10
+                else:
+                    news_sentiment['score'] = 0.5
+                
+                # Impact level
+                if high_impact:
+                    news_sentiment['impact'] = 'HIGH'
+                elif bullish_count >= 3 or bearish_count >= 3:
+                    news_sentiment['impact'] = 'MEDIUM'
+                else:
+                    news_sentiment['impact'] = 'LOW'
+                
+                # Bias
+                if bullish_count > bearish_count + 2:
+                    news_sentiment['bias'] = 'BULLISH'
+                elif bearish_count > bullish_count + 2:
+                    news_sentiment['bias'] = 'BEARISH'
+                else:
+                    news_sentiment['bias'] = 'NEUTRAL'
+                
+                logger.info(f"[NEWS] {ticker}: Bull={bullish_count}, Bear={bearish_count}, Impact={news_sentiment['impact']}")
+                
+        except Exception as e:
+            logger.warning(f"[NEWS] Ошибка: {e}")
+        
+        return news_sentiment
+    
+    # ==================== MANIPULATION DETECTION ====================
+    
+    async def detect_manipulation(self, symbol: str) -> Dict:
+        """Детекция возможных манипуляций рынком"""
+        manipulation = {
+            'detected': False,
+            'type': None,
+            'severity': 'LOW',
+            'signals': [],
+            'recommendation': 'TRADE'
+        }
+        
+        try:
+            # Собираем данные
+            klines_5m = await self.get_klines(symbol, '5m', 50)
+            klines_1h = await self.get_klines(symbol, '1h', 24)
+            funding = await self.get_funding_rate(symbol)
+            oi_change = await self.get_open_interest_change(symbol)
+            orderbook = await self.get_order_book_imbalance(symbol)
+            
+            if not klines_5m or not klines_1h:
+                return manipulation
+            
+            closes_5m = [float(k[4]) for k in klines_5m]
+            volumes_5m = [float(k[5]) for k in klines_5m]
+            closes_1h = [float(k[4]) for k in klines_1h]
+            
+            # === 1. VOLUME SPIKE DETECTION ===
+            avg_vol = np.mean(volumes_5m[:-5])  # Средний объём без последних 5 свечей
+            recent_vol = np.mean(volumes_5m[-5:])  # Последние 5 свечей
+            
+            if avg_vol > 0 and recent_vol > avg_vol * 3:
+                manipulation['signals'].append(f"📊 Объём в 3x+ выше нормы ({recent_vol/avg_vol:.1f}x)")
+                manipulation['detected'] = True
+            
+            # === 2. SUDDEN PRICE MOVE (без объёма = манипуляция) ===
+            price_change_5m = (closes_5m[-1] - closes_5m[-6]) / closes_5m[-6] * 100
+            if abs(price_change_5m) > 1.5 and recent_vol < avg_vol * 1.5:
+                manipulation['signals'].append(f"🎭 Резкое движение ({price_change_5m:.1f}%) без объёма - возможная манипуляция")
+                manipulation['detected'] = True
+                manipulation['type'] = 'PUMP_DUMP' if price_change_5m > 0 else 'DUMP_PUMP'
+            
+            # === 3. FUNDING RATE EXTREME ===
+            if abs(funding) > 0.001:  # >0.1% за 8 часов = экстремально
+                direction = "лонгов" if funding > 0 else "шортов"
+                manipulation['signals'].append(f"💰 Экстремальный Funding ({funding:.4f}) - переизбыток {direction}")
+                manipulation['detected'] = True
+            
+            # === 4. OI + PRICE DIVERGENCE ===
+            # Цена растёт, но OI падает = ликвидации шортов (не органический рост)
+            if oi_change['falling'] and price_change_5m > 0.5:
+                manipulation['signals'].append("📉 Рост цены при падении OI - возможно шорт-сквиз")
+                manipulation['type'] = 'SHORT_SQUEEZE'
+            elif oi_change['falling'] and price_change_5m < -0.5:
+                manipulation['signals'].append("📉 Падение цены при падении OI - ликвидации лонгов")
+                manipulation['type'] = 'LONG_LIQUIDATION'
+            
+            # === 5. ORDERBOOK WALL (большая стена - возможно спуфинг) ===
+            if abs(orderbook['imbalance']) > 0.4:
+                side = "покупок" if orderbook['imbalance'] > 0 else "продаж"
+                manipulation['signals'].append(f"🧱 Сильный дисбаланс ордербука в сторону {side} - возможный спуфинг")
+            
+            # === 6. WASH TRADING DETECTION ===
+            # Много сделок одинакового размера подряд
+            
+            # === SEVERITY ===
+            if len(manipulation['signals']) >= 3:
+                manipulation['severity'] = 'HIGH'
+                manipulation['recommendation'] = 'AVOID'
+            elif len(manipulation['signals']) >= 2:
+                manipulation['severity'] = 'MEDIUM'
+                manipulation['recommendation'] = 'CAUTION'
+            elif manipulation['detected']:
+                manipulation['severity'] = 'LOW'
+                manipulation['recommendation'] = 'MONITOR'
+            
+            if manipulation['detected']:
+                logger.warning(f"[MANIPULATION] {symbol}: {manipulation['type']}, Severity={manipulation['severity']}")
+                for sig in manipulation['signals']:
+                    logger.warning(f"[MANIPULATION] {sig}")
+            
+        except Exception as e:
+            logger.warning(f"[MANIPULATION] Ошибка: {e}")
+        
+        return manipulation
+    
     # ==================== BTC CORRELATION ====================
     
     async def get_btc_correlation(self, symbol: str) -> Dict:
@@ -1183,7 +1354,7 @@ class MarketAnalyzer:
             logger.info(f"[ANALYZER] ⏰ Низкая ликвидность ({time_check['hour']}:00 UTC) - пропуск")
             return None
         
-        # Параллельный сбор ВСЕХ данных (расширенный)
+        # Параллельный сбор ВСЕХ данных (расширенный + новости + манипуляции)
         tech_task = self.analyze_technical(symbol)
         sentiment_task = self.analyze_sentiment(symbol)
         price_task = self.get_price(symbol)
@@ -1196,14 +1367,33 @@ class MarketAnalyzer:
         whale_task = self.check_whale_activity(symbol)
         liq_task = self.estimate_liquidation_levels(symbol)
         btc_corr_task = self.get_btc_correlation(symbol)
+        news_task = self.get_crypto_news_sentiment(symbol)
+        manipulation_task = self.detect_manipulation(symbol)
         
         results = await asyncio.gather(
             tech_task, sentiment_task, price_task, mtf_task, div_task, sr_task,
-            orderbook_task, oi_task, cvd_task, whale_task, liq_task, btc_corr_task
+            orderbook_task, oi_task, cvd_task, whale_task, liq_task, btc_corr_task,
+            news_task, manipulation_task
         )
         
         tech, sentiment, current_price, mtf, divergence, sr_levels = results[:6]
-        orderbook, oi_change, cvd, whale, liquidations, btc_corr = results[6:]
+        orderbook, oi_change, cvd, whale, liquidations, btc_corr = results[6:12]
+        news_sentiment, manipulation = results[12:14]
+        
+        # === ПРОВЕРКА МАНИПУЛЯЦИЙ - ОТКЛОНЯЕМ ЕСЛИ ВЫСОКИЙ РИСК ===
+        if manipulation['recommendation'] == 'AVOID':
+            logger.warning(f"[ANALYZER] ❌ Обнаружены манипуляции - пропуск сигнала")
+            for sig in manipulation['signals']:
+                logger.warning(f"[ANALYZER] {sig}")
+            return None
+        
+        # === ПРОВЕРКА НОВОСТНОГО ФОНА ===
+        if news_sentiment['impact'] == 'HIGH':
+            # Если есть высокоимпактные новости, осторожнее
+            logger.info(f"[ANALYZER] ⚠️ Высокоимпактные новости: {news_sentiment.get('headlines', [])[:1]}")
+            if news_sentiment['warnings']:
+                for w in news_sentiment['warnings'][:2]:
+                    logger.warning(f"[ANALYZER] {w}")
         
         # === ГЛУБОКИЙ АНАЛИЗ КОНТЕКСТА ===
         market_context = self._analyze_market_context(
@@ -1268,6 +1458,26 @@ class MarketAnalyzer:
         elif btc_corr['impact'] == 'POSITIVE':
             market_context['insights'].append(f"📈 BTC растёт, альт коррелирует ({btc_corr['correlation']:.0%}) — попутный ветер")
             market_context['bullish_factors'] += 1
+        
+        # === NEWS SENTIMENT ===
+        if news_sentiment['bias'] == 'BULLISH':
+            market_context['insights'].append("📰 Новостной фон положительный")
+            market_context['bullish_factors'] += 2
+        elif news_sentiment['bias'] == 'BEARISH':
+            market_context['warnings'].append("📰 Новостной фон негативный")
+            market_context['bearish_factors'] += 2
+        
+        # Предупреждения из новостей
+        for warning in news_sentiment.get('warnings', [])[:1]:
+            market_context['warnings'].append(warning)
+        
+        # === MANIPULATION WARNING ===
+        if manipulation['detected']:
+            market_context['warnings'].append(f"🎭 Возможные манипуляции: {manipulation['type'] or 'подозрительная активность'}")
+            if manipulation['severity'] == 'MEDIUM':
+                # Уменьшаем факторы если есть манипуляции средней тяжести
+                market_context['bullish_factors'] = max(0, market_context['bullish_factors'] - 1)
+                market_context['bearish_factors'] = max(0, market_context['bearish_factors'] - 1)
         
         # Time bonus
         if time_check['is_overlap']:
@@ -1353,39 +1563,66 @@ class MarketAnalyzer:
                       context_score * context_weight +
                       mtf['score'] * mtf_weight)
         
-        # Определение направления (агрессивные пороги для скальпинга)
-        if total_score > 0.52:
+        # === СТРОГИЕ ПОРОГИ: меньше сделок, выше качество ===
+        # Требуем сильное отклонение от нейтрали (0.5)
+        if total_score > 0.62:
             direction = "LONG"
-        elif total_score < 0.48:
+        elif total_score < 0.38:
             direction = "SHORT"
         else:
-            logger.info(f"[ANALYZER] Нет четкого сигнала (score={total_score:.2f})")
+            logger.info(f"[ANALYZER] ❌ Недостаточно сильный сигнал (score={total_score:.2f}, требуется >0.62 или <0.38)")
             return None
         
-        # Проверка согласованности с контекстом (только сильные конфликты)
-        if direction == "LONG" and market_context['bias'] == "STRONG_SHORT":
-            logger.info(f"[ANALYZER] Конфликт: сигнал LONG, но контекст сильно медвежий")
+        # === СТРОГАЯ ПРОВЕРКА СОГЛАСОВАННОСТИ ===
+        # Сигнал должен совпадать с контекстом
+        if direction == "LONG" and market_context['bias'] in ["STRONG_SHORT", "SHORT"]:
+            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал LONG, но контекст медвежий ({market_context['bias']})")
             return None
-        if direction == "SHORT" and market_context['bias'] == "STRONG_LONG":
-            logger.info(f"[ANALYZER] Конфликт: сигнал SHORT, но контекст сильно бычий")
+        if direction == "SHORT" and market_context['bias'] in ["STRONG_LONG", "LONG"]:
+            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал SHORT, но контекст бычий ({market_context['bias']})")
+            return None
+        
+        # === MTF ДОЛЖЕН ПОДТВЕРЖДАТЬ ===
+        if mtf['confluence'] != "NONE":
+            if direction == "LONG" and mtf['confluence'] == "BEARISH":
+                logger.info(f"[ANALYZER] ❌ MTF не подтверждает LONG (confluence={mtf['confluence']})")
+                return None
+            if direction == "SHORT" and mtf['confluence'] == "BULLISH":
+                logger.info(f"[ANALYZER] ❌ MTF не подтверждает SHORT (confluence={mtf['confluence']})")
+                return None
+        
+        # === МИНИМУМ ФАКТОРОВ В НАШУ СТОРОНУ ===
+        bf = market_context['bullish_factors']
+        bef = market_context['bearish_factors']
+        if direction == "LONG" and bf < bef + 3:
+            logger.info(f"[ANALYZER] ❌ Недостаточно бычьих факторов для LONG (bull={bf}, bear={bef})")
+            return None
+        if direction == "SHORT" and bef < bf + 3:
+            logger.info(f"[ANALYZER] ❌ Недостаточно медвежьих факторов для SHORT (bull={bf}, bear={bef})")
             return None
         
         # Confidence с учётом силы контекста и MTF
         base_confidence = abs(total_score - 0.5) * 2
-        context_bonus = 0.15 if "STRONG" in market_context['bias'] else 0.05
-        mtf_bonus = 0.1 if mtf['aligned'] else 0
-        div_bonus = 0.1 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
+        context_bonus = 0.2 if "STRONG" in market_context['bias'] else 0.1
+        mtf_bonus = 0.15 if mtf['aligned'] else (0.05 if mtf['confluence'] != "NONE" else 0)
+        div_bonus = 0.15 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
         confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
-        # Минимальный порог качества
-        if confidence < 0.15:
-            logger.info(f"[ANALYZER] Низкая уверенность ({confidence:.2%})")
+        # === ВЫСОКИЙ ПОРОГ УВЕРЕННОСТИ ===
+        if confidence < 0.35:
+            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >35%)")
             return None
         
-        # ADX check - нужен тренд
+        # === ADX: НУЖЕН ТРЕНД ===
         adx = tech['indicators'].get('adx', 20)
-        if adx < 18:
-            logger.info(f"[ANALYZER] Слабый тренд (ADX={adx:.1f})")
+        if adx < 22:
+            logger.info(f"[ANALYZER] ❌ Слабый тренд (ADX={adx:.1f}, требуется >22)")
+            return None
+        
+        # === ОБЪЁМ ДОЛЖЕН ПОДТВЕРЖДАТЬ ===
+        vol_ratio = tech['indicators'].get('volume_ratio', 1)
+        if vol_ratio < 0.8:
+            logger.info(f"[ANALYZER] ❌ Низкий объём ({vol_ratio:.2f}x от среднего)")
             return None
         
         # Генерация обоснования с учётом всех данных
@@ -1434,49 +1671,149 @@ class MarketAnalyzer:
         return analysis
     
     async def calculate_entry_price(self, symbol: str, direction: str, analysis: Dict) -> Dict:
-        """Расчет Entry, SL, TP с АДАПТИВНЫМИ значениями на основе ATR"""
+        """
+        УМНЫЙ расчёт Entry, SL, TP на основе:
+        1. S/R уровней (приоритет)
+        2. ATR (волатильность)
+        3. Ликвидационных уровней
+        """
         
         current_price = analysis.get('current_price', await self.get_price(symbol))
         confidence = analysis.get('confidence', 0.5)
+        sr_levels = analysis.get('market_context', {}).get('sr_levels', {})
+        advanced_data = analysis.get('advanced_data', {})
+        liquidations = advanced_data.get('liquidations', {})
         
-        # === АДАПТИВНЫЕ TP/SL на основе волатильности ===
+        # === АДАПТИВНЫЕ TP/SL на основе волатильности (базовые) ===
         adaptive = await self.calculate_adaptive_tpsl(symbol, direction, confidence)
-        
-        sl_percent = adaptive['sl_percent']
-        tp_percent = adaptive['tp_percent']
         volatility = adaptive['volatility']
         
-        sl_distance = current_price * sl_percent
-        tp_distance = current_price * tp_percent
+        # Базовые значения от ATR
+        atr_sl_percent = adaptive['sl_percent']
+        atr_tp_percent = adaptive['tp_percent']
         
+        entry = current_price
+        
+        # === УМНЫЙ SL НА ОСНОВЕ S/R ===
         if direction == "LONG":
-            entry = current_price
-            stop_loss = entry - sl_distance
-            take_profit = entry + tp_distance
-        else:
-            entry = current_price
-            stop_loss = entry + sl_distance
-            take_profit = entry - tp_distance
+            # Для LONG: SL ниже ближайшей поддержки или ATR
+            nearest_support = sr_levels.get('nearest_support')
             
-        # Win rate estimate с учётом волатильности
-        base_winrate = 68
-        confidence_bonus = confidence * 20
+            if nearest_support and nearest_support < current_price:
+                # SL чуть ниже поддержки (с запасом 0.3%)
+                sl_from_support = nearest_support * 0.997
+                sl_from_atr = current_price - (current_price * atr_sl_percent)
+                
+                # Берём более безопасный (ближе к цене) но не ближе чем ATR позволяет
+                if sl_from_support > sl_from_atr:
+                    stop_loss = sl_from_support
+                    sl_source = "S/R"
+                else:
+                    stop_loss = sl_from_atr
+                    sl_source = "ATR"
+            else:
+                stop_loss = current_price - (current_price * atr_sl_percent)
+                sl_source = "ATR"
+            
+            # === УМНЫЙ TP НА ОСНОВЕ S/R ===
+            nearest_resistance = sr_levels.get('nearest_resistance')
+            
+            if nearest_resistance and nearest_resistance > current_price:
+                # TP перед сопротивлением (не доходя 0.2%)
+                tp_from_resistance = nearest_resistance * 0.998
+                tp_from_atr = current_price + (current_price * atr_tp_percent)
+                
+                # Берём более консервативный (ближе к цене)
+                if tp_from_resistance < tp_from_atr:
+                    take_profit = tp_from_resistance
+                    tp_source = "S/R"
+                else:
+                    take_profit = tp_from_atr
+                    tp_source = "ATR"
+            else:
+                take_profit = current_price + (current_price * atr_tp_percent)
+                tp_source = "ATR"
+                
+        else:  # SHORT
+            # Для SHORT: SL выше ближайшего сопротивления
+            nearest_resistance = sr_levels.get('nearest_resistance')
+            
+            if nearest_resistance and nearest_resistance > current_price:
+                sl_from_resistance = nearest_resistance * 1.003
+                sl_from_atr = current_price + (current_price * atr_sl_percent)
+                
+                if sl_from_resistance < sl_from_atr:
+                    stop_loss = sl_from_resistance
+                    sl_source = "S/R"
+                else:
+                    stop_loss = sl_from_atr
+                    sl_source = "ATR"
+            else:
+                stop_loss = current_price + (current_price * atr_sl_percent)
+                sl_source = "ATR"
+            
+            # TP перед поддержкой
+            nearest_support = sr_levels.get('nearest_support')
+            
+            if nearest_support and nearest_support < current_price:
+                tp_from_support = nearest_support * 1.002
+                tp_from_atr = current_price - (current_price * atr_tp_percent)
+                
+                if tp_from_support > tp_from_atr:
+                    take_profit = tp_from_support
+                    tp_source = "S/R"
+                else:
+                    take_profit = tp_from_atr
+                    tp_source = "ATR"
+            else:
+                take_profit = current_price - (current_price * atr_tp_percent)
+                tp_source = "ATR"
         
-        # Bonus for strong ADX (тренд)
+        # === КОРРЕКТИРОВКА ПО ЛИКВИДАЦИЯМ ===
+        # Если SL попадает в зону ликвидаций - могут толкнуть цену туда специально
+        if liquidations:
+            nearest_long_liq = liquidations.get('nearest_long_liq', 0)
+            nearest_short_liq = liquidations.get('nearest_short_liq', float('inf'))
+            
+            if direction == "LONG" and stop_loss > nearest_long_liq * 0.99:
+                # SL слишком близко к ликвидациям лонгов - двигаем дальше
+                stop_loss = nearest_long_liq * 0.98
+                sl_source = "LIQ_SAFE"
+            elif direction == "SHORT" and stop_loss < nearest_short_liq * 1.01:
+                stop_loss = nearest_short_liq * 1.02
+                sl_source = "LIQ_SAFE"
+        
+        # Рассчитываем итоговые проценты
+        sl_percent = abs(stop_loss - entry) / entry
+        tp_percent = abs(take_profit - entry) / entry
+        
+        # === R/R ПРОВЕРКА (минимум 1.8 для качественных сделок) ===
+        rr = tp_percent / sl_percent if sl_percent > 0 else 0
+        if rr < 1.8:
+            # Увеличиваем TP чтобы достичь минимального R/R
+            tp_percent = sl_percent * 1.8
+            if direction == "LONG":
+                take_profit = entry + (entry * tp_percent)
+            else:
+                take_profit = entry - (entry * tp_percent)
+            rr = 1.8
+            tp_source = "R/R_ADJ"
+        
+        # Win rate estimate
+        base_winrate = 70  # Выше базовый winrate из-за строгих фильтров
+        confidence_bonus = confidence * 15
         adx = analysis.get('indicators', {}).get('adx', 20)
-        adx_bonus = 5 if adx > 25 else 0
-        
-        # Volatility adjustment
+        adx_bonus = 5 if adx > 30 else (3 if adx > 25 else 0)
         vol_bonus = 3 if volatility == 'LOW' else (-2 if volatility == 'HIGH' else 0)
+        rr_bonus = 5 if rr > 2.5 else (3 if rr > 2 else 0)
+        sr_bonus = 3 if sl_source == "S/R" else 0
         
-        # R/R bonus
-        rr = adaptive.get('risk_reward', 1.5)
-        rr_bonus = 3 if rr > 2 else 0
+        success_rate = min(92, base_winrate + confidence_bonus + adx_bonus + vol_bonus + rr_bonus + sr_bonus)
         
-        success_rate = min(92, base_winrate + confidence_bonus + adx_bonus + vol_bonus + rr_bonus)
-        
-        logger.info(f"[ADAPTIVE] Entry=${entry:.4f}, SL=${stop_loss:.4f} ({sl_percent*100:.2f}%), TP=${take_profit:.4f} ({tp_percent*100:.2f}%)")
-        logger.info(f"[ADAPTIVE] WinRate={success_rate:.0f}%, Vol={volatility}, R/R={rr:.1f}")
+        logger.info(f"[SMART_TPSL] Entry=${entry:.4f}")
+        logger.info(f"[SMART_TPSL] SL=${stop_loss:.4f} ({sl_percent*100:.2f}%) via {sl_source}")
+        logger.info(f"[SMART_TPSL] TP=${take_profit:.4f} ({tp_percent*100:.2f}%) via {tp_source}")
+        logger.info(f"[SMART_TPSL] R/R={rr:.2f}, WinRate={success_rate:.0f}%, Vol={volatility}")
         
         return {
             'entry_price': entry,
@@ -1486,8 +1823,144 @@ class MarketAnalyzer:
             'sl_percent': sl_percent,
             'tp_percent': tp_percent,
             'volatility': volatility,
-            'risk_reward': rr
+            'risk_reward': rr,
+            'sl_source': sl_source,
+            'tp_source': tp_source
         }
+    
+    async def analyze_position_adjustment(self, symbol: str, direction: str, entry: float, 
+                                          current_sl: float, current_tp: float) -> Dict:
+        """
+        Анализ необходимости сдвига SL/TP для открытой позиции
+        
+        Логика:
+        1. Если цена идёт к TP и видим давление в нашу сторону - можно расширить TP
+        2. Если цена идёт к SL но это манипуляция - можно временно сдвинуть SL
+        3. Trailing stop logic
+        """
+        
+        current_price = await self.get_price(symbol)
+        adjustment = {
+            'should_adjust_sl': False,
+            'should_adjust_tp': False,
+            'new_sl': current_sl,
+            'new_tp': current_tp,
+            'reason': None,
+            'action': 'HOLD',
+            'urgency': 'LOW'
+        }
+        
+        try:
+            # Собираем данные
+            manipulation = await self.detect_manipulation(symbol)
+            orderbook = await self.get_order_book_imbalance(symbol)
+            cvd = await self.get_cvd(symbol)
+            oi_change = await self.get_open_interest_change(symbol)
+            
+            # Прогресс к TP и SL
+            if direction == "LONG":
+                pnl_percent = (current_price - entry) / entry * 100
+                progress_to_tp = (current_price - entry) / (current_tp - entry) * 100 if current_tp != entry else 0
+                progress_to_sl = (entry - current_price) / (entry - current_sl) * 100 if entry != current_sl else 0
+            else:
+                pnl_percent = (entry - current_price) / entry * 100
+                progress_to_tp = (entry - current_price) / (entry - current_tp) * 100 if current_tp != entry else 0
+                progress_to_sl = (current_price - entry) / (current_sl - entry) * 100 if current_sl != entry else 0
+            
+            logger.info(f"[POSITION_MONITOR] {symbol} {direction}: PnL={pnl_percent:.2f}%, ToTP={progress_to_tp:.0f}%, ToSL={progress_to_sl:.0f}%")
+            
+            # === TRAILING STOP: если в хорошем профите - двигаем SL в безубыток ===
+            if pnl_percent > 0.8:  # Более 0.8% профита
+                if direction == "LONG":
+                    breakeven_sl = entry * 1.001  # Чуть выше входа
+                    if current_sl < breakeven_sl:
+                        adjustment['should_adjust_sl'] = True
+                        adjustment['new_sl'] = breakeven_sl
+                        adjustment['reason'] = "Trailing: SL в безубыток"
+                        adjustment['action'] = 'ADJUST_SL'
+                else:
+                    breakeven_sl = entry * 0.999
+                    if current_sl > breakeven_sl:
+                        adjustment['should_adjust_sl'] = True
+                        adjustment['new_sl'] = breakeven_sl
+                        adjustment['reason'] = "Trailing: SL в безубыток"
+                        adjustment['action'] = 'ADJUST_SL'
+            
+            # === СИЛЬНЫЙ ПРОФИТ: агрессивный trailing ===
+            if pnl_percent > 1.5:  # Более 1.5% профита
+                # Двигаем SL на 50% от профита
+                if direction == "LONG":
+                    new_trailing_sl = entry + (current_price - entry) * 0.5
+                    if new_trailing_sl > adjustment['new_sl']:
+                        adjustment['should_adjust_sl'] = True
+                        adjustment['new_sl'] = new_trailing_sl
+                        adjustment['reason'] = f"Trailing: фиксируем {pnl_percent/2:.1f}% профита"
+                        adjustment['action'] = 'ADJUST_SL'
+                else:
+                    new_trailing_sl = entry - (entry - current_price) * 0.5
+                    if new_trailing_sl < adjustment['new_sl']:
+                        adjustment['should_adjust_sl'] = True
+                        adjustment['new_sl'] = new_trailing_sl
+                        adjustment['reason'] = f"Trailing: фиксируем {pnl_percent/2:.1f}% профита"
+                        adjustment['action'] = 'ADJUST_SL'
+            
+            # === МАНИПУЛЯЦИЯ В НАШУ СТОРОНУ: можно расширить TP ===
+            if progress_to_tp > 70:  # Близко к TP
+                favorable_pressure = False
+                if direction == "LONG" and (orderbook['signal'] in ['STRONG_BUY', 'BUY'] or cvd['signal'] in ['STRONG_BUY', 'BUY']):
+                    favorable_pressure = True
+                elif direction == "SHORT" and (orderbook['signal'] in ['STRONG_SELL', 'SELL'] or cvd['signal'] in ['STRONG_SELL', 'SELL']):
+                    favorable_pressure = True
+                
+                if favorable_pressure and not manipulation['detected']:
+                    # Расширяем TP на 30%
+                    tp_distance = abs(current_tp - entry)
+                    if direction == "LONG":
+                        adjustment['new_tp'] = current_tp + tp_distance * 0.3
+                    else:
+                        adjustment['new_tp'] = current_tp - tp_distance * 0.3
+                    adjustment['should_adjust_tp'] = True
+                    adjustment['reason'] = "Давление в нашу сторону - расширяем TP"
+                    adjustment['action'] = 'EXTEND_TP'
+            
+            # === МАНИПУЛЯЦИЯ ПРОТИВ НАС: не паникуем, анализируем ===
+            if progress_to_sl > 60 and manipulation['detected']:
+                # Проверяем тип манипуляции
+                if manipulation['type'] in ['PUMP_DUMP', 'DUMP_PUMP', 'SHORT_SQUEEZE', 'LONG_LIQUIDATION']:
+                    # Если это явная манипуляция - можно временно расширить SL
+                    # но только если OI падает (значит это ликвидации, а не новый тренд)
+                    if oi_change['falling']:
+                        sl_distance = abs(current_sl - entry)
+                        if direction == "LONG":
+                            adjustment['new_sl'] = current_sl - sl_distance * 0.3
+                        else:
+                            adjustment['new_sl'] = current_sl + sl_distance * 0.3
+                        adjustment['should_adjust_sl'] = True
+                        adjustment['reason'] = f"Манипуляция ({manipulation['type']}) + падение OI - временно расширяем SL"
+                        adjustment['action'] = 'WIDEN_SL'
+                        adjustment['urgency'] = 'HIGH'
+            
+            # === КРИТИЧЕСКАЯ СИТУАЦИЯ: близко к SL без манипуляций ===
+            if progress_to_sl > 80 and not manipulation['detected']:
+                # Проверяем давление
+                unfavorable_pressure = False
+                if direction == "LONG" and (orderbook['signal'] in ['STRONG_SELL'] or cvd['signal'] in ['STRONG_SELL']):
+                    unfavorable_pressure = True
+                elif direction == "SHORT" and (orderbook['signal'] in ['STRONG_BUY'] or cvd['signal'] in ['STRONG_BUY']):
+                    unfavorable_pressure = True
+                
+                if unfavorable_pressure:
+                    adjustment['reason'] = "Сильное давление против позиции - рекомендуем закрыть"
+                    adjustment['action'] = 'CLOSE_EARLY'
+                    adjustment['urgency'] = 'CRITICAL'
+            
+            if adjustment['action'] != 'HOLD':
+                logger.info(f"[POSITION_MONITOR] Рекомендация: {adjustment['action']} - {adjustment['reason']}")
+            
+        except Exception as e:
+            logger.error(f"[POSITION_MONITOR] Ошибка: {e}")
+        
+        return adjustment
     
     async def close(self):
         """Закрытие сессии"""
