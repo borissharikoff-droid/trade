@@ -1563,14 +1563,13 @@ class MarketAnalyzer:
                       context_score * context_weight +
                       mtf['score'] * mtf_weight)
         
-        # === СТРОГИЕ ПОРОГИ: меньше сделок, выше качество ===
-        # Требуем сильное отклонение от нейтрали (0.5)
-        if total_score > 0.62:
+        # === СБАЛАНСИРОВАННЫЕ ПОРОГИ: качество + достаточное количество ===
+        if total_score > 0.56:
             direction = "LONG"
-        elif total_score < 0.38:
+        elif total_score < 0.44:
             direction = "SHORT"
         else:
-            logger.info(f"[ANALYZER] ❌ Недостаточно сильный сигнал (score={total_score:.2f}, требуется >0.62 или <0.38)")
+            logger.info(f"[ANALYZER] ❌ Недостаточно сильный сигнал (score={total_score:.2f}, требуется >0.56 или <0.44)")
             return None
         
         # === СТРОГАЯ ПРОВЕРКА СОГЛАСОВАННОСТИ ===
@@ -1594,10 +1593,10 @@ class MarketAnalyzer:
         # === МИНИМУМ ФАКТОРОВ В НАШУ СТОРОНУ ===
         bf = market_context['bullish_factors']
         bef = market_context['bearish_factors']
-        if direction == "LONG" and bf < bef + 3:
+        if direction == "LONG" and bf < bef + 2:
             logger.info(f"[ANALYZER] ❌ Недостаточно бычьих факторов для LONG (bull={bf}, bear={bef})")
             return None
-        if direction == "SHORT" and bef < bf + 3:
+        if direction == "SHORT" and bef < bf + 2:
             logger.info(f"[ANALYZER] ❌ Недостаточно медвежьих факторов для SHORT (bull={bf}, bear={bef})")
             return None
         
@@ -1608,20 +1607,20 @@ class MarketAnalyzer:
         div_bonus = 0.15 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
         confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
-        # === ВЫСОКИЙ ПОРОГ УВЕРЕННОСТИ ===
-        if confidence < 0.35:
-            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >35%)")
+        # === ПОРОГ УВЕРЕННОСТИ ===
+        if confidence < 0.28:
+            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >28%)")
             return None
         
         # === ADX: НУЖЕН ТРЕНД ===
         adx = tech['indicators'].get('adx', 20)
-        if adx < 22:
-            logger.info(f"[ANALYZER] ❌ Слабый тренд (ADX={adx:.1f}, требуется >22)")
+        if adx < 19:
+            logger.info(f"[ANALYZER] ❌ Слабый тренд (ADX={adx:.1f}, требуется >19)")
             return None
         
         # === ОБЪЁМ ДОЛЖЕН ПОДТВЕРЖДАТЬ ===
         vol_ratio = tech['indicators'].get('volume_ratio', 1)
-        if vol_ratio < 0.8:
+        if vol_ratio < 0.7:
             logger.info(f"[ANALYZER] ❌ Низкий объём ({vol_ratio:.2f}x от среднего)")
             return None
         
