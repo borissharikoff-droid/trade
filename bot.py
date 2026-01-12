@@ -599,7 +599,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Rate limiting
     if check_rate_limit(user_id):
         if update.callback_query:
-            await update.callback_query.answer("⏳ Слишком много запросов", show_alert=True)
+            await update.callback_query.answer("⏳ Подожди немного", show_alert=True)
         return
     
     logger.info(f"[START] User {user_id}")
@@ -620,11 +620,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     balance = user['balance']
     trading_status = "🟢" if user['trading'] else "🔴"
     
-    text = f"""<b>💰 ${balance:.2f}</b>
+    text = f"""<b>💰 Баланс</b>
+
+${balance:.2f}
 
 Торговля: {trading_status}
-
-Включи — получай сделки 75%+ winrate"""
+Winrate: 75%+"""
     
     keyboard = [
         [InlineKeyboardButton(f"{'🔴 Выкл' if user['trading'] else '🟢 Вкл'}", callback_data="toggle")],
@@ -647,11 +648,9 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     logger.info(f"[DEPOSIT] User {update.effective_user.id}")
     await query.answer()
     
-    text = f"""<b>💳 Пополнение баланса</b>
+    text = f"""<b>💳 Пополнение</b>
 
-<b>Минимум:</b> ${MIN_DEPOSIT}
-
-Выберите способ:"""
+Минимум: ${MIN_DEPOSIT}"""
     
     keyboard = [
         [InlineKeyboardButton("⭐ Telegram Stars", callback_data="pay_stars")],
@@ -665,9 +664,9 @@ async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     
-    text = """⭐ Пополнение через Stars
+    text = """<b>⭐ Через Stars</b>
 
-Выберите сумму:"""
+Выбери сумму:"""
     
     # 50 stars = $1
     keyboard = [
@@ -739,15 +738,15 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
             try:
                 await context.bot.send_message(
                     referrer_id,
-                    f"🎉 Твой реферал сделал депозит!\nБонус: +${REFERRAL_BONUS}"
+                    f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}"
                 )
             except:
                 pass
         
-    text = f"""✅ Оплата прошла!
+    text = f"""<b>✅ Оплата</b>
 
 Зачислено: ${usd}
-Баланс: ${user['balance']:.2f}"""
+💰 ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -757,9 +756,9 @@ async def pay_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     
-    text = """💎 Пополнение через Crypto
+    text = """<b>💎 Через Crypto</b>
 
-Выберите сумму:"""
+Выбери сумму:"""
     
     keyboard = [
         [
@@ -791,7 +790,7 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     
     if not crypto_token:
         await query.edit_message_text(
-            "❌ Crypto-оплата временно недоступна.",
+            "❌ Crypto временно недоступен",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]])
         )
         return
@@ -829,9 +828,9 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
             'amount': amount
         }
         
-        text = f"""💎 Оплата ${amount} USDT
+        text = f"""<b>💎 Оплата</b>
 
-Нажмите кнопку для оплаты:"""
+К оплате: ${amount} USDT"""
         
         keyboard = [
             [InlineKeyboardButton("💳 Оплатить", url=invoice['bot_invoice_url'])],
@@ -844,7 +843,7 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"[CRYPTO] Error: {e}")
         await query.edit_message_text(
-            "❌ Ошибка создания платежа.",
+            "❌ Ошибка создания платежа",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]])
         )
 
@@ -908,15 +907,15 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                     try:
                         await context.bot.send_message(
                             referrer_id,
-                            f"🎉 Твой реферал сделал депозит!\nБонус: +${REFERRAL_BONUS}"
+                            f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}"
                         )
                     except:
                         pass
             
-            text = f"""✅ Оплата получена!
+            text = f"""<b>✅ Оплата</b>
 
 Зачислено: ${amount}
-Баланс: ${user['balance']:.2f}"""
+💰 ${user['balance']:.2f}"""
             
             keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -941,7 +940,7 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     if not user['trading'] and user['balance'] < MIN_DEPOSIT:
         logger.info(f"[TOGGLE] User {user_id} - insufficient balance (${user['balance']:.2f})")
-        await query.answer(f"❌ Недостаточно баланса!\n\nМинимум для торговли: ${MIN_DEPOSIT}\nВаш баланс: ${user['balance']:.2f}", show_alert=True)
+        await query.answer(f"❌ Недостаточно средств\n\nБаланс: ${user['balance']:.2f}\nМинимум: ${MIN_DEPOSIT}", show_alert=True)
         return
     
     new_state = not user['trading']
@@ -1021,18 +1020,19 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                 pnl_abs = abs(real_pnl)
 
                 if real_pnl > 0:
-                    text = f"""🎉 <b>Сделка закрылась на Bybit!</b>
+                    text = f"""<b>📡 Bybit</b>
 
-Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
+{ticker} закрыт
+Итого: <b>+${pnl_abs:.0f}</b>
 
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
                 else:
-                    text = f"""📉 <b>Сделка закрылась на Bybit</b>
+                    text = f"""<b>📡 Bybit</b>
 
-{ticker}: <b>-${pnl_abs:.0f}</b>
+{ticker} закрыт
+Итого: <b>-${pnl_abs:.0f}</b>
 
-Не расстраивайтесь! 💪
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
 
                 await context.bot.send_message(user_id, text, parse_mode="HTML")
             except Exception as e:
@@ -1118,7 +1118,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
     
-    await query.edit_message_text("⏳ Закрываем все позиции...")
+    await query.edit_message_text("⏳ Закрываем позиции...")
     
     # === ГРУППИРУЕМ ПОЗИЦИИ ПО СИМВОЛУ ДЛЯ ЗАКРЫТИЯ НА BYBIT ===
     # Bybit хранит одну позицию на символ, поэтому закрываем один раз за группу
@@ -1194,37 +1194,36 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     pnl_abs = abs(total_pnl)
     
     if total_pnl > 0:
-        text = f"""🎉 <b>Отличная работа!</b>
+        text = f"""<b>📊 Все сделки закрыты</b>
 
-Вы закрыли <b>{closed_count}</b> сделок
+Закрыто: {closed_count}
+✅ {winners} прибыльных
+❌ {losers} убыточных
 
-📊 <b>Результат:</b>
-✅ Прибыльных: {winners}
-❌ Убыточных: {losers}
+Итого: <b>+${pnl_abs:.0f}</b>
+Хороший сет.
 
-💰 <b>Итого: +${pnl_abs:.0f}</b>
-
-Так держать! 🚀
-💵 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     elif total_pnl < 0:
-        text = f"""📊 <b>Сделки закрыты</b>
+        text = f"""<b>📊 Все сделки закрыты</b>
 
-Закрыто: <b>{closed_count}</b> сделок
+Закрыто: {closed_count}
+✅ {winners} прибыльных
+❌ {losers} убыточных
 
-📈 Прибыльных: {winners}
-📉 Убыточных: {losers}
+Итого: <b>-${pnl_abs:.0f}</b>
+Следующий будет лучше.
 
-💔 <b>Итого: -${pnl_abs:.0f}</b>
-
-Не сдавайтесь! Рынок всегда даёт шансы 💪
-💵 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     else:
-        text = f"""📊 <b>Сделки закрыты</b>
+        text = f"""<b>📊 Все сделки закрыты</b>
 
-Закрыто: <b>{closed_count}</b> сделок
+Закрыто: {closed_count}
 
-В безубыток! Неплохо 👍
-💵 Баланс: <b>${user['balance']:.0f}</b>"""
+Итого: $0
+Капитал сохранён.
+
+💰 ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1256,11 +1255,11 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
     if not user_positions:
-        text = f"""<b>💼 Позиции</b>
+        text = f"""<b>💼 Нет позиций</b>
 
-Нет сделок
+{wins}/{total_trades} ({winrate}%)
 
-💰 ${user['balance']:.0f} | {wins}/{total_trades} ({winrate}%)"""
+💰 ${user['balance']:.0f}"""
         
         keyboard = [
             [InlineKeyboardButton("🔄", callback_data="trades"), InlineKeyboardButton("🔙", callback_data="back")]
@@ -1282,15 +1281,15 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         emoji = "🟢" if pnl >= 0 else "🔴"
         pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-        dir_text = "L" if pos['direction'] == "LONG" else "S"
+        dir_text = "LONG" if pos['direction'] == "LONG" else "SHORT"
         current = pos.get('current', pos['entry'])
         
         # Показываем количество стакнутых позиций
         stack_info = f" x{pos['stacked_count']}" if pos.get('stacked_count', 1) > 1 else ""
         
-        text += f"<b>{ticker}</b> {dir_text} ${pos['amount']:.0f}{stack_info} {emoji}\n"
-        text += f"📍 {format_price(current)} | TP: {format_price(pos['tp'])} | SL: {format_price(pos['sl'])}\n"
-        text += f"PNL: {pnl_str}\n\n"
+        text += f"<b>{ticker}</b> | {dir_text} | ${pos['amount']:.0f} | x{LEVERAGE}{stack_info} {emoji}\n"
+        text += f"{format_price(current)} → TP: {format_price(pos['tp'])} | SL: {format_price(pos['sl'])}\n"
+        text += f"PnL: {pnl_str}\n\n"
         
         # Для стакнутых позиций передаём все ID через запятую
         if pos.get('position_ids'):
@@ -1304,8 +1303,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     total_pnl = sum(p.get('pnl', 0) for p in user_positions)
     total_pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
     
-    text += f"""───────────────
-📊 Всего PnL: <b>{total_pnl_str}</b>
+    text += f"""───
+Всего: <b>{total_pnl_str}</b>
+
 💰 ${user['balance']:.2f} | {wins}/{total_trades} ({winrate}%)"""
     
     # Кнопка закрыть все (если больше 1 позиции)
@@ -1548,17 +1548,16 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     tp_percent = abs(tp - entry) / entry * 100
                     sl_percent = abs(sl - entry) / entry * 100
                     
-                    auto_msg = f"""🤖 <b>АВТО-СДЕЛКА</b>
+                    auto_msg = f"""<b>🤖 Авто-сделка</b>
 
-{'🟢' if direction == 'LONG' else '🔴'} {ticker} {direction} x{auto_leverage}
+{ticker} | {direction} | ${auto_bet:.0f} | x{auto_leverage}
+Уверенность: {winrate}%
 
-💵 Ставка: <b>${auto_bet:.0f}</b>
-🎯 Уверенность: <b>{winrate}%</b>
-📍 Вход: {format_price(entry)}
-✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
-🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
+Вход: {format_price(entry)}
+TP: {format_price(tp)} (+{tp_percent:.1f}%)
+SL: {format_price(sl)} (-{sl_percent:.1f}%)
 
-💰 Баланс: ${new_balance:.0f}"""
+💰 ${new_balance:.0f}"""
                     
                     await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML")
                     logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
@@ -1588,11 +1587,14 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         tp_percent = abs(tp - entry) / entry * 100
         sl_percent = abs(sl - entry) / entry * 100
         
-        text = f"""🎯 <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE}
+        text = f"""<b>📡 Сигнал</b>
 
-💵 Вход: <b>{format_price(entry)}</b>
-✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
-🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
+{ticker} | {dir_text} | x{LEVERAGE}
+Winrate: {winrate}%
+
+Вход: {format_price(entry)}
+TP: {format_price(tp)} (+{tp_percent:.1f}%)
+SL: {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${balance:.0f}"""
         
@@ -1662,7 +1664,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
 
     # === ПОКАЗЫВАЕМ "ОТКРЫВАЕМ..." ===
-    await query.edit_message_text(f"⏳ Открываем {dir_emoji} {ticker} на ${amount:.0f}...")
+    await query.edit_message_text(f"<b>⏳ Открываем</b>\n\n{ticker} | {direction} | ${amount:.0f}", parse_mode="HTML")
 
     # Комиссия за открытие
     commission = amount * (COMMISSION_PERCENT / 100)
@@ -1750,13 +1752,16 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     tp_percent = abs(tp - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE} | ${amount:.0f}
+    text = f"""<b>✅ Сделка открыта</b>
 
-📍 Вход: {format_price(entry)}
-✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
-🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
+{ticker} | {dir_text} | ${amount:.0f} | x{LEVERAGE}
+Winrate: {winrate}%
 
-💰 Баланс: ${user['balance']:.0f}"""
+Вход: {format_price(entry)}
+TP: {format_price(tp)} (+{tp_percent:.1f}%)
+SL: {format_price(sl)} (-{sl_percent:.1f}%)
+
+💰 ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1820,26 +1825,28 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
     
     if pnl > 0:
-        text = f"""🎉 <b>Поздравляем!</b>
+        text = f"""<b>📈 Сделка закрыта</b>
 
-Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
+{ticker} | +${pnl_abs:.0f}
+Чистая работа.
 
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     elif pnl == 0:
-        text = f"""✅ <b>Сделка закрыта</b>
+        text = f"""<b>➖ Безубыток</b>
 
-{ticker}: <b>$0</b> (в безубыток)
+{ticker} | $0
+Вышли без потерь.
 
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     else:
-        text = f"""📉 <b>Сделка закрыта</b>
+        text = f"""<b>📉 Сделка закрыта</b>
 
-{ticker}: <b>-${pnl_abs:.0f}</b>
+{ticker} | -${pnl_abs:.0f}
+Часть стратегии.
 
-Не расстраивайтесь, следующая будет лучше! 💪
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     
-    keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
+    keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
@@ -1931,29 +1938,31 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     pnl_abs = abs(total_pnl)
     
     if total_pnl > 0:
-        text = f"""🎉 <b>Поздравляем!</b>
+        text = f"""<b>📈 Сделки закрыты</b>
 
-Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
-Закрыто позиций: {len(to_close)}
+{ticker} | +${pnl_abs:.0f}
+Закрыто: {len(to_close)}
+Чистая работа.
 
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     elif total_pnl == 0:
-        text = f"""✅ <b>Сделки закрыты</b>
+        text = f"""<b>➖ Безубыток</b>
 
-{ticker}: <b>$0</b> (в безубыток)
-Закрыто позиций: {len(to_close)}
+{ticker} | $0
+Закрыто: {len(to_close)}
+Вышли без потерь.
 
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     else:
-        text = f"""📉 <b>Сделки закрыты</b>
+        text = f"""<b>📉 Сделки закрыты</b>
 
-{ticker}: <b>-${pnl_abs:.0f}</b>
-Закрыто позиций: {len(to_close)}
+{ticker} | -${pnl_abs:.0f}
+Закрыто: {len(to_close)}
+Часть стратегии.
 
-Не расстраивайтесь! 💪
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
     
-    keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
+    keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1979,12 +1988,12 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     
     user = get_user(update.effective_user.id)
     
-    text = f"""💵 Введи сумму сделки
+    text = f"""<b>💵 Своя сумма</b>
 
 Минимум: $1
-Твой баланс: ${user['balance']:.2f}
+Баланс: ${user['balance']:.2f}
 
-Отправь число (например: 15)"""
+Введи сумму:"""
     
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="skip")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2009,7 +2018,7 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     if amount > user['balance']:
-        await update.message.reply_text(f"❌ Недостаточно средств. Баланс: ${user['balance']:.2f}\n\n💡 Введи другую сумму:")
+        await update.message.reply_text(f"❌ Недостаточно средств (${user['balance']:.2f})\n\nВведи другую сумму:")
         return  # pending_trade сохраняется, можно ввести снова
 
     trade = context.user_data.pop('pending_trade')
@@ -2106,13 +2115,16 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     tp_percent = abs(tp - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""✅ <b>{winrate}%</b> | {ticker} {dir_text} x{LEVERAGE} | ${amount:.0f}
+    text = f"""<b>✅ Сделка открыта</b>
 
-📍 Вход: {format_price(entry)}
-✅ TP: {format_price(tp)} (+{tp_percent:.1f}%)
-🛡 SL: {format_price(sl)} (-{sl_percent:.1f}%)
+{ticker} | {dir_text} | ${amount:.0f} | x{LEVERAGE}
+Winrate: {winrate}%
 
-💰 Баланс: ${user['balance']:.0f}"""
+Вход: {format_price(entry)}
+TP: {format_price(tp)} (+{tp_percent:.1f}%)
+SL: {format_price(sl)} (-{sl_percent:.1f}%)
+
+💰 ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -2220,7 +2232,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     try:
                         await context.bot.send_message(
                             user_id,
-                            f"⚠️ <b>Рекомендация:</b> закрыть {ticker}\n\n{adjustment['reason']}",
+                            f"<b>⚠️ Рекомендация</b>\n\n{ticker}: лучше закрыть\n{adjustment['reason']}",
                             parse_mode="HTML"
                         )
                     except:
@@ -2261,25 +2273,27 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                 
                 if hit_tp:
-                    text = f"""🎉 <b>Take Profit!</b>
+                    text = f"""<b>📈 Take Profit</b>
 
-Вы заработали <b>+${pnl_abs:.0f}</b> на {ticker}! 🚀
+{ticker} | +${pnl_abs:.0f}
+{format_price(pos['entry'])} → {format_price(pos['current'])}
+Цель достигнута.
 
-📍 {format_price(pos['entry'])} → {format_price(pos['current'])}
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
                 elif pos['pnl'] == 0:
-                    text = f"""✅ <b>Сделка закрыта</b>
+                    text = f"""<b>➖ Безубыток</b>
 
-{ticker}: <b>$0</b> (в безубыток)
+{ticker} | $0
+Вышли без потерь.
 
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
                 else:
-                    text = f"""📉 <b>Stop Loss</b>
+                    text = f"""<b>📉 Stop Loss</b>
 
-{ticker}: <b>-${pnl_abs:.0f}</b>
+{ticker} | -${pnl_abs:.0f}
+Стоп отработал как надо.
 
-Защитили от большего убытка. Следующая будет лучше! 💪
-💰 Баланс: <b>${user['balance']:.0f}</b>"""
+💰 ${user['balance']:.0f}"""
                 
                 try:
                     await context.bot.send_message(
@@ -2332,34 +2346,34 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     stats = db_get_stats()
     
-    text = f"""📊 АДМИН-ПАНЕЛЬ
+    text = f"""<b>📊 Админ-панель</b>
 
 👥 Пользователи: {stats['users']}
 🟢 Активных: {stats['active_traders']}
 
-💰 Общий баланс: ${stats['total_balance']:.2f}
-📥 Всего депозитов: ${stats['total_deposits']:.2f}
-📈 Общий профит: ${stats['total_profit']:.2f}
+💰 Баланс: ${stats['total_balance']:.2f}
+📥 Депозиты: ${stats['total_deposits']:.2f}
+📈 Профит: ${stats['total_profit']:.2f}
 
-📋 Открытых позиций: {stats['open_positions']}
-✅ Всего сделок: {stats['total_trades']}
-💵 Реализованный P&L: ${stats['realized_pnl']:.2f}
+📋 Позиций: {stats['open_positions']}
+✅ Сделок: {stats['total_trades']}
+💵 P&L: ${stats['realized_pnl']:.2f}
 
-🏦 Заработано комиссий: ${stats['commissions']:.2f}"""
+🏦 Комиссии: ${stats['commissions']:.2f}"""
     
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, parse_mode="HTML")
 
 async def add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Добавить баланс пользователю (админ)"""
     admin_id = update.effective_user.id
     
     if admin_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     # /addbalance [user_id] [amount] или /addbalance [amount] (себе)
@@ -2391,7 +2405,7 @@ async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     admin_id = update.effective_user.id
     
     if admin_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     stats = db_get_stats()
@@ -2432,7 +2446,7 @@ async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     await update.message.reply_text("🔄 Генерирую тестовый сигнал...")
@@ -2476,7 +2490,7 @@ async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     args = context.args
@@ -2535,7 +2549,7 @@ async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     from hedger import hedger
@@ -2622,7 +2636,7 @@ async def test_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     await update.message.reply_text("🔄 Тестирую хеджирование на BTC...")
@@ -2648,7 +2662,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     if not context.args:
@@ -2670,14 +2684,14 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except:
             failed += 1
     
-    await update.message.reply_text(f"✅ Отправлено: {sent}\n❌ Ошибок: {failed}")
+    await update.message.reply_text(f"<b>📢 Рассылка</b>\n\n✅ {sent} | ❌ {failed}", parse_mode="HTML")
 
 async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Сброс: закрыть все позиции и установить баланс"""
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещён")
+        await update.message.reply_text("⛔ Доступ закрыт")
         return
     
     # /reset [user_id] [balance] или /reset [balance]
@@ -2745,17 +2759,17 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Показать алерты
         alerts = db_get_user_alerts(user_id)
         if not alerts:
-            await update.message.reply_text("🔔 У тебя нет активных алертов\n\nСоздать: /alert BTC 100000")
-        return
+            await update.message.reply_text("<b>🔔 Нет алертов</b>\n\nСоздать: /alert BTC 100000", parse_mode="HTML")
+            return
     
-        text = "🔔 Твои алерты:\n\n"
+        text = "<b>🔔 Алерты</b>\n\n"
         for a in alerts:
             ticker = a['symbol'].split("/")[0] if "/" in a['symbol'] else a['symbol']
             direction = "⬆️" if a['direction'] == 'above' else "⬇️"
             text += f"#{a['id']} {ticker} {direction} ${a['target_price']:,.0f}\n"
         
         text += "\nУдалить: /delalert <id>"
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode="HTML")
         return
     
     # Создать алерт: /alert BTC 100000
@@ -2784,12 +2798,10 @@ async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     alert_id = db_add_alert(user_id, symbol, target_price, direction)
     
     emoji = "⬆️" if direction == "above" else "⬇️"
-    text = f"""🔔 Алерт создан!
+    text = f"""<b>🔔 Алерт создан</b>
 
 {ticker} {emoji} ${target_price:,.0f}
-Сейчас: ${current_price:,.2f}
-
-Уведомим когда цена достигнет цели."""
+Сейчас: ${current_price:,.2f}"""
     
     await update.message.reply_text(text)
 
@@ -2849,13 +2861,12 @@ async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
             ticker = symbol.split("/")[0] if "/" in symbol else symbol
             emoji = "🚀" if direction == 'above' else "📉"
             
-            text = f"""{emoji} АЛЕРТ!
+            text = f"""<b>🔔 Алерт</b>
 
-{ticker} достиг ${target:,.0f}
-Сейчас: ${current_price:,.2f}"""
+{ticker} достиг ${target:,.0f}"""
             
             try:
-                await context.bot.send_message(alert['user_id'], text)
+                await context.bot.send_message(alert['user_id'], text, parse_mode="HTML")
                 logger.info(f"[ALERT] Triggered #{alert['id']} for {alert['user_id']}")
             except:
                 pass
