@@ -1624,6 +1624,41 @@ class MarketAnalyzer:
             logger.info(f"[ANALYZER] ❌ Низкий объём ({vol_ratio:.2f}x от среднего)")
             return None
         
+        # === WHALE CONFIRMATION: Киты должны быть на нашей стороне ===
+        if whale['whale_trades_count'] >= 5:
+            if direction == "LONG" and whale['bias'] == "SELL":
+                logger.info(f"[ANALYZER] ❌ Киты продают ({whale['whale_trades_count']} сделок) - пропуск LONG")
+                return None
+            if direction == "SHORT" and whale['bias'] == "BUY":
+                logger.info(f"[ANALYZER] ❌ Киты покупают ({whale['whale_trades_count']} сделок) - пропуск SHORT")
+                return None
+        
+        # === CVD MOMENTUM: Реальное давление должно подтверждать ===
+        cvd_delta = cvd.get('delta_percent', 0)
+        if direction == "LONG" and cvd_delta < -15:
+            logger.info(f"[ANALYZER] ❌ CVD сильно негативный ({cvd_delta:.1f}%) - пропуск LONG")
+            return None
+        if direction == "SHORT" and cvd_delta > 15:
+            logger.info(f"[ANALYZER] ❌ CVD сильно позитивный ({cvd_delta:.1f}%) - пропуск SHORT")
+            return None
+        
+        # === ORDER BOOK: Не должен сильно противоречить ===
+        if direction == "LONG" and orderbook['signal'] == 'STRONG_SELL':
+            logger.info(f"[ANALYZER] ❌ Order book сильно против LONG ({orderbook['imbalance']:.1%})")
+            return None
+        if direction == "SHORT" and orderbook['signal'] == 'STRONG_BUY':
+            logger.info(f"[ANALYZER] ❌ Order book сильно против SHORT ({orderbook['imbalance']:.1%})")
+            return None
+        
+        # === BTC TREND FILTER: Не торгуем альты против BTC ===
+        if symbol != "BTC/USDT" and btc_corr['correlation'] > 0.7:
+            if direction == "LONG" and btc_corr['btc_direction'] == "DOWN":
+                logger.info(f"[ANALYZER] ❌ BTC падает, {symbol} коррелирует ({btc_corr['correlation']:.0%}) - пропуск LONG")
+                return None
+            if direction == "SHORT" and btc_corr['btc_direction'] == "UP":
+                logger.info(f"[ANALYZER] ❌ BTC растёт, {symbol} коррелирует ({btc_corr['correlation']:.0%}) - пропуск SHORT")
+                return None
+        
         # Генерация обоснования с учётом всех данных
         market_context['mtf'] = mtf
         market_context['divergence'] = divergence.get('divergence')
@@ -1786,16 +1821,16 @@ class MarketAnalyzer:
         sl_percent = abs(stop_loss - entry) / entry
         tp_percent = abs(take_profit - entry) / entry
         
-        # === R/R ПРОВЕРКА (минимум 1.8 для качественных сделок) ===
+        # === R/R ПРОВЕРКА (минимум 2.0 для максимизации профита) ===
         rr = tp_percent / sl_percent if sl_percent > 0 else 0
-        if rr < 1.8:
+        if rr < 2.0:
             # Увеличиваем TP чтобы достичь минимального R/R
-            tp_percent = sl_percent * 1.8
+            tp_percent = sl_percent * 2.0
             if direction == "LONG":
                 take_profit = entry + (entry * tp_percent)
             else:
                 take_profit = entry - (entry * tp_percent)
-            rr = 1.8
+            rr = 2.0
             tp_source = "R/R_ADJ"
         
         # Win rate estimate
