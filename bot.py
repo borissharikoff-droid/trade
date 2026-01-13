@@ -3352,21 +3352,20 @@ User ID: {AUTO_TRADE_USER_ID}
         except ValueError:
             await update.message.reply_text("❌ Неверная сумма")
     elif cmd == "clear":
-        # Очистить все позиции и историю для авто-трейда
-        run_sql("DELETE FROM positions WHERE user_id = ?", (AUTO_TRADE_USER_ID,))
-        run_sql("DELETE FROM history WHERE user_id = ?", (AUTO_TRADE_USER_ID,))
+        # Очистить ВСЕ данные во всей БД
+        run_sql("DELETE FROM positions")
+        run_sql("DELETE FROM history")
+        run_sql("DELETE FROM alerts")
         
-        # Сбрасываем кэш
-        if AUTO_TRADE_USER_ID in positions_cache:
-            positions_cache[AUTO_TRADE_USER_ID] = []
+        # Сбрасываем статистику всех пользователей
+        run_sql("UPDATE users SET total_profit = 0, auto_trade_today = 0")
         
-        # Сбрасываем счётчик сделок
-        if AUTO_TRADE_USER_ID in users_cache:
-            users_cache[AUTO_TRADE_USER_ID]['auto_trade_today'] = 0
-        db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0)
+        # Очищаем весь кэш
+        positions_cache.clear()
+        users_cache.clear()
         
-        await update.message.reply_text("✅ Все позиции и история очищены")
-        logger.info(f"[ADMIN] User {user_id} cleared all auto-trade data")
+        await update.message.reply_text("✅ ВСЯ БД очищена:\n• Позиции\n• История\n• Алерты\n• Статистика")
+        logger.info(f"[ADMIN] User {user_id} cleared ALL database")
     else:
         await update.message.reply_text("❌ Неизвестная команда. Используй: on, off, balance AMOUNT, clear")
 
