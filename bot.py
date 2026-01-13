@@ -367,7 +367,13 @@ def db_get_real_winrate(min_trades: int = 20) -> Dict:
         {'winrate': float, 'trades': int, 'reliable': bool}
         reliable=True если данных достаточно (>min_trades)
     """
-    row = run_sql("""
+    # PostgreSQL и SQLite используют разный синтаксис для дат
+    if USE_POSTGRES:
+        date_filter = "closed_at > NOW() - INTERVAL '30 days'"
+    else:
+        date_filter = "closed_at > datetime('now', '-30 days')"
+    
+    row = run_sql(f"""
         SELECT 
             COUNT(*) as total,
             SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
@@ -375,7 +381,7 @@ def db_get_real_winrate(min_trades: int = 20) -> Dict:
             AVG(CASE WHEN pnl > 0 THEN pnl ELSE NULL END) as avg_win,
             AVG(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE NULL END) as avg_loss
         FROM history 
-        WHERE closed_at > datetime('now', '-30 days')
+        WHERE {date_filter}
     """, fetch="one")
     
     if not row or not row['total']:
