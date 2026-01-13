@@ -1482,6 +1482,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         await analyzer.close()
     
     # ==================== АВТО-ТОРГОВЛЯ ====================
+    auto_trade_executed = False  # Флаг для предотвращения дублирования сигнала
     try:
         if AUTO_TRADE_ENABLED and AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
             auto_user = get_user(AUTO_TRADE_USER_ID)
@@ -1590,6 +1591,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML")
                     logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
+                    auto_trade_executed = True  # Авто-сделка открыта, не дублировать сигнал
                 else:
                     logger.info(f"[AUTO-TRADE] Skip: bet ${auto_bet} > balance ${auto_balance}")
             else:
@@ -1601,6 +1603,10 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Отправляем активным юзерам
     for user_id in active_users:
+        # Пропускаем если авто-трейд уже отправил сообщение этому юзеру
+        if user_id == AUTO_TRADE_USER_ID and auto_trade_executed:
+            continue
+        
         user = get_user(user_id)
         balance = user['balance']
         
