@@ -1517,7 +1517,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     bybit_qty = 0
                     if await is_hedging_enabled():
                         hedge_amount = float(auto_bet * auto_leverage)
-                        hedge_result = await hedge_open(0, symbol, direction, hedge_amount, tp=float(tp), sl=float(sl))
+                        hedge_result = await hedge_open(0, symbol, direction, hedge_amount, sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
                         if hedge_result:
                             bybit_qty = hedge_result.get('qty', 0)
                             logger.info(f"[AUTO-TRADE] ✓ Hedge opened: qty={bybit_qty}")
@@ -1728,13 +1728,13 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             existing = p
             break
 
-    # === ХЕДЖИРОВАНИЕ: открываем на Bybit ===
+    # === ХЕДЖИРОВАНИЕ: открываем на Bybit с частичными TP ===
     bybit_qty = 0
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
+        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3)
         if hedge_result:
             bybit_qty = hedge_result.get('qty', 0)
-            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}")
+            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
         else:
             logger.warning(f"[HEDGE] ✗ Failed to hedge")
 

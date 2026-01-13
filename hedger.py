@@ -233,24 +233,31 @@ class BybitHedger:
             logger.info(f"[BYBIT] Плечо уже установлено или ошибка")
             return True  # Продолжаем в любом случае
     
-    async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float, tp: float = None, sl: float = None) -> Optional[Dict]:
+    async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float, 
+                         tp: float = None, sl: float = None,
+                         tp1: float = None, tp2: float = None, tp3: float = None) -> Optional[Dict]:
         """
-        Открыть хедж-позицию на Bybit с TP/SL
+        Открыть хедж-позицию на Bybit с частичными TP
         
         Args:
             position_id: ID позиции юзера в нашей системе
             symbol: Торговая пара (BTC/USDT)
             direction: LONG или SHORT
             amount_usd: Сумма в USD
-            tp: Take Profit цена
+            tp: Take Profit цена (legacy, используется как TP1 если tp1 не указан)
             sl: Stop Loss цена
+            tp1, tp2, tp3: Частичные тейки (40%, 40%, 20%)
         
         Returns:
             {'order_id': str, 'qty': float} если успешно, None если ошибка
         """
+        # Если tp1 не указан, используем tp как tp1
+        if tp1 is None and tp is not None:
+            tp1 = tp
+        
         logger.info(f"[HEDGE] === Попытка открыть хедж ===")
         logger.info(f"[HEDGE] symbol={symbol}, direction={direction}, amount=${amount_usd}")
-        logger.info(f"[HEDGE] TP=${tp}, SL=${sl}")
+        logger.info(f"[HEDGE] TP1=${tp1}, TP2=${tp2}, TP3=${tp3}, SL=${sl}")
         logger.info(f"[HEDGE] API Key: {self.api_key[:8]}... Demo: {self.demo}, Testnet: {self.testnet}")
         
         if not self.enabled:
@@ -339,9 +346,27 @@ class BybitHedger:
             self.hedge_positions[position_id] = order_id
             logger.info(f"[HEDGE] ✓ Открыто: {order_id}, qty={qty}")
             
-            # Если TP/SL не были установлены при открытии - ставим через trading-stop
-            if tp is not None or sl is not None:
-                await self.set_trading_stop(bybit_symbol, direction, tp, sl)
+            # Устанавливаем SL через trading-stop
+            if sl is not None:
+                await self.set_trading_stop(bybit_symbol, direction, sl=sl)
+            
+            # Создаём частичные TP ордера если все три указаны
+            if tp1 is not None and tp2 is not None and tp3 is not None:
+                await self.set_partial_take_profits(symbol, direction, qty, tp1, tp2, tp3)
+            elif tp1 is not None:
+                # Fallback: один TP через лимитный ордер
+                close_side = "Sell" if direction == "LONG" else "Buy"
+                await self._request("POST", "/v5/order/create", {
+                    "category": "linear",
+                    "symbol": bybit_symbol,
+                    "side": close_side,
+                    "orderType": "Limit",
+                    "qty": str(qty),
+                    "price": str(round(tp1, 2)),
+                    "timeInForce": "GTC",
+                    "positionIdx": 0,
+                    "reduceOnly": True
+                })
             
             # Возвращаем Dict с order_id и реальным qty
             return {'order_id': order_id, 'qty': qty}
@@ -350,27 +375,161 @@ class BybitHedger:
             return None
     
     async def set_trading_stop(self, bybit_symbol: str, direction: str, tp: float = None, sl: float = None) -> bool:
-        """Установить TP/SL для открытой позиции"""
+        """Установить TP/SL для открытой позиции (только SL, TP через partial orders)"""
         params = {
             "category": "linear",
             "symbol": bybit_symbol,
             "positionIdx": 0
         }
         
-        if tp is not None:
-            params["takeProfit"] = str(round(tp, 4))
+        # Ставим только SL через trading-stop
+        # TP теперь через partial_take_profits
         if sl is not None:
             params["stopLoss"] = str(round(sl, 4))
         
-        logger.info(f"[HEDGE] Устанавливаем TP/SL: {bybit_symbol} TP={tp} SL={sl}")
+        if tp is not None and sl is None:
+            # Если передан только TP без SL - используем старый метод
+            params["takeProfit"] = str(round(tp, 4))
+        
+        logger.info(f"[HEDGE] Устанавливаем SL: {bybit_symbol} SL={sl}")
         
         result = await self._request("POST", "/v5/position/trading-stop", params)
         
         if result is not None:
-            logger.info(f"[HEDGE] ✓ TP/SL установлены")
+            logger.info(f"[HEDGE] ✓ SL установлен")
             return True
         else:
-            logger.warning(f"[HEDGE] ⚠️ Не удалось установить TP/SL")
+            logger.warning(f"[HEDGE] ⚠️ Не удалось установить SL")
+            return False
+    
+    async def set_partial_take_profits(self, symbol: str, direction: str, qty: float, tp1: float, tp2: float, tp3: float) -> bool:
+        """
+        Создать частичные Take Profit ордера
+        
+        TP1: 40% позиции
+        TP2: 40% позиции  
+        TP3: 20% позиции
+        """
+        bybit_symbol = self._to_bybit_symbol(symbol)
+        
+        # Сторона для закрытия (противоположная)
+        close_side = "Sell" if direction == "LONG" else "Buy"
+        
+        # Определяем precision для монеты
+        coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
+        BYBIT_SPECS = {
+            "BTC": {"precision": 3, "min_qty": 0.001},
+            "ETH": {"precision": 2, "min_qty": 0.01},
+            "SOL": {"precision": 1, "min_qty": 0.1},
+            "BNB": {"precision": 2, "min_qty": 0.01},
+            "XRP": {"precision": 0, "min_qty": 1},
+            "DOGE": {"precision": 0, "min_qty": 1},
+            "AVAX": {"precision": 1, "min_qty": 0.1},
+            "LINK": {"precision": 1, "min_qty": 0.1},
+            "ARB": {"precision": 0, "min_qty": 1},
+            "OP": {"precision": 1, "min_qty": 0.1},
+            "APT": {"precision": 1, "min_qty": 0.1},
+        }
+        spec = BYBIT_SPECS.get(coin, {"precision": 2, "min_qty": 0.01})
+        precision = spec["precision"]
+        min_qty = spec["min_qty"]
+        
+        # Рассчитываем qty для каждого TP
+        qty1 = round(qty * 0.40, precision)  # 40%
+        qty2 = round(qty * 0.40, precision)  # 40%
+        qty3 = round(qty * 0.20, precision)  # 20%
+        
+        # Проверяем минимумы
+        if qty1 < min_qty:
+            qty1 = min_qty
+        if qty2 < min_qty:
+            qty2 = min_qty
+        if qty3 < min_qty:
+            qty3 = min_qty
+        
+        logger.info(f"[HEDGE] Создаём частичные TP для {bybit_symbol}: TP1={tp1} ({qty1}), TP2={tp2} ({qty2}), TP3={tp3} ({qty3})")
+        
+        success_count = 0
+        
+        # === TP1: 40% ===
+        params1 = {
+            "category": "linear",
+            "symbol": bybit_symbol,
+            "side": close_side,
+            "orderType": "Limit",
+            "qty": str(qty1),
+            "price": str(round(tp1, 2)),
+            "timeInForce": "GTC",
+            "positionIdx": 0,
+            "reduceOnly": True
+        }
+        
+        result1 = await self._request("POST", "/v5/order/create", params1)
+        if result1:
+            logger.info(f"[HEDGE] ✓ TP1 ордер создан: {tp1} qty={qty1}")
+            success_count += 1
+        else:
+            logger.warning(f"[HEDGE] ✗ Не удалось создать TP1 ордер")
+        
+        # === TP2: 40% ===
+        params2 = {
+            "category": "linear",
+            "symbol": bybit_symbol,
+            "side": close_side,
+            "orderType": "Limit",
+            "qty": str(qty2),
+            "price": str(round(tp2, 2)),
+            "timeInForce": "GTC",
+            "positionIdx": 0,
+            "reduceOnly": True
+        }
+        
+        result2 = await self._request("POST", "/v5/order/create", params2)
+        if result2:
+            logger.info(f"[HEDGE] ✓ TP2 ордер создан: {tp2} qty={qty2}")
+            success_count += 1
+        else:
+            logger.warning(f"[HEDGE] ✗ Не удалось создать TP2 ордер")
+        
+        # === TP3: 20% ===
+        params3 = {
+            "category": "linear",
+            "symbol": bybit_symbol,
+            "side": close_side,
+            "orderType": "Limit",
+            "qty": str(qty3),
+            "price": str(round(tp3, 2)),
+            "timeInForce": "GTC",
+            "positionIdx": 0,
+            "reduceOnly": True
+        }
+        
+        result3 = await self._request("POST", "/v5/order/create", params3)
+        if result3:
+            logger.info(f"[HEDGE] ✓ TP3 ордер создан: {tp3} qty={qty3}")
+            success_count += 1
+        else:
+            logger.warning(f"[HEDGE] ✗ Не удалось создать TP3 ордер")
+        
+        logger.info(f"[HEDGE] Частичные TP: {success_count}/3 успешно")
+        return success_count > 0
+    
+    async def cancel_all_tp_orders(self, symbol: str) -> bool:
+        """Отменить все лимитные ордера (TP) для символа"""
+        bybit_symbol = self._to_bybit_symbol(symbol)
+        
+        params = {
+            "category": "linear",
+            "symbol": bybit_symbol
+        }
+        
+        result = await self._request("POST", "/v5/order/cancel-all", params)
+        
+        if result is not None:
+            logger.info(f"[HEDGE] ✓ Все ордера отменены для {bybit_symbol}")
+            return True
+        else:
+            logger.warning(f"[HEDGE] ⚠️ Не удалось отменить ордера")
             return False
     
     async def close_hedge(self, position_id: int, symbol: str, direction: str, bybit_qty: float = None) -> bool:
@@ -632,9 +791,16 @@ class BybitHedger:
 hedger = BybitHedger()
 
 
-async def hedge_open(position_id: int, symbol: str, direction: str, amount: float, tp: float = None, sl: float = None) -> Optional[Dict]:
-    """Wrapper для открытия хеджа с TP/SL. Возвращает {'order_id': str, 'qty': float}"""
-    return await hedger.open_hedge(position_id, symbol, direction, amount, tp, sl)
+async def hedge_open(position_id: int, symbol: str, direction: str, amount: float, 
+                     tp: float = None, sl: float = None,
+                     tp1: float = None, tp2: float = None, tp3: float = None) -> Optional[Dict]:
+    """Wrapper для открытия хеджа с частичными TP. Возвращает {'order_id': str, 'qty': float}"""
+    return await hedger.open_hedge(position_id, symbol, direction, amount, tp, sl, tp1, tp2, tp3)
+
+
+async def hedge_set_partial_tps(symbol: str, direction: str, qty: float, tp1: float, tp2: float, tp3: float) -> bool:
+    """Wrapper для установки частичных TP"""
+    return await hedger.set_partial_take_profits(symbol, direction, qty, tp1, tp2, tp3)
 
 
 async def hedge_close(position_id: int, symbol: str, direction: str, bybit_qty: float = None) -> bool:
