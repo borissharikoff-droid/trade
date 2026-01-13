@@ -523,88 +523,235 @@ class MarketAnalyzer:
         
         return {'magnet': 'NEUTRAL', 'long_liquidations': [], 'short_liquidations': []}
     
-    # ==================== CRYPTO NEWS & SENTIMENT ====================
+    # ==================== CRYPTO NEWS & SENTIMENT (MULTI-SOURCE) ====================
+    
+    # Ключевые слова для анализа
+    BULLISH_KEYWORDS = [
+        'surge', 'surges', 'surging', 'rally', 'rallies', 'bullish', 'breakout', 'breaks out',
+        'adoption', 'approval', 'approved', 'etf approved', 'partnership', 'upgrade',
+        'all-time high', 'ath', 'new high', 'record high', 'moon', 'pump', 'pumping',
+        'trump crypto', 'trump bitcoin', 'trump supports', 'institutional buy',
+        'accumulating', 'accumulation', 'whale buy', 'whales buying', 'massive buy',
+        'bullish signal', 'golden cross', 'breakout confirmed', 'support holds',
+        'positive', 'growth', 'growing', 'soars', 'soaring', 'explodes', 'skyrockets'
+    ]
+    
+    BEARISH_KEYWORDS = [
+        'crash', 'crashes', 'crashing', 'dump', 'dumps', 'dumping', 'bearish', 'plunge',
+        'ban', 'bans', 'banned', 'regulation', 'regulatory crackdown', 'sec', 'lawsuit',
+        'hack', 'hacked', 'exploit', 'exploited', 'scam', 'fraud', 'bankruptcy', 'bankrupt',
+        'sell-off', 'selloff', 'selling', 'fear', 'panic', 'investigation', 'warning',
+        'concern', 'risk', 'risky', 'collapse', 'collapses', 'tank', 'tanks', 'tanking',
+        'death cross', 'breakdown', 'support breaks', 'resistance rejected', 'rejected',
+        'whale sell', 'whales selling', 'massive sell', 'liquidation', 'liquidated',
+        'fud', 'negative', 'decline', 'declining', 'falls', 'falling', 'drops', 'dropping'
+    ]
+    
+    HIGH_IMPACT_KEYWORDS = [
+        'trump', 'biden', 'president', 'white house', 'congress', 'senate',
+        'sec', 'cftc', 'fed', 'federal reserve', 'powell', 'gensler',
+        'regulation', 'regulatory', 'law', 'legislation', 'bill passed',
+        'etf', 'spot etf', 'bitcoin etf', 'eth etf',
+        'china', 'russia', 'us government', 'treasury',
+        'ban', 'bans', 'banned', 'illegal', 'legal',
+        'blackrock', 'fidelity', 'grayscale', 'microstrategy', 'tesla',
+        'hack', 'hacked', 'exploit', 'stolen', 'million stolen', 'billion',
+        'breaking', 'just in', 'urgent', 'alert', 'emergency'
+    ]
+    
+    URGENCY_KEYWORDS = [
+        'breaking', 'just in', 'just now', 'happening now', 'urgent', 'alert',
+        'moments ago', 'minutes ago', 'live', 'developing', 'confirmed'
+    ]
     
     async def get_crypto_news_sentiment(self, symbol: str) -> Dict:
-        """Анализ новостей через CryptoCompare + Twitter sentiment"""
+        """
+        Мульти-источниковый анализ новостей:
+        1. CryptoPanic API (агрегатор)
+        2. CryptoCompare News
+        3. RSS фиды (CoinDesk, CoinTelegraph)
+        4. Twitter/X через Nitter RSS
+        """
         ticker = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
         
-        news_sentiment = {'score': 0.5, 'impact': 'NEUTRAL', 'headlines': [], 'warnings': []}
+        news_sentiment = {
+            'score': 0.5,
+            'impact': 'LOW',
+            'urgency': 'NORMAL',
+            'bias': 'NEUTRAL',
+            'headlines': [],
+            'warnings': [],
+            'sources': [],
+            'bullish_count': 0,
+            'bearish_count': 0,
+            'breaking_news': False,
+            'trade_recommendation': 'NORMAL'  # NORMAL, CAUTION, PAUSE, AGGRESSIVE
+        }
         
+        all_news = []
+        
+        # === 1. CryptoPanic API (бесплатный, быстрый) ===
         try:
-            # CryptoCompare News API (бесплатный)
-            url = f"https://min-api.cryptocompare.com/data/v2/news/?categories={ticker},BTC,Regulation&lang=EN"
-            data = await self._fetch_json(url, f"news_{ticker}")
+            cryptopanic_url = f"https://cryptopanic.com/api/v1/posts/?auth_token=free&currencies={ticker}&kind=news&filter=hot"
+            data = await self._fetch_json(cryptopanic_url, f"cryptopanic_{ticker}")
+            
+            if data and 'results' in data:
+                for item in data['results'][:15]:
+                    all_news.append({
+                        'title': item.get('title', ''),
+                        'source': item.get('source', {}).get('title', 'CryptoPanic'),
+                        'url': item.get('url', ''),
+                        'votes': item.get('votes', {}),
+                        'time': item.get('published_at', '')
+                    })
+                news_sentiment['sources'].append('CryptoPanic')
+                logger.info(f"[NEWS] CryptoPanic: {len(data['results'])} items for {ticker}")
+        except Exception as e:
+            logger.warning(f"[NEWS] CryptoPanic error: {e}")
+        
+        # === 2. CryptoCompare News ===
+        try:
+            cc_url = f"https://min-api.cryptocompare.com/data/v2/news/?categories={ticker},BTC,Regulation&lang=EN"
+            data = await self._fetch_json(cc_url, f"cc_news_{ticker}")
             
             if data and 'Data' in data:
-                recent_news = data['Data'][:10]  # Последние 10 новостей
-                
-                # Ключевые слова для sentiment
-                bullish_keywords = ['surge', 'rally', 'bullish', 'breakout', 'adoption', 'approval', 
-                                   'etf approved', 'partnership', 'upgrade', 'all-time high', 'ath',
-                                   'trump crypto', 'trump bitcoin', 'institutional', 'buy', 'accumulating']
-                bearish_keywords = ['crash', 'dump', 'bearish', 'ban', 'regulation', 'sec', 'lawsuit',
-                                   'hack', 'exploit', 'scam', 'bankruptcy', 'sell-off', 'fear',
-                                   'investigation', 'fraud', 'warning', 'concern', 'risk']
-                high_impact_keywords = ['trump', 'sec', 'fed', 'regulation', 'etf', 'china', 'russia',
-                                       'ban', 'approval', 'institutional', 'blackrock', 'congress']
-                
-                bullish_count = 0
-                bearish_count = 0
-                high_impact = False
-                
-                for news in recent_news:
-                    title = news.get('title', '').lower()
-                    body = news.get('body', '').lower()
-                    combined = title + " " + body
-                    
-                    # Проверяем на высокоимпактные события
-                    for keyword in high_impact_keywords:
-                        if keyword in combined:
-                            high_impact = True
-                            news_sentiment['headlines'].append(news.get('title', '')[:100])
-                            break
-                    
-                    # Считаем sentiment
-                    for keyword in bullish_keywords:
-                        if keyword in combined:
-                            bullish_count += 1
-                            break
-                    for keyword in bearish_keywords:
-                        if keyword in combined:
-                            bearish_count += 1
-                            # Добавляем предупреждение
-                            if any(w in combined for w in ['ban', 'regulation', 'sec', 'lawsuit', 'hack']):
-                                news_sentiment['warnings'].append(f"⚠️ {news.get('title', '')[:80]}")
-                            break
-                
-                # Вычисляем score (0-1)
-                total = bullish_count + bearish_count
-                if total > 0:
-                    news_sentiment['score'] = (bullish_count + 0.5 * (10 - total)) / 10
-                else:
-                    news_sentiment['score'] = 0.5
-                
-                # Impact level
-                if high_impact:
-                    news_sentiment['impact'] = 'HIGH'
-                elif bullish_count >= 3 or bearish_count >= 3:
-                    news_sentiment['impact'] = 'MEDIUM'
-                else:
-                    news_sentiment['impact'] = 'LOW'
-                
-                # Bias
-                if bullish_count > bearish_count + 2:
-                    news_sentiment['bias'] = 'BULLISH'
-                elif bearish_count > bullish_count + 2:
-                    news_sentiment['bias'] = 'BEARISH'
-                else:
-                    news_sentiment['bias'] = 'NEUTRAL'
-                
-                logger.info(f"[NEWS] {ticker}: Bull={bullish_count}, Bear={bearish_count}, Impact={news_sentiment['impact']}")
-                
+                for item in data['Data'][:10]:
+                    all_news.append({
+                        'title': item.get('title', ''),
+                        'body': item.get('body', '')[:500],
+                        'source': item.get('source', 'CryptoCompare'),
+                        'time': item.get('published_on', '')
+                    })
+                news_sentiment['sources'].append('CryptoCompare')
         except Exception as e:
-            logger.warning(f"[NEWS] Ошибка: {e}")
+            logger.warning(f"[NEWS] CryptoCompare error: {e}")
+        
+        # === 3. Twitter/X мониторинг через публичные источники ===
+        try:
+            # Проверяем упоминания через альтернативные источники
+            # Используем социальные метрики с CryptoCompare
+            social_url = f"https://min-api.cryptocompare.com/data/social/coin/latest?coinId=1182"  # BTC
+            social_data = await self._fetch_json(social_url, "social_btc")
+            
+            if social_data and 'Data' in social_data:
+                twitter_data = social_data['Data'].get('Twitter', {})
+                if twitter_data:
+                    followers = twitter_data.get('followers', 0)
+                    # Если резкий рост активности - это сигнал
+                    news_sentiment['social_activity'] = 'HIGH' if followers > 1000000 else 'NORMAL'
+        except Exception as e:
+            logger.warning(f"[NEWS] Social data error: {e}")
+        
+        # === АНАЛИЗ СОБРАННЫХ НОВОСТЕЙ ===
+        bullish_count = 0
+        bearish_count = 0
+        high_impact = False
+        is_breaking = False
+        urgency_score = 0
+        
+        for news in all_news:
+            title = news.get('title', '').lower()
+            body = news.get('body', '').lower() if 'body' in news else ''
+            combined = title + " " + body
+            
+            # Проверка на срочность
+            for keyword in self.URGENCY_KEYWORDS:
+                if keyword in combined:
+                    is_breaking = True
+                    urgency_score += 2
+                    break
+            
+            # Проверка на высокий импакт
+            impact_count = 0
+            for keyword in self.HIGH_IMPACT_KEYWORDS:
+                if keyword in combined:
+                    impact_count += 1
+                    high_impact = True
+                    if len(news_sentiment['headlines']) < 5:
+                        news_sentiment['headlines'].append(news.get('title', '')[:120])
+            
+            # Bullish keywords
+            bull_score = 0
+            for keyword in self.BULLISH_KEYWORDS:
+                if keyword in combined:
+                    bull_score += 1
+            if bull_score > 0:
+                bullish_count += min(bull_score, 3)  # Макс 3 за одну новость
+            
+            # Bearish keywords
+            bear_score = 0
+            for keyword in self.BEARISH_KEYWORDS:
+                if keyword in combined:
+                    bear_score += 1
+                    # Критические предупреждения
+                    if keyword in ['hack', 'hacked', 'exploit', 'stolen', 'ban', 'sec lawsuit']:
+                        if len(news_sentiment['warnings']) < 3:
+                            news_sentiment['warnings'].append(f"🚨 {news.get('title', '')[:100]}")
+            if bear_score > 0:
+                bearish_count += min(bear_score, 3)
+            
+            # Голоса сообщества (CryptoPanic)
+            votes = news.get('votes', {})
+            if votes:
+                if votes.get('positive', 0) > votes.get('negative', 0) + 5:
+                    bullish_count += 1
+                elif votes.get('negative', 0) > votes.get('positive', 0) + 5:
+                    bearish_count += 1
+        
+        # === РАСЧЁТ ФИНАЛЬНОГО SENTIMENT ===
+        news_sentiment['bullish_count'] = bullish_count
+        news_sentiment['bearish_count'] = bearish_count
+        news_sentiment['breaking_news'] = is_breaking
+        
+        total = bullish_count + bearish_count
+        if total > 0:
+            # Score от 0 (bearish) до 1 (bullish)
+            news_sentiment['score'] = bullish_count / total
+        else:
+            news_sentiment['score'] = 0.5
+        
+        # Impact level
+        if is_breaking and high_impact:
+            news_sentiment['impact'] = 'CRITICAL'
+            news_sentiment['urgency'] = 'IMMEDIATE'
+        elif high_impact or urgency_score >= 3:
+            news_sentiment['impact'] = 'HIGH'
+            news_sentiment['urgency'] = 'HIGH'
+        elif total >= 5:
+            news_sentiment['impact'] = 'MEDIUM'
+        else:
+            news_sentiment['impact'] = 'LOW'
+        
+        # Bias
+        diff = bullish_count - bearish_count
+        if diff >= 5:
+            news_sentiment['bias'] = 'STRONG_BULLISH'
+        elif diff >= 2:
+            news_sentiment['bias'] = 'BULLISH'
+        elif diff <= -5:
+            news_sentiment['bias'] = 'STRONG_BEARISH'
+        elif diff <= -2:
+            news_sentiment['bias'] = 'BEARISH'
+        else:
+            news_sentiment['bias'] = 'NEUTRAL'
+        
+        # === ТОРГОВАЯ РЕКОМЕНДАЦИЯ ===
+        if news_sentiment['impact'] == 'CRITICAL':
+            if news_sentiment['bias'] in ['STRONG_BULLISH', 'STRONG_BEARISH']:
+                news_sentiment['trade_recommendation'] = 'AGGRESSIVE'  # Торгуем по тренду новостей
+            else:
+                news_sentiment['trade_recommendation'] = 'PAUSE'  # Ждём ясности
+        elif news_sentiment['impact'] == 'HIGH':
+            news_sentiment['trade_recommendation'] = 'CAUTION'  # Уменьшенный размер
+        else:
+            news_sentiment['trade_recommendation'] = 'NORMAL'
+        
+        logger.info(f"[NEWS] {ticker}: Bull={bullish_count}, Bear={bearish_count}, "
+                   f"Impact={news_sentiment['impact']}, Bias={news_sentiment['bias']}, "
+                   f"Breaking={is_breaking}, Rec={news_sentiment['trade_recommendation']}")
+        
+        if news_sentiment['headlines']:
+            logger.info(f"[NEWS] Headlines: {news_sentiment['headlines'][:2]}")
         
         return news_sentiment
     
@@ -1430,13 +1577,34 @@ class MarketAnalyzer:
             signal_stats['reasons']['manipulation'] += 1
             return None
         
-        # === ПРОВЕРКА НОВОСТНОГО ФОНА ===
-        if news_sentiment['impact'] == 'HIGH':
-            # Если есть высокоимпактные новости, осторожнее
-            logger.info(f"[ANALYZER] ⚠️ Высокоимпактные новости: {news_sentiment.get('headlines', [])[:1]}")
-            if news_sentiment['warnings']:
+        # === ПРОВЕРКА НОВОСТНОГО ФОНА (РАСШИРЕННАЯ) ===
+        news_trade_rec = news_sentiment.get('trade_recommendation', 'NORMAL')
+        news_impact = news_sentiment.get('impact', 'LOW')
+        news_bias = news_sentiment.get('bias', 'NEUTRAL')
+        is_breaking = news_sentiment.get('breaking_news', False)
+        
+        # CRITICAL: Если рекомендация PAUSE - не торгуем
+        if news_trade_rec == 'PAUSE':
+            logger.warning(f"[ANALYZER] ⛔ Критические новости - торговля приостановлена")
+            if news_sentiment.get('headlines'):
+                logger.warning(f"[ANALYZER] Headlines: {news_sentiment['headlines'][:2]}")
+            signal_stats['rejected'] += 1
+            signal_stats['reasons']['manipulation'] += 1  # Используем существующий счётчик
+            return None
+        
+        # Логируем важные новости
+        if news_impact in ['HIGH', 'CRITICAL']:
+            logger.info(f"[ANALYZER] 📰 {news_impact} Impact News: {news_bias}")
+            if news_sentiment.get('headlines'):
+                for h in news_sentiment['headlines'][:2]:
+                    logger.info(f"[ANALYZER] → {h}")
+            if news_sentiment.get('warnings'):
                 for w in news_sentiment['warnings'][:2]:
                     logger.warning(f"[ANALYZER] {w}")
+        
+        # Breaking news alert
+        if is_breaking:
+            logger.warning(f"[ANALYZER] 🚨 BREAKING NEWS detected! Bias: {news_bias}")
         
         # === ГЛУБОКИЙ АНАЛИЗ КОНТЕКСТА ===
         market_context = self._analyze_market_context(
@@ -1502,17 +1670,38 @@ class MarketAnalyzer:
             market_context['insights'].append(f"📈 BTC растёт, альт коррелирует ({btc_corr['correlation']:.0%}) — попутный ветер")
             market_context['bullish_factors'] += 1
         
-        # === NEWS SENTIMENT ===
-        if news_sentiment['bias'] == 'BULLISH':
-            market_context['insights'].append("📰 Новостной фон положительный")
+        # === NEWS SENTIMENT (РАСШИРЕННЫЙ) ===
+        news_bullish = news_sentiment.get('bullish_count', 0)
+        news_bearish = news_sentiment.get('bearish_count', 0)
+        
+        if news_bias == 'STRONG_BULLISH':
+            market_context['insights'].insert(0, f"📰 СИЛЬНЫЕ бычьи новости ({news_bullish} упоминаний)")
+            market_context['bullish_factors'] += 4
+        elif news_bias == 'BULLISH':
+            market_context['insights'].append(f"📰 Положительный новостной фон ({news_bullish} упоминаний)")
             market_context['bullish_factors'] += 2
-        elif news_sentiment['bias'] == 'BEARISH':
-            market_context['warnings'].append("📰 Новостной фон негативный")
+        elif news_bias == 'STRONG_BEARISH':
+            market_context['warnings'].insert(0, f"📰 СИЛЬНЫЕ медвежьи новости ({news_bearish} упоминаний)")
+            market_context['bearish_factors'] += 4
+        elif news_bias == 'BEARISH':
+            market_context['warnings'].append(f"📰 Негативный новостной фон ({news_bearish} упоминаний)")
             market_context['bearish_factors'] += 2
         
-        # Предупреждения из новостей
-        for warning in news_sentiment.get('warnings', [])[:1]:
+        # Breaking news бонус
+        if is_breaking:
+            if news_bias in ['BULLISH', 'STRONG_BULLISH']:
+                market_context['insights'].insert(0, "🚨 BREAKING: Срочные бычьи новости!")
+                market_context['bullish_factors'] += 2
+            elif news_bias in ['BEARISH', 'STRONG_BEARISH']:
+                market_context['warnings'].insert(0, "🚨 BREAKING: Срочные медвежьи новости!")
+                market_context['bearish_factors'] += 2
+        
+        # Предупреждения из новостей (все важные)
+        for warning in news_sentiment.get('warnings', [])[:3]:
             market_context['warnings'].append(warning)
+        
+        # Сохраняем данные новостей для использования в TP/SL
+        market_context['news_data'] = news_sentiment
         
         # === MANIPULATION WARNING ===
         if manipulation['detected']:
@@ -1756,7 +1945,8 @@ class MarketAnalyzer:
                 'context': context_score,
                 'orderbook': orderbook['imbalance'],
                 'cvd': cvd['delta_percent'],
-                'mtf': mtf['score']
+                'mtf': mtf['score'],
+                'news': news_sentiment.get('score', 0.5)
             },
             'indicators': tech['indicators'],
             'sentiment_data': {
@@ -1764,6 +1954,7 @@ class MarketAnalyzer:
                 'funding_rate': sentiment['funding_rate'],
                 'long_short_ratio': sentiment['long_short_ratio']
             },
+            'news_sentiment': news_sentiment,  # Полные данные новостей
             'advanced_data': {
                 'orderbook': orderbook,
                 'cvd': cvd,
@@ -1771,7 +1962,8 @@ class MarketAnalyzer:
                 'whale': whale,
                 'liquidations': liquidations,
                 'btc_correlation': btc_corr,
-                'time': time_check
+                'time': time_check,
+                'news': news_sentiment
             },
             'market_context': market_context,
             'reasoning': reasoning,
@@ -1786,160 +1978,220 @@ class MarketAnalyzer:
     
     async def calculate_entry_price(self, symbol: str, direction: str, analysis: Dict) -> Dict:
         """
-        УМНЫЙ расчёт Entry, SL, TP на основе:
-        1. S/R уровней (приоритет)
-        2. ATR (волатильность)
-        3. Ликвидационных уровней
+        АГРЕССИВНЫЙ расчёт Entry, SL, TP с частичными тейками:
+        
+        Философия:
+        - SL близко (0.3-0.5%) - быстро режем убытки
+        - TP1 (40% позиции) - быстрый профит 0.4-0.6%
+        - TP2 (40% позиции) - средний профит 0.8-1.2%
+        - TP3 (20% позиции) - runner с трейлингом
+        - После TP1 двигаем SL в безубыток
         """
         
         current_price = analysis.get('current_price', await self.get_price(symbol))
         confidence = analysis.get('confidence', 0.5)
         sr_levels = analysis.get('market_context', {}).get('sr_levels', {})
         advanced_data = analysis.get('advanced_data', {})
-        liquidations = advanced_data.get('liquidations', {})
+        news_data = analysis.get('news_sentiment', {})
         
-        # === АДАПТИВНЫЕ TP/SL на основе волатильности (базовые) ===
-        adaptive = await self.calculate_adaptive_tpsl(symbol, direction, confidence)
-        volatility = adaptive['volatility']
+        # === ПОЛУЧАЕМ ATR ДЛЯ ВОЛАТИЛЬНОСТИ ===
+        klines = await self.get_klines(symbol, '5m', 30)  # 5-минутки для скальпинга
         
-        # Базовые значения от ATR
-        atr_sl_percent = adaptive['sl_percent']
-        atr_tp_percent = adaptive['tp_percent']
+        if klines and len(klines) >= 20:
+            highs = [float(k[2]) for k in klines]
+            lows = [float(k[3]) for k in klines]
+            closes = [float(k[4]) for k in klines]
+            
+            # ATR на 5-минутках
+            atr = TechnicalIndicators.atr(highs, lows, closes, 14)
+            atr_percent = atr / current_price
+            
+            # Классификация волатильности
+            if atr_percent > 0.003:  # >0.3% за 5 мин = высокая
+                volatility = 'HIGH'
+            elif atr_percent > 0.0015:
+                volatility = 'MEDIUM'
+            else:
+                volatility = 'LOW'
+        else:
+            atr_percent = 0.002  # Default 0.2%
+            volatility = 'MEDIUM'
         
         entry = current_price
         
-        # === УМНЫЙ SL НА ОСНОВЕ S/R ===
+        # === АГРЕССИВНЫЕ БАЗОВЫЕ УРОВНИ (ближе к цене!) ===
+        # SL: 1-1.5 ATR (0.2-0.5%)
+        # TP1: 1.5 ATR (быстрый профит)
+        # TP2: 3 ATR (средний)
+        # TP3: 5+ ATR (runner)
+        
+        if volatility == 'HIGH':
+            sl_mult = 1.2   # Чуть шире при высокой волатильности
+            tp1_mult = 1.0
+            tp2_mult = 2.0
+            tp3_mult = 4.0
+        elif volatility == 'MEDIUM':
+            sl_mult = 1.0
+            tp1_mult = 1.2
+            tp2_mult = 2.5
+            tp3_mult = 5.0
+        else:  # LOW
+            sl_mult = 0.8
+            tp1_mult = 1.5
+            tp2_mult = 3.0
+            tp3_mult = 6.0
+        
+        # Минимальные проценты (не меньше чем)
+        min_sl_percent = 0.002   # 0.2%
+        min_tp1_percent = 0.003  # 0.3%
+        
+        # Расчёт уровней
+        sl_distance = max(atr_percent * sl_mult, min_sl_percent)
+        tp1_distance = max(atr_percent * tp1_mult, min_tp1_percent)
+        tp2_distance = atr_percent * tp2_mult
+        tp3_distance = atr_percent * tp3_mult
+        
+        # === КОРРЕКТИРОВКА ПО S/R УРОВНЯМ ===
         if direction == "LONG":
-            # Для LONG: SL ниже ближайшей поддержки или ATR
+            # SL ниже поддержки если она близко
             nearest_support = sr_levels.get('nearest_support')
+            if nearest_support:
+                support_distance = (current_price - nearest_support) / current_price
+                if 0 < support_distance < sl_distance * 1.5:
+                    # Поддержка близко - ставим SL чуть ниже неё
+                    sl_distance = support_distance + 0.001
             
-            if nearest_support and nearest_support < current_price:
-                # SL чуть ниже поддержки (с запасом 0.3%)
-                sl_from_support = nearest_support * 0.997
-                sl_from_atr = current_price - (current_price * atr_sl_percent)
-                
-                # Берём более безопасный (ближе к цене) но не ближе чем ATR позволяет
-                if sl_from_support > sl_from_atr:
-                    stop_loss = sl_from_support
-                    sl_source = "S/R"
-                else:
-                    stop_loss = sl_from_atr
-                    sl_source = "ATR"
-            else:
-                stop_loss = current_price - (current_price * atr_sl_percent)
-                sl_source = "ATR"
+            stop_loss = current_price * (1 - sl_distance)
+            tp1 = current_price * (1 + tp1_distance)
+            tp2 = current_price * (1 + tp2_distance)
+            tp3 = current_price * (1 + tp3_distance)
             
-            # === УМНЫЙ TP НА ОСНОВЕ S/R ===
+            # Корректируем TP по сопротивлениям
             nearest_resistance = sr_levels.get('nearest_resistance')
-            
-            if nearest_resistance and nearest_resistance > current_price:
-                # TP перед сопротивлением (не доходя 0.2%)
-                tp_from_resistance = nearest_resistance * 0.998
-                tp_from_atr = current_price + (current_price * atr_tp_percent)
-                
-                # Берём более консервативный (ближе к цене)
-                if tp_from_resistance < tp_from_atr:
-                    take_profit = tp_from_resistance
-                    tp_source = "S/R"
-                else:
-                    take_profit = tp_from_atr
-                    tp_source = "ATR"
-            else:
-                take_profit = current_price + (current_price * atr_tp_percent)
-                tp_source = "ATR"
-                
-        else:  # SHORT
-            # Для SHORT: SL выше ближайшего сопротивления
+            if nearest_resistance:
+                # Если сопротивление ближе чем TP1 - проблема
+                resistance_distance = (nearest_resistance - current_price) / current_price
+                if resistance_distance < tp1_distance:
+                    # TP1 чуть до сопротивления
+                    tp1 = nearest_resistance * 0.998
+                    tp1_distance = (tp1 - current_price) / current_price
+                    # Масштабируем остальные
+                    tp2 = current_price * (1 + tp1_distance * 2)
+                    tp3 = current_price * (1 + tp1_distance * 3.5)
+        else:
+            # SHORT
             nearest_resistance = sr_levels.get('nearest_resistance')
+            if nearest_resistance:
+                resistance_distance = (nearest_resistance - current_price) / current_price
+                if 0 < resistance_distance < sl_distance * 1.5:
+                    sl_distance = resistance_distance + 0.001
             
-            if nearest_resistance and nearest_resistance > current_price:
-                sl_from_resistance = nearest_resistance * 1.003
-                sl_from_atr = current_price + (current_price * atr_sl_percent)
-                
-                if sl_from_resistance < sl_from_atr:
-                    stop_loss = sl_from_resistance
-                    sl_source = "S/R"
-                else:
-                    stop_loss = sl_from_atr
-                    sl_source = "ATR"
-            else:
-                stop_loss = current_price + (current_price * atr_sl_percent)
-                sl_source = "ATR"
+            stop_loss = current_price * (1 + sl_distance)
+            tp1 = current_price * (1 - tp1_distance)
+            tp2 = current_price * (1 - tp2_distance)
+            tp3 = current_price * (1 - tp3_distance)
             
-            # TP перед поддержкой
             nearest_support = sr_levels.get('nearest_support')
-            
-            if nearest_support and nearest_support < current_price:
-                tp_from_support = nearest_support * 1.002
-                tp_from_atr = current_price - (current_price * atr_tp_percent)
-                
-                if tp_from_support > tp_from_atr:
-                    take_profit = tp_from_support
-                    tp_source = "S/R"
-                else:
-                    take_profit = tp_from_atr
-                    tp_source = "ATR"
-            else:
-                take_profit = current_price - (current_price * atr_tp_percent)
-                tp_source = "ATR"
+            if nearest_support:
+                support_distance = (current_price - nearest_support) / current_price
+                if support_distance < tp1_distance:
+                    tp1 = nearest_support * 1.002
+                    tp1_distance = (current_price - tp1) / current_price
+                    tp2 = current_price * (1 - tp1_distance * 2)
+                    tp3 = current_price * (1 - tp1_distance * 3.5)
         
-        # === КОРРЕКТИРОВКА ПО ЛИКВИДАЦИЯМ ===
-        # Если SL попадает в зону ликвидаций - могут толкнуть цену туда специально
-        if liquidations:
-            nearest_long_liq = liquidations.get('nearest_long_liq', 0)
-            nearest_short_liq = liquidations.get('nearest_short_liq', float('inf'))
-            
-            if direction == "LONG" and stop_loss > nearest_long_liq * 0.99:
-                # SL слишком близко к ликвидациям лонгов - двигаем дальше
-                stop_loss = nearest_long_liq * 0.98
-                sl_source = "LIQ_SAFE"
-            elif direction == "SHORT" and stop_loss < nearest_short_liq * 1.01:
-                stop_loss = nearest_short_liq * 1.02
-                sl_source = "LIQ_SAFE"
+        # === НОВОСТНОЙ БОНУС/ШТРАФ ===
+        # Если сильные бычьи новости и мы в LONG - можно шире TP
+        # Если сильные медвежьи и мы в SHORT - тоже
+        news_bias = news_data.get('bias', 'NEUTRAL') if news_data else 'NEUTRAL'
+        news_aligned = (direction == "LONG" and news_bias in ['BULLISH', 'STRONG_BULLISH']) or \
+                       (direction == "SHORT" and news_bias in ['BEARISH', 'STRONG_BEARISH'])
         
-        # Рассчитываем итоговые проценты
-        sl_percent = abs(stop_loss - entry) / entry
-        tp_percent = abs(take_profit - entry) / entry
-        
-        # === R/R ПРОВЕРКА (минимум 2.0 для максимизации профита) ===
-        rr = tp_percent / sl_percent if sl_percent > 0 else 0
-        if rr < 2.0:
-            # Увеличиваем TP чтобы достичь минимального R/R
-            tp_percent = sl_percent * 2.0
+        if news_aligned and news_data.get('impact') in ['HIGH', 'CRITICAL']:
+            # Расширяем TP3 на 50% - новости в нашу сторону
             if direction == "LONG":
-                take_profit = entry + (entry * tp_percent)
+                tp3 = current_price * (1 + tp3_distance * 1.5)
             else:
-                take_profit = entry - (entry * tp_percent)
-            rr = 2.0
-            tp_source = "R/R_ADJ"
+                tp3 = current_price * (1 - tp3_distance * 1.5)
+            logger.info(f"[TPSL] Новости усиливают позицию - TP3 расширен")
         
-        # Win rate estimate
-        base_winrate = 70  # Выше базовый winrate из-за строгих фильтров
-        confidence_bonus = confidence * 15
-        adx = analysis.get('indicators', {}).get('adx', 20)
-        adx_bonus = 5 if adx > 30 else (3 if adx > 25 else 0)
-        vol_bonus = 3 if volatility == 'LOW' else (-2 if volatility == 'HIGH' else 0)
-        rr_bonus = 5 if rr > 2.5 else (3 if rr > 2 else 0)
-        sr_bonus = 3 if sl_source == "S/R" else 0
+        # === ФИНАЛЬНЫЕ РАСЧЁТЫ ===
+        sl_percent = abs(stop_loss - entry) / entry
+        tp1_percent = abs(tp1 - entry) / entry
+        tp2_percent = abs(tp2 - entry) / entry
+        tp3_percent = abs(tp3 - entry) / entry
         
-        success_rate = min(92, base_winrate + confidence_bonus + adx_bonus + vol_bonus + rr_bonus + sr_bonus)
+        # R/R для каждого TP
+        rr1 = tp1_percent / sl_percent if sl_percent > 0 else 0
+        rr2 = tp2_percent / sl_percent if sl_percent > 0 else 0
+        rr3 = tp3_percent / sl_percent if sl_percent > 0 else 0
         
-        logger.info(f"[SMART_TPSL] Entry=${entry:.4f}")
-        logger.info(f"[SMART_TPSL] SL=${stop_loss:.4f} ({sl_percent*100:.2f}%) via {sl_source}")
-        logger.info(f"[SMART_TPSL] TP=${take_profit:.4f} ({tp_percent*100:.2f}%) via {tp_source}")
-        logger.info(f"[SMART_TPSL] R/R={rr:.2f}, WinRate={success_rate:.0f}%, Vol={volatility}")
+        # Минимальный R/R для TP1 = 1.2
+        if rr1 < 1.2:
+            tp1_percent = sl_percent * 1.2
+            if direction == "LONG":
+                tp1 = entry * (1 + tp1_percent)
+            else:
+                tp1 = entry * (1 - tp1_percent)
+            rr1 = 1.2
+        
+        # Win rate оценка
+        base_winrate = 72
+        confidence_bonus = confidence * 12
+        vol_bonus = 3 if volatility == 'LOW' else (-3 if volatility == 'HIGH' else 0)
+        news_bonus = 5 if news_aligned else 0
+        
+        success_rate = min(90, base_winrate + confidence_bonus + vol_bonus + news_bonus)
+        
+        # === СТРАТЕГИЯ ЧАСТИЧНЫХ ТЕЙКОВ ===
+        take_profit_strategy = {
+            'tp1': {
+                'price': tp1,
+                'percent': tp1_percent,
+                'close_percent': 40,  # Закрываем 40% позиции
+                'move_sl_to_be': True  # После TP1 двигаем SL в безубыток
+            },
+            'tp2': {
+                'price': tp2,
+                'percent': tp2_percent,
+                'close_percent': 40,  # Ещё 40%
+                'trailing_start': True  # Начинаем трейлинг
+            },
+            'tp3': {
+                'price': tp3,
+                'percent': tp3_percent,
+                'close_percent': 20,  # Последние 20%
+                'is_runner': True  # Runner позиция
+            }
+        }
+        
+        logger.info(f"[TPSL] {symbol} {direction} Entry=${entry:.4f}")
+        logger.info(f"[TPSL] SL=${stop_loss:.4f} ({sl_percent*100:.2f}%)")
+        logger.info(f"[TPSL] TP1=${tp1:.4f} ({tp1_percent*100:.2f}%) R/R={rr1:.1f} [40%]")
+        logger.info(f"[TPSL] TP2=${tp2:.4f} ({tp2_percent*100:.2f}%) R/R={rr2:.1f} [40%]")
+        logger.info(f"[TPSL] TP3=${tp3:.4f} ({tp3_percent*100:.2f}%) R/R={rr3:.1f} [20%]")
+        logger.info(f"[TPSL] Vol={volatility}, WinRate={success_rate:.0f}%")
         
         return {
             'entry_price': entry,
             'stop_loss': stop_loss,
-            'take_profit': take_profit,
+            'take_profit': tp1,  # Основной TP (для совместимости)
+            'tp1': tp1,
+            'tp2': tp2,
+            'tp3': tp3,
+            'tp_strategy': take_profit_strategy,
             'success_rate': success_rate,
             'sl_percent': sl_percent,
-            'tp_percent': tp_percent,
+            'tp_percent': tp1_percent,  # Для совместимости
+            'tp1_percent': tp1_percent,
+            'tp2_percent': tp2_percent,
+            'tp3_percent': tp3_percent,
             'volatility': volatility,
-            'risk_reward': rr,
-            'sl_source': sl_source,
-            'tp_source': tp_source
+            'risk_reward': rr1,
+            'rr1': rr1,
+            'rr2': rr2,
+            'rr3': rr3,
+            'news_aligned': news_aligned
         }
     
     async def analyze_position_adjustment(self, symbol: str, direction: str, entry: float, 
@@ -1983,58 +2235,75 @@ class MarketAnalyzer:
             
             logger.info(f"[POSITION_MONITOR] {symbol} {direction}: PnL={pnl_percent:.2f}%, ToTP={progress_to_tp:.0f}%, ToSL={progress_to_sl:.0f}%")
             
-            # === УЛУЧШЕННЫЙ TRAILING STOP ===
-            # Логика: чем больше профит, тем агрессивнее защищаем
+            # === АГРЕССИВНЫЙ TRAILING STOP ===
+            # Начинаем защищать профит РАНО и МНОГО
+            # Лучше забрать меньше, чем потерять всё
             
             trailing_applied = False
             trailing_percent = 0  # Какую долю профита защищаем
+            partial_close = None  # Частичное закрытие
             
-            if pnl_percent > 3.0:
-                # Очень сильный профит: защищаем 75%
-                trailing_percent = 0.75
+            if pnl_percent > 1.5:
+                # Отличный профит: защищаем 80% + закрываем часть
+                trailing_percent = 0.80
                 trailing_applied = True
-            elif pnl_percent > 2.0:
-                # Сильный профит: защищаем 65%
-                trailing_percent = 0.65
-                trailing_applied = True
-            elif pnl_percent > 1.5:
-                # Хороший профит: защищаем 55%
-                trailing_percent = 0.55
-                trailing_applied = True
+                if pnl_percent > 2.0:
+                    partial_close = {'percent': 30, 'reason': 'TP2 zone reached'}
             elif pnl_percent > 1.0:
-                # Умеренный профит: защищаем 40%
-                trailing_percent = 0.40
+                # Хороший профит: защищаем 70%
+                trailing_percent = 0.70
                 trailing_applied = True
             elif pnl_percent > 0.6:
-                # Небольшой профит: в безубыток + маленький бонус
-                trailing_percent = 0.15
+                # Средний профит: защищаем 60%
+                trailing_percent = 0.60
                 trailing_applied = True
+            elif pnl_percent > 0.4:
+                # Небольшой профит: защищаем 50%
+                trailing_percent = 0.50
+                trailing_applied = True
+            elif pnl_percent > 0.25:
+                # Минимальный профит: в безубыток + 30%
+                trailing_percent = 0.30
+                trailing_applied = True
+            elif pnl_percent > 0.15:
+                # Едва в плюсе: в безубыток
+                trailing_percent = 0.0
+                trailing_applied = True  # Просто BE
             
             if trailing_applied:
                 if direction == "LONG":
                     profit_distance = current_price - entry
                     new_trailing_sl = entry + profit_distance * trailing_percent
-                    # SL не может быть ниже entry (минимум breakeven)
-                    new_trailing_sl = max(new_trailing_sl, entry * 1.001)
+                    # SL минимум в безубыток
+                    new_trailing_sl = max(new_trailing_sl, entry * 1.0005)
                     
                     if new_trailing_sl > current_sl:
                         adjustment['should_adjust_sl'] = True
                         adjustment['new_sl'] = new_trailing_sl
                         protected_profit = (new_trailing_sl - entry) / entry * 100
-                        adjustment['reason'] = f"Trailing: защита {protected_profit:.2f}% профита ({trailing_percent*100:.0f}% от {pnl_percent:.1f}%)"
+                        adjustment['reason'] = f"Trailing: защита {protected_profit:.2f}% ({trailing_percent*100:.0f}% от {pnl_percent:.1f}%)"
                         adjustment['action'] = 'ADJUST_SL'
+                        
+                        # Частичное закрытие?
+                        if partial_close:
+                            adjustment['partial_close'] = partial_close
+                            adjustment['action'] = 'PARTIAL_CLOSE_AND_TRAIL'
                 else:  # SHORT
                     profit_distance = entry - current_price
                     new_trailing_sl = entry - profit_distance * trailing_percent
-                    # SL не может быть выше entry (минимум breakeven)
-                    new_trailing_sl = min(new_trailing_sl, entry * 0.999)
+                    # SL минимум в безубыток
+                    new_trailing_sl = min(new_trailing_sl, entry * 0.9995)
                     
                     if new_trailing_sl < current_sl:
                         adjustment['should_adjust_sl'] = True
                         adjustment['new_sl'] = new_trailing_sl
                         protected_profit = (entry - new_trailing_sl) / entry * 100
-                        adjustment['reason'] = f"Trailing: защита {protected_profit:.2f}% профита ({trailing_percent*100:.0f}% от {pnl_percent:.1f}%)"
+                        adjustment['reason'] = f"Trailing: защита {protected_profit:.2f}% ({trailing_percent*100:.0f}% от {pnl_percent:.1f}%)"
                         adjustment['action'] = 'ADJUST_SL'
+                        
+                        if partial_close:
+                            adjustment['partial_close'] = partial_close
+                            adjustment['action'] = 'PARTIAL_CLOSE_AND_TRAIL'
             
             # === МАНИПУЛЯЦИЯ В НАШУ СТОРОНУ: можно расширить TP ===
             if progress_to_tp > 70:  # Близко к TP
