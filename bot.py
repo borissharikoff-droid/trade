@@ -318,6 +318,53 @@ def db_get_user_stats(user_id: int) -> Dict:
     
     return {'total': total, 'wins': wins, 'losses': losses, 'winrate': winrate, 'total_pnl': total_pnl}
 
+def db_get_real_winrate(min_trades: int = 20) -> Dict:
+    """
+    Получить РЕАЛЬНЫЙ win rate из истории всех сделок.
+    Используется для отображения честного процента в сигналах.
+    
+    Returns:
+        {'winrate': float, 'trades': int, 'reliable': bool}
+        reliable=True если данных достаточно (>min_trades)
+    """
+    row = run_sql("""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+            SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+            AVG(CASE WHEN pnl > 0 THEN pnl ELSE NULL END) as avg_win,
+            AVG(CASE WHEN pnl < 0 THEN ABS(pnl) ELSE NULL END) as avg_loss
+        FROM history 
+        WHERE closed_at > datetime('now', '-30 days')
+    """, fetch="one")
+    
+    if not row or not row['total']:
+        return {'winrate': 75, 'trades': 0, 'reliable': False, 'avg_win': 0, 'avg_loss': 0}
+    
+    total = int(row['total'] or 0)
+    wins = int(row['wins'] or 0)
+    avg_win = float(row['avg_win'] or 0)
+    avg_loss = float(row['avg_loss'] or 0)
+    
+    if total >= min_trades:
+        winrate = (wins / total) * 100
+        return {
+            'winrate': round(winrate, 1), 
+            'trades': total, 
+            'reliable': True,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss
+        }
+    
+    # Недостаточно данных - возвращаем оценку
+    return {
+        'winrate': 75,  # Дефолтная оценка
+        'trades': total, 
+        'reliable': False,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss
+    }
+
 # ==================== РЕФЕРАЛЬНАЯ СИСТЕМА ====================
 def db_set_referrer(user_id: int, referrer_id: int) -> bool:
     """Установить реферера для пользователя"""
@@ -1444,7 +1491,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         tp1 = price_data.get('tp1', tp)
         tp2 = price_data.get('tp2', tp * 1.5 if direction == "LONG" else tp * 0.5)
         tp3 = price_data.get('tp3', tp * 2 if direction == "LONG" else tp * 0.3)
-        winrate = int(price_data['success_rate'])
+        
+        # === ЧЕСТНЫЙ WIN RATE ИЗ РЕАЛЬНОЙ СТАТИСТИКИ ===
+        real_stats = db_get_real_winrate(min_trades=20)
+        if real_stats['reliable']:
+            # Используем реальный winrate из истории сделок
+            winrate = int(real_stats['winrate'])
+            logger.info(f"[SIGNAL] Реальный WinRate: {winrate}% ({real_stats['trades']} сделок)")
+        else:
+            # Недостаточно данных - используем оценку анализатора
+            winrate = int(price_data['success_rate'])
+            logger.info(f"[SIGNAL] Оценочный WinRate: {winrate}% (мало данных: {real_stats['trades']} сделок)")
         
         # Процентные уровни
         tp1_percent = abs(tp1 - entry) / entry * 100
@@ -2297,8 +2354,74 @@ async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обновление цен и PnL с реальными данными Bybit (если хеджирование) или Binance"""
+    
+    # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
+    bybit_open_symbols = set()
+    if await is_hedging_enabled():
+        try:
+            bybit_positions = await hedger.get_all_positions()
+            bybit_open_symbols = {p['symbol'] for p in bybit_positions}
+            if bybit_positions:
+                logger.debug(f"[BYBIT_SYNC] Открытых позиций на Bybit: {len(bybit_positions)}")
+        except Exception as e:
+            logger.warning(f"[BYBIT_SYNC] Ошибка получения позиций: {e}")
+    
     for user_id, user_positions in positions_cache.items():
         user = get_user(user_id)
+        
+        # === ПРОВЕРКА: позиция закрылась на Bybit? ===
+        if await is_hedging_enabled() and bybit_open_symbols:
+            for pos in user_positions[:]:
+                if pos.get('bybit_qty', 0) > 0:
+                    bybit_symbol = pos['symbol'].replace('/', '')
+                    
+                    # Если позиция была на Bybit но её больше нет - закрылась по TP/SL
+                    if bybit_symbol not in bybit_open_symbols:
+                        ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                        
+                        # Получаем реальный PnL с Bybit
+                        try:
+                            closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
+                            if closed_trades:
+                                real_pnl = closed_trades[0]['closed_pnl']
+                                exit_price = closed_trades[0]['exit_price']
+                                reason = "TP" if real_pnl > 0 else "SL"
+                            else:
+                                real_pnl = pos['pnl']
+                                exit_price = pos['current']
+                                reason = "CLOSED"
+                        except Exception as e:
+                            logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
+                            real_pnl = pos['pnl']
+                            exit_price = pos['current']
+                            reason = "CLOSED"
+                        
+                        # Возвращаем деньги пользователю
+                        returned = pos['amount'] + real_pnl
+                        user['balance'] += returned
+                        user['total_profit'] += real_pnl
+                        save_user(user_id)
+                        
+                        # Закрываем в БД
+                        db_close_position(pos['id'], exit_price, real_pnl, f'BYBIT_{reason}')
+                        user_positions.remove(pos)
+                        
+                        # Уведомление
+                        pnl_sign = "+" if real_pnl >= 0 else ""
+                        pnl_emoji = "✅" if real_pnl >= 0 else "📉"
+                        try:
+                            await context.bot.send_message(
+                                user_id,
+                                f"<b>📡 Bybit: позиция закрыта</b>\n\n"
+                                f"{ticker} | {pos['direction']} | {reason}\n"
+                                f"{pnl_emoji} {pnl_sign}${real_pnl:.2f}\n\n"
+                                f"💰 ${user['balance']:.0f}",
+                                parse_mode="HTML"
+                            )
+                            logger.info(f"[BYBIT_SYNC] User {user_id}: {ticker} closed on Bybit, PnL=${real_pnl:.2f}")
+                        except Exception as e:
+                            logger.error(f"[BYBIT_SYNC] Notify error: {e}")
+                        continue
         
         for pos in user_positions[:]:  # копия для безопасного удаления
             real_price = None
