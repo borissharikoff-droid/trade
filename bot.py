@@ -220,30 +220,70 @@ def init_db():
     except Exception as e:
         logger.warning(f"[DB] Migration warning: {e}")
     
+    # Миграция: добавляем поля для авто-трейда пользователя
+    try:
+        if USE_POSTGRES:
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_max_daily INTEGER DEFAULT 10")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_min_winrate INTEGER DEFAULT 70")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_today INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_last_reset TEXT")
+        else:
+            c.execute("PRAGMA table_info(users)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'auto_trade' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN auto_trade INTEGER DEFAULT 0")
+            if 'auto_trade_max_daily' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN auto_trade_max_daily INTEGER DEFAULT 10")
+            if 'auto_trade_min_winrate' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN auto_trade_min_winrate INTEGER DEFAULT 70")
+            if 'auto_trade_today' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN auto_trade_today INTEGER DEFAULT 0")
+            if 'auto_trade_last_reset' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN auto_trade_last_reset TEXT")
+        conn.commit()
+        logger.info("[DB] Migration: auto_trade columns ensured")
+    except Exception as e:
+        logger.warning(f"[DB] Migration warning (auto_trade): {e}")
+    
     conn.close()
     db_type = "PostgreSQL" if USE_POSTGRES else f"SQLite ({DB_PATH})"
     logger.info(f"[DB] Initialized: {db_type}")
 
 def db_get_user(user_id: int) -> Dict:
     """Получить пользователя из БД"""
-    row = run_sql("SELECT balance, total_deposit, total_profit, trading FROM users WHERE user_id = ?", (user_id,), fetch="one")
-    
+    row = run_sql("""
+        SELECT balance, total_deposit, total_profit, trading,
+               auto_trade, auto_trade_max_daily, auto_trade_min_winrate,
+               auto_trade_today, auto_trade_last_reset
+        FROM users WHERE user_id = ?
+    """, (user_id,), fetch="one")
+
     if not row:
         run_sql("INSERT INTO users (user_id) VALUES (?)", (user_id,))
         logger.info(f"[DB] New user {user_id} created")
-        return {'balance': 100.0, 'total_deposit': 100.0, 'total_profit': 0.0, 'trading': False}
-    
+        return {
+            'balance': 100.0, 'total_deposit': 100.0, 'total_profit': 0.0, 'trading': False,
+            'auto_trade': False, 'auto_trade_max_daily': 10, 'auto_trade_min_winrate': 70,
+            'auto_trade_today': 0, 'auto_trade_last_reset': None
+        }
+
     return {
         'balance': row['balance'],
         'total_deposit': row['total_deposit'],
         'total_profit': row['total_profit'],
-        'trading': bool(row['trading'])
+        'trading': bool(row['trading']),
+        'auto_trade': bool(row['auto_trade'] or 0),
+        'auto_trade_max_daily': int(row['auto_trade_max_daily'] or 10),
+        'auto_trade_min_winrate': int(row['auto_trade_min_winrate'] or 70),
+        'auto_trade_today': int(row['auto_trade_today'] or 0),
+        'auto_trade_last_reset': row['auto_trade_last_reset']
     }
 
 def db_update_user(user_id: int, **kwargs):
     """Обновить данные пользователя"""
     for key, value in kwargs.items():
-        if key == 'trading':
+        if key in ['trading', 'auto_trade']:
             value = 1 if value else 0
         run_sql(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
 
@@ -626,11 +666,16 @@ def save_user(user_id: int):
     """Сохранить пользователя в БД"""
     if user_id in users_cache:
         user = users_cache[user_id]
-        db_update_user(user_id, 
+        db_update_user(user_id,
             balance=user['balance'],
             total_deposit=user['total_deposit'],
             total_profit=user['total_profit'],
-            trading=user['trading']
+            trading=user['trading'],
+            auto_trade=user.get('auto_trade', False),
+            auto_trade_max_daily=user.get('auto_trade_max_daily', 10),
+            auto_trade_min_winrate=user.get('auto_trade_min_winrate', 70),
+            auto_trade_today=user.get('auto_trade_today', 0),
+            auto_trade_last_reset=user.get('auto_trade_last_reset')
         )
 
 def get_positions(user_id: int) -> List[Dict]:
@@ -666,16 +711,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     balance = user['balance']
     trading_status = "🟢" if user['trading'] else "🔴"
+    auto_trade_status = "🟢" if user.get('auto_trade') else "🔴"
+    
+    # Получаем реальный winrate
+    real_wr = db_get_real_winrate(min_trades=10)
+    wr_text = f"{real_wr['winrate']:.0f}%" if real_wr['reliable'] else "~75%"
     
     text = f"""<b>💰 Баланс</b>
 
 ${balance:.2f}
 
 Торговля: {trading_status}
-Winrate: 75%+"""
+Авто-трейд: {auto_trade_status}
+Winrate: {wr_text}"""
     
     keyboard = [
-        [InlineKeyboardButton(f"{'🔴 Выкл' if user['trading'] else '🟢 Вкл'}", callback_data="toggle")],
+        [InlineKeyboardButton(f"{'🔴 Выкл' if user['trading'] else '🟢 Вкл'}", callback_data="toggle"),
+         InlineKeyboardButton(f"{'🟢' if user.get('auto_trade') else '🔴'} Авто-трейд", callback_data="auto_trade_menu")],
         [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")]
     ]
     
@@ -999,6 +1051,142 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     await start(update, context)
 
+# ==================== АВТО-ТРЕЙД НАСТРОЙКИ ====================
+async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню настроек авто-трейда"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    users_cache.pop(user_id, None)  # Обновляем из БД
+    user = get_user(user_id)
+    
+    auto_enabled = user.get('auto_trade', False)
+    max_daily = user.get('auto_trade_max_daily', 10)
+    min_wr = user.get('auto_trade_min_winrate', 70)
+    today_count = user.get('auto_trade_today', 0)
+    
+    status = "🟢 ВКЛ" if auto_enabled else "🔴 ВЫКЛ"
+    
+    text = f"""<b>🤖 Авто-трейд</b>
+
+Статус: {status}
+Сделок сегодня: {today_count}/{max_daily}
+Мин. успешность: {min_wr}%
+
+<i>Бот автоматически входит в сделки по сигналам.</i>"""
+    
+    keyboard = [
+        [InlineKeyboardButton(f"{'🔴 Выключить' if auto_enabled else '🟢 Включить'}", callback_data="auto_trade_toggle")],
+        [InlineKeyboardButton(f"📊 Сделок/день: {max_daily}", callback_data="auto_trade_daily_menu")],
+        [InlineKeyboardButton(f"📈 Мин. успешность: {min_wr}%", callback_data="auto_trade_winrate_menu")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def auto_trade_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Вкл/выкл авто-трейда"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    
+    new_state = not user.get('auto_trade', False)
+    user['auto_trade'] = new_state
+    db_update_user(user_id, auto_trade=new_state)
+    
+    logger.info(f"[AUTO_TRADE] User {user_id} auto_trade = {new_state}")
+    
+    await auto_trade_menu(update, context)
+
+async def auto_trade_daily_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню выбора сделок в день"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = get_user(update.effective_user.id)
+    current = user.get('auto_trade_max_daily', 10)
+    
+    text = f"""<b>📊 Сделок в день</b>
+
+Текущее: {current}
+
+Выбери лимит:"""
+    
+    keyboard = [
+        [InlineKeyboardButton("3", callback_data="auto_daily_3"),
+         InlineKeyboardButton("5", callback_data="auto_daily_5"),
+         InlineKeyboardButton("10", callback_data="auto_daily_10")],
+        [InlineKeyboardButton("15", callback_data="auto_daily_15"),
+         InlineKeyboardButton("20", callback_data="auto_daily_20"),
+         InlineKeyboardButton("∞", callback_data="auto_daily_999")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="auto_trade_menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def auto_trade_set_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Установить лимит сделок в день"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    value = int(query.data.replace("auto_daily_", ""))
+    
+    user = get_user(user_id)
+    user['auto_trade_max_daily'] = value
+    db_update_user(user_id, auto_trade_max_daily=value)
+    
+    logger.info(f"[AUTO_TRADE] User {user_id} max_daily = {value}")
+    
+    await auto_trade_menu(update, context)
+
+async def auto_trade_winrate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню выбора минимальной успешности"""
+    query = update.callback_query
+    await query.answer()
+    
+    user = get_user(update.effective_user.id)
+    current = user.get('auto_trade_min_winrate', 70)
+    
+    text = f"""<b>📈 Минимальная успешность</b>
+
+Текущее: {current}%
+
+Брать сделки с успешностью от:"""
+    
+    keyboard = [
+        [InlineKeyboardButton("60%", callback_data="auto_wr_60"),
+         InlineKeyboardButton("65%", callback_data="auto_wr_65"),
+         InlineKeyboardButton("70%", callback_data="auto_wr_70")],
+        [InlineKeyboardButton("75%", callback_data="auto_wr_75"),
+         InlineKeyboardButton("80%", callback_data="auto_wr_80"),
+         InlineKeyboardButton("85%", callback_data="auto_wr_85")],
+        [InlineKeyboardButton("90%", callback_data="auto_wr_90"),
+         InlineKeyboardButton("95%", callback_data="auto_wr_95")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="auto_trade_menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def auto_trade_set_winrate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Установить минимальную успешность"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    value = int(query.data.replace("auto_wr_", ""))
+    
+    user = get_user(user_id)
+    user['auto_trade_min_winrate'] = value
+    db_update_user(user_id, auto_trade_min_winrate=value)
+    
+    logger.info(f"[AUTO_TRADE] User {user_id} min_winrate = {value}%")
+    
+    await auto_trade_menu(update, context)
+
 async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Синхронизация позиций с Bybit - закрывает позиции которые закрылись на бирже
@@ -1147,6 +1335,91 @@ def stack_positions(positions: List[Dict]) -> List[Dict]:
             })
     
     return stacked
+
+
+async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Закрыть все позиции по конкретному символу"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    user_positions = get_positions(user_id)
+    
+    # Получаем символ из callback_data: close_symbol|BTC/USDT
+    parts = query.data.split("|")
+    if len(parts) < 2:
+        await query.answer("Ошибка", show_alert=True)
+        return
+    
+    symbol = parts[1]
+    ticker = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
+    
+    # Находим позиции по этому символу
+    positions_to_close = [p for p in user_positions if p['symbol'] == symbol]
+    
+    if not positions_to_close:
+        await query.edit_message_text(
+            f"📭 Нет открытых позиций по {ticker}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
+        )
+        return
+    
+    await query.edit_message_text(f"⏳ Закрываем {ticker}...")
+    
+    # Закрываем на Bybit
+    if await is_hedging_enabled():
+        for pos in positions_to_close:
+            bybit_qty = pos.get('bybit_qty', 0)
+            if bybit_qty > 0:
+                await hedge_close(pos['id'], symbol, pos['direction'], bybit_qty)
+            else:
+                await hedge_close(pos['id'], symbol, pos['direction'], None)
+    
+    # Закрываем в БД и считаем PnL
+    total_pnl = 0
+    total_returned = 0
+    
+    for pos in positions_to_close:
+        # Получаем реальную цену
+        real_price = await get_cached_price(symbol)
+        if not real_price:
+            real_price = pos['current']
+        
+        # Пересчитываем PnL с реальной ценой
+        if pos['direction'] == "LONG":
+            pnl = (real_price - pos['entry']) / pos['entry'] * pos['amount'] * LEVERAGE
+        else:
+            pnl = (pos['entry'] - real_price) / pos['entry'] * pos['amount'] * LEVERAGE
+        
+        pnl -= pos.get('commission', 0)
+        
+        returned = pos['amount'] + pnl
+        total_pnl += pnl
+        total_returned += returned
+        
+        user['balance'] += returned
+        user['total_profit'] += pnl
+        
+        db_close_position(pos['id'], real_price, pnl, 'MANUAL_CLOSE')
+        user_positions.remove(pos)
+    
+    save_user(user_id)
+    
+    pnl_sign = "+" if total_pnl >= 0 else ""
+    pnl_emoji = "✅" if total_pnl >= 0 else "📉"
+    
+    text = f"""<b>{pnl_emoji} {ticker} закрыт</b>
+
+PnL: {pnl_sign}${total_pnl:.2f}
+
+💰 ${user['balance']:.2f}"""
+    
+    keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades"),
+                 InlineKeyboardButton("🔙 Меню", callback_data="back")]]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    logger.info(f"[CLOSE_SYMBOL] User {user_id}: closed {ticker}, PnL=${total_pnl:.2f}")
 
 
 async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1649,7 +1922,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     # Кнопки под авто-сделкой
                     auto_keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("❌ Закрыть все", callback_data="close_all"),
+                        [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
                          InlineKeyboardButton("📊 Сделки", callback_data="trades")]
                     ])
                     
@@ -3427,6 +3700,13 @@ def main() -> None:
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(toggle_trading, pattern="^toggle$"))
+    app.add_handler(CallbackQueryHandler(auto_trade_menu, pattern="^auto_trade_menu$"))
+    app.add_handler(CallbackQueryHandler(auto_trade_toggle, pattern="^auto_trade_toggle$"))
+    app.add_handler(CallbackQueryHandler(auto_trade_daily_menu, pattern="^auto_trade_daily_menu$"))
+    app.add_handler(CallbackQueryHandler(auto_trade_set_daily, pattern="^auto_daily_"))
+    app.add_handler(CallbackQueryHandler(auto_trade_winrate_menu, pattern="^auto_trade_winrate_menu$"))
+    app.add_handler(CallbackQueryHandler(auto_trade_set_winrate, pattern="^auto_wr_"))
+    app.add_handler(CallbackQueryHandler(close_symbol_trades, pattern="^close_symbol\\|"))
     app.add_handler(CallbackQueryHandler(deposit_menu, pattern="^deposit$"))
     app.add_handler(CallbackQueryHandler(pay_stars_menu, pattern="^pay_stars$"))
     app.add_handler(CallbackQueryHandler(send_stars_invoice, pattern="^stars_"))
