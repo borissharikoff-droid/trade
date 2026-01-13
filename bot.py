@@ -1287,8 +1287,21 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Показываем количество стакнутых позиций
         stack_info = f" x{pos['stacked_count']}" if pos.get('stacked_count', 1) > 1 else ""
         
+        # Определяем какой TP активен
+        tp1_hit = pos.get('tp1_hit', False)
+        tp2_hit = pos.get('tp2_hit', False)
+        if tp2_hit:
+            tp_status = "TP3 🎯"
+            current_tp = pos.get('tp3', pos['tp'])
+        elif tp1_hit:
+            tp_status = "TP2"
+            current_tp = pos.get('tp2', pos['tp'])
+        else:
+            tp_status = "TP1"
+            current_tp = pos.get('tp1', pos['tp'])
+        
         text += f"<b>{ticker}</b> | {dir_text} | ${pos['amount']:.0f} | x{LEVERAGE}{stack_info} {emoji}\n"
-        text += f"{format_price(current)} → TP: {format_price(pos['tp'])} | SL: {format_price(pos['sl'])}\n"
+        text += f"{format_price(current)} → {tp_status}: {format_price(current_tp)} | SL: {format_price(pos['sl'])}\n"
         text += f"PnL: {pnl_str}\n\n"
         
         # Для стакнутых позиций передаём все ID через запятую
@@ -1426,8 +1439,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         direction = best_signal['direction']
         entry = price_data['entry_price']
         sl = price_data['stop_loss']
-        tp = price_data['take_profit']
+        tp = price_data['take_profit']  # TP1 для совместимости
+        tp1 = price_data.get('tp1', tp)
+        tp2 = price_data.get('tp2', tp * 1.5 if direction == "LONG" else tp * 0.5)
+        tp3 = price_data.get('tp3', tp * 2 if direction == "LONG" else tp * 0.3)
         winrate = int(price_data['success_rate'])
+        
+        # Процентные уровни
+        tp1_percent = abs(tp1 - entry) / entry * 100
+        tp2_percent = abs(tp2 - entry) / entry * 100
+        tp3_percent = abs(tp3 - entry) / entry * 100
+        sl_percent = abs(sl - entry) / entry * 100
         
         # === ПРОВЕРКА НА ДУБЛИКАТ СИГНАЛА ===
         now = datetime.now()
@@ -1523,18 +1545,24 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                         pos_id = existing['id']
                         logger.info(f"[AUTO-TRADE] Added to existing position {pos_id}")
                     else:
-                        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ ===
+                        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
                         position = {
                             'symbol': symbol,
                             'direction': direction,
                             'entry': float(entry),
                             'current': float(entry),
                             'amount': float(auto_bet),
-                            'tp': float(tp),
+                            'tp': float(tp1),
+                            'tp1': float(tp1),
+                            'tp2': float(tp2),
+                            'tp3': float(tp3),
+                            'tp1_hit': False,
+                            'tp2_hit': False,
                             'sl': float(sl),
                             'commission': float(commission),
                             'pnl': float(-commission),
-                            'bybit_qty': bybit_qty
+                            'bybit_qty': bybit_qty,
+                            'original_amount': float(auto_bet)
                         }
                         
                         pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
@@ -1544,18 +1572,19 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                             positions_cache[AUTO_TRADE_USER_ID] = []
                         positions_cache[AUTO_TRADE_USER_ID].append(position)
                     
-                    # Уведомление
-                    tp_percent = abs(tp - entry) / entry * 100
-                    sl_percent = abs(sl - entry) / entry * 100
-                    
+                    # Уведомление с тремя TP
                     auto_msg = f"""<b>🤖 Авто-сделка</b>
 
 {ticker} | {direction} | ${auto_bet:.0f} | x{auto_leverage}
 Уверенность: {winrate}%
 
-Вход: {format_price(entry)}
-TP: {format_price(tp)} (+{tp_percent:.1f}%)
-SL: {format_price(sl)} (-{sl_percent:.1f}%)
+<b>Вход:</b> {format_price(entry)}
+
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
+
+<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${new_balance:.0f}"""
                     
@@ -1583,18 +1612,19 @@ SL: {format_price(sl)} (-{sl_percent:.1f}%)
         dir_emoji = "🟢" if direction == "LONG" else "🔴"
         dir_text = "LONG" if direction == "LONG" else "SHORT"
         
-        # Формат сигнала с TP/SL и плечом
-        tp_percent = abs(tp - entry) / entry * 100
-        sl_percent = abs(sl - entry) / entry * 100
-        
+        # Формат сигнала с тремя TP
         text = f"""<b>📡 Сигнал</b>
 
 {ticker} | {dir_text} | x{LEVERAGE}
 Winrate: {winrate}%
 
-Вход: {format_price(entry)}
-TP: {format_price(tp)} (+{tp_percent:.1f}%)
-SL: {format_price(sl)} (-{sl_percent:.1f}%)
+<b>Вход:</b> {format_price(entry)}
+
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
+
+<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${balance:.0f}"""
         
@@ -1613,14 +1643,17 @@ SL: {format_price(sl)} (-{sl_percent:.1f}%)
         # Форматируем цены с нужной точностью (не int для дешёвых монет!)
         entry_str = f"{entry:.4f}" if entry < 100 else f"{entry:.0f}"
         sl_str = f"{sl:.4f}" if sl < 100 else f"{sl:.0f}"
-        tp_str = f"{tp:.4f}" if tp < 100 else f"{tp:.0f}"
+        tp1_str = f"{tp1:.4f}" if tp1 < 100 else f"{tp1:.0f}"
+        tp2_str = f"{tp2:.4f}" if tp2 < 100 else f"{tp2:.0f}"
+        tp3_str = f"{tp3:.4f}" if tp3 < 100 else f"{tp3:.0f}"
         
+        # Callback: e|SYM|D|ENTRY|SL|TP1|TP2|TP3|AMT|WINRATE
         keyboard = []
         if amounts:
-            row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{entry_str}|{sl_str}|{tp_str}|{amt}|{winrate}") for amt in amounts[:4]]
+            row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{entry_str}|{sl_str}|{tp1_str}|{tp2_str}|{tp3_str}|{amt}|{winrate}") for amt in amounts[:4]]
             keyboard.append(row)
         
-        keyboard.append([InlineKeyboardButton("💵 Своя сумма", callback_data=f"custom|{symbol}|{d}|{entry_str}|{sl_str}|{tp_str}|{winrate}")])
+        keyboard.append([InlineKeyboardButton("💵 Своя сумма", callback_data=f"custom|{symbol}|{d}|{entry_str}|{sl_str}|{tp1_str}|{tp2_str}|{tp3_str}|{winrate}")])
         keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
         
         try:
@@ -1637,7 +1670,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = get_user(user_id)
     user_positions = get_positions(user_id)
 
-    # e|SYM|D|ENTRY|SL|TP|AMT|WINRATE
+    # e|SYM|D|ENTRY|SL|TP1|TP2|TP3|AMT|WINRATE
     data = query.data.split("|")
     if len(data) < 7:
         await query.edit_message_text("❌ Ошибка")
@@ -1648,9 +1681,23 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         direction = "LONG" if data[2] == 'L' else "SHORT"
         entry = float(data[3])
         sl = float(data[4])
-        tp = float(data[5])
-        amount = float(data[6])
-        winrate = int(data[7]) if len(data) > 7 else 75
+        tp1 = float(data[5])
+        
+        # Поддержка старого и нового формата callback
+        if len(data) >= 10:
+            # Новый формат с тремя TP
+            tp2 = float(data[6])
+            tp3 = float(data[7])
+            amount = float(data[8])
+            winrate = int(data[9]) if len(data) > 9 else 75
+        else:
+            # Старый формат - рассчитываем TP2, TP3
+            tp2 = entry + (tp1 - entry) * 2 if direction == "LONG" else entry - (entry - tp1) * 2
+            tp3 = entry + (tp1 - entry) * 3.5 if direction == "LONG" else entry - (entry - tp1) * 3.5
+            amount = float(data[6])
+            winrate = int(data[7]) if len(data) > 7 else 75
+        
+        tp = tp1  # Для совместимости
     except (ValueError, IndexError):
         await query.edit_message_text("❌ Ошибка данных")
         return
@@ -1722,7 +1769,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pos_id = existing['id']
         logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol}, total=${new_amount}")
     else:
-        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ ===
+        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
         position = {
             'symbol': symbol,
             'direction': direction,
@@ -1730,10 +1777,16 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             'entry': entry,
             'current': entry,
             'sl': sl,
-            'tp': tp,
+            'tp': tp1,  # Основной TP = TP1
+            'tp1': tp1,
+            'tp2': tp2,
+            'tp3': tp3,
+            'tp1_hit': False,  # Флаги частичных тейков
+            'tp2_hit': False,
             'pnl': -commission,
             'commission': commission,
-            'bybit_qty': bybit_qty
+            'bybit_qty': bybit_qty,
+            'original_amount': amount  # Для расчёта частичных закрытий
         }
 
         pos_id = db_add_position(user_id, position)
@@ -1744,12 +1797,12 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             positions_cache[user_id] = []
         positions_cache[user_id].append(position)
         
-        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}, bybit_qty={bybit_qty}")
-    
-    logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}")
+        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
     
     dir_text = "LONG" if direction == "LONG" else "SHORT"
-    tp_percent = abs(tp - entry) / entry * 100
+    tp1_percent = abs(tp1 - entry) / entry * 100
+    tp2_percent = abs(tp2 - entry) / entry * 100
+    tp3_percent = abs(tp3 - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
     text = f"""<b>✅ Сделка открыта</b>
@@ -1757,9 +1810,13 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 {ticker} | {dir_text} | ${amount:.0f} | x{LEVERAGE}
 Winrate: {winrate}%
 
-Вход: {format_price(entry)}
-TP: {format_price(tp)} (+{tp_percent:.1f}%)
-SL: {format_price(sl)} (-{sl_percent:.1f}%)
+<b>Вход:</b> {format_price(entry)}
+
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
+
+<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${user['balance']:.0f}"""
     
@@ -1970,21 +2027,38 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    # custom|SYM|D|ENTRY|SL|TP|WINRATE
+    # custom|SYM|D|ENTRY|SL|TP1|TP2|TP3|WINRATE (новый формат)
+    # custom|SYM|D|ENTRY|SL|TP|WINRATE (старый формат)
     data = query.data.split("|")
     if len(data) < 6:
         await query.edit_message_text("❌ Ошибка")
         return
     
     # Сохраняем данные сигнала
-    context.user_data['pending_trade'] = {
-        'symbol': data[1],
-        'direction': data[2],
-        'entry': data[3],
-        'sl': data[4],
-        'tp': data[5],
-        'winrate': data[6] if len(data) > 6 else '75'
-    }
+    if len(data) >= 9:
+        # Новый формат с тремя TP
+        context.user_data['pending_trade'] = {
+            'symbol': data[1],
+            'direction': data[2],
+            'entry': data[3],
+            'sl': data[4],
+            'tp1': data[5],
+            'tp2': data[6],
+            'tp3': data[7],
+            'tp': data[5],  # для совместимости
+            'winrate': data[8] if len(data) > 8 else '75'
+        }
+    else:
+        # Старый формат
+        context.user_data['pending_trade'] = {
+            'symbol': data[1],
+            'direction': data[2],
+            'entry': data[3],
+            'sl': data[4],
+            'tp': data[5],
+            'tp1': data[5],
+            'winrate': data[6] if len(data) > 6 else '75'
+        }
     
     user = get_user(update.effective_user.id)
     
@@ -2028,7 +2102,10 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     direction = "LONG" if trade['direction'] == 'L' else "SHORT"
     entry = float(trade['entry'])
     sl = float(trade['sl'])
-    tp = float(trade['tp'])
+    tp1 = float(trade.get('tp1', trade['tp']))
+    tp2 = float(trade.get('tp2', entry + (tp1 - entry) * 2 if direction == "LONG" else entry - (entry - tp1) * 2))
+    tp3 = float(trade.get('tp3', entry + (tp1 - entry) * 3.5 if direction == "LONG" else entry - (entry - tp1) * 3.5))
+    tp = tp1  # для совместимости
     winrate = int(trade.get('winrate', 75))
 
     # Комиссия за открытие
@@ -2086,7 +2163,7 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         pos_id = existing['id']
         logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol} (custom), total=${new_amount}")
     else:
-        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ ===
+        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
         position = {
             'symbol': symbol,
             'direction': direction,
@@ -2094,10 +2171,16 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
             'entry': entry,
             'current': entry,
             'sl': sl,
-            'tp': tp,
+            'tp': tp1,
+            'tp1': tp1,
+            'tp2': tp2,
+            'tp3': tp3,
+            'tp1_hit': False,
+            'tp2_hit': False,
             'pnl': -commission,
             'commission': commission,
-            'bybit_qty': bybit_qty
+            'bybit_qty': bybit_qty,
+            'original_amount': amount
         }
 
         pos_id = db_add_position(user_id, position)
@@ -2108,11 +2191,13 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
             positions_cache[user_id] = []
         positions_cache[user_id].append(position)
         
-        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom), bybit_qty={bybit_qty}")
+        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom), TP1/2/3={tp1:.4f}/{tp2:.4f}/{tp3:.4f}")
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_text = "LONG" if direction == "LONG" else "SHORT"
-    tp_percent = abs(tp - entry) / entry * 100
+    tp1_percent = abs(tp1 - entry) / entry * 100
+    tp2_percent = abs(tp2 - entry) / entry * 100
+    tp3_percent = abs(tp3 - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
     text = f"""<b>✅ Сделка открыта</b>
@@ -2120,9 +2205,13 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
 {ticker} | {dir_text} | ${amount:.0f} | x{LEVERAGE}
 Winrate: {winrate}%
 
-Вход: {format_price(entry)}
-TP: {format_price(tp)} (+{tp_percent:.1f}%)
-SL: {format_price(sl)} (-{sl_percent:.1f}%)
+<b>Вход:</b> {format_price(entry)}
+
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
+
+<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${user['balance']:.0f}"""
     
@@ -2241,16 +2330,118 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
             except Exception as e:
                 logger.warning(f"[ADAPTIVE] Ошибка: {e}")
             
-            # Автозакрытие по TP/SL
+            # === ЧАСТИЧНЫЕ ТЕЙКИ TP1, TP2, TP3 ===
+            ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+            tp1 = pos.get('tp1', pos['tp'])
+            tp2 = pos.get('tp2', tp1 * 1.5 if pos['direction'] == "LONG" else tp1 * 0.5)
+            tp3 = pos.get('tp3', tp1 * 2 if pos['direction'] == "LONG" else tp1 * 0.3)
+            
             if pos['direction'] == "LONG":
-                hit_tp = pos['current'] >= pos['tp']
+                hit_tp1 = pos['current'] >= tp1 and not pos.get('tp1_hit', False)
+                hit_tp2 = pos['current'] >= tp2 and not pos.get('tp2_hit', False)
+                hit_tp3 = pos['current'] >= tp3
                 hit_sl = pos['current'] <= pos['sl']
             else:
-                hit_tp = pos['current'] <= pos['tp']
+                hit_tp1 = pos['current'] <= tp1 and not pos.get('tp1_hit', False)
+                hit_tp2 = pos['current'] <= tp2 and not pos.get('tp2_hit', False)
+                hit_tp3 = pos['current'] <= tp3
                 hit_sl = pos['current'] >= pos['sl']
             
-            if hit_tp or hit_sl:
-                # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit используя сохранённый qty ===
+            # === TP1: Закрываем 40%, двигаем SL в безубыток ===
+            if hit_tp1 and not hit_sl:
+                close_percent = 0.40
+                close_amount = pos['amount'] * close_percent
+                remaining_amount = pos['amount'] - close_amount
+                
+                # PnL от частичного закрытия
+                if pos['direction'] == "LONG":
+                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
+                else:
+                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE
+                
+                # Возвращаем часть и профит
+                returned = close_amount + partial_pnl
+                user['balance'] += returned
+                user['total_profit'] += partial_pnl
+                save_user(user_id)
+                
+                # Обновляем позицию
+                pos['amount'] = remaining_amount
+                pos['tp1_hit'] = True
+                pos['sl'] = pos['entry'] * 1.001 if pos['direction'] == "LONG" else pos['entry'] * 0.999  # SL в безубыток
+                pos['tp'] = tp2  # Следующий TP
+                
+                db_update_position(pos['id'], amount=remaining_amount, sl=pos['sl'], tp=pos['tp'])
+                
+                # Обновляем Bybit
+                if await is_hedging_enabled() and pos.get('bybit_qty', 0) > 0:
+                    close_qty = pos['bybit_qty'] * close_percent
+                    await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
+                    pos['bybit_qty'] -= close_qty
+                    await hedger.set_trading_stop(pos['symbol'].replace("/", ""), pos['direction'], tp=tp2, sl=pos['sl'])
+                
+                try:
+                    await context.bot.send_message(user_id, f"""<b>✅ TP1 достигнут</b>
+
+{ticker} | +${partial_pnl:.1f}
+Закрыто 40%, SL → безубыток
+Следующая цель: TP2
+
+💰 ${user['balance']:.0f}""", parse_mode="HTML")
+                    logger.info(f"[TP1] User {user_id} {ticker}: +${partial_pnl:.2f}, remaining {remaining_amount:.0f}")
+                except Exception as e:
+                    logger.error(f"[TP1] Notify error: {e}")
+                continue
+            
+            # === TP2: Закрываем ещё 40%, запускаем агрессивный трейлинг ===
+            if hit_tp2 and pos.get('tp1_hit', False) and not hit_sl:
+                close_percent = 0.40 / 0.60  # 40% от оставшихся 60% = ~67% текущей позиции
+                close_amount = pos['amount'] * close_percent
+                remaining_amount = pos['amount'] - close_amount
+                
+                if pos['direction'] == "LONG":
+                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
+                else:
+                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE
+                
+                returned = close_amount + partial_pnl
+                user['balance'] += returned
+                user['total_profit'] += partial_pnl
+                save_user(user_id)
+                
+                pos['amount'] = remaining_amount
+                pos['tp2_hit'] = True
+                pos['tp'] = tp3
+                
+                # SL подтягиваем к TP1 уровню
+                if pos['direction'] == "LONG":
+                    pos['sl'] = tp1 * 0.998
+                else:
+                    pos['sl'] = tp1 * 1.002
+                
+                db_update_position(pos['id'], amount=remaining_amount, sl=pos['sl'], tp=pos['tp'])
+                
+                if await is_hedging_enabled() and pos.get('bybit_qty', 0) > 0:
+                    close_qty = pos['bybit_qty'] * close_percent
+                    await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
+                    pos['bybit_qty'] -= close_qty
+                    await hedger.set_trading_stop(pos['symbol'].replace("/", ""), pos['direction'], tp=tp3, sl=pos['sl'])
+                
+                try:
+                    await context.bot.send_message(user_id, f"""<b>✅ TP2 достигнут</b>
+
+{ticker} | +${partial_pnl:.1f}
+Закрыто 80% всего, остался runner 20%
+Цель: TP3 (runner)
+
+💰 ${user['balance']:.0f}""", parse_mode="HTML")
+                    logger.info(f"[TP2] User {user_id} {ticker}: +${partial_pnl:.2f}, runner {remaining_amount:.0f}")
+                except Exception as e:
+                    logger.error(f"[TP2] Notify error: {e}")
+                continue
+            
+            # === TP3 или SL: Полное закрытие ===
+            if hit_tp3 or hit_sl:
                 if await is_hedging_enabled():
                     bybit_qty = pos.get('bybit_qty', 0)
                     if bybit_qty > 0:
@@ -2260,38 +2451,34 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 returned = pos['amount'] + pos['pnl']
                 user['balance'] += returned
                 user['total_profit'] += pos['pnl']
-                save_user(user_id)  # Сохраняем баланс в БД
+                save_user(user_id)
                 
-                reason = 'TP' if hit_tp else 'SL'
+                reason = 'TP3' if hit_tp3 else 'SL'
                 db_close_position(pos['id'], pos['current'], pos['pnl'], reason)
                 user_positions.remove(pos)
                 
                 pnl_abs = abs(pos['pnl'])
-                pnl_str = f"+${pos['pnl']:.2f}" if pos['pnl'] >= 0 else f"-${pnl_abs:.2f}"
-                dir_emoji = "🟢 LONG" if pos['direction'] == "LONG" else "🔴 SHORT"
                 
-                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                
-                if hit_tp:
-                    text = f"""<b>📈 Take Profit</b>
+                if hit_tp3:
+                    text = f"""<b>🎯 TP3 Runner</b>
 
 {ticker} | +${pnl_abs:.0f}
 {format_price(pos['entry'])} → {format_price(pos['current'])}
-Цель достигнута.
+Все цели достигнуты!
 
 💰 ${user['balance']:.0f}"""
-                elif pos['pnl'] == 0:
+                elif pos['pnl'] >= 0:
                     text = f"""<b>➖ Безубыток</b>
 
-{ticker} | $0
-Вышли без потерь.
+{ticker} | ${pos['pnl']:.0f}
+Защитный стоп сработал.
 
 💰 ${user['balance']:.0f}"""
                 else:
                     text = f"""<b>📉 Stop Loss</b>
 
 {ticker} | -${pnl_abs:.0f}
-Стоп отработал как надо.
+Стоп отработал.
 
 💰 ${user['balance']:.0f}"""
                 
