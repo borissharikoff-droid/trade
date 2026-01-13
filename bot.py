@@ -13,7 +13,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.error import BadRequest
 
 from hedger import hedge_open, hedge_close, is_hedging_enabled, hedger
-from analyzer import MarketAnalyzer
+from analyzer import MarketAnalyzer, get_signal_stats, reset_signal_stats
 
 load_dotenv()
 
@@ -2484,6 +2484,69 @@ async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     finally:
         await analyzer.close()
 
+async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Статистика генерации сигналов: /signalstats [reset]"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ закрыт")
+        return
+    
+    args = context.args
+    
+    if args and args[0].lower() == "reset":
+        reset_signal_stats()
+        await update.message.reply_text("✅ Статистика сброшена")
+        return
+    
+    stats = get_signal_stats()
+    
+    total = stats['analyzed']
+    accepted = stats['accepted']
+    rejected = stats['rejected']
+    rate = (accepted / total * 100) if total > 0 else 0
+    
+    reasons = stats['reasons']
+    
+    # Сортируем причины по количеству
+    sorted_reasons = sorted(reasons.items(), key=lambda x: x[1], reverse=True)
+    
+    reasons_text = ""
+    for reason, count in sorted_reasons:
+        if count > 0:
+            reason_name = {
+                'low_liquidity': '⏰ Низкая ликвидность',
+                'manipulation': '🎭 Манипуляции',
+                'weak_score': '📉 Слабый скор',
+                'context_conflict': '⚔️ Конфликт контекста',
+                'mtf_conflict': '📊 MTF конфликт',
+                'low_factors': '📋 Мало факторов',
+                'low_confidence': '🎯 Низкая уверенность',
+                'weak_trend': '📈 Слабый тренд (ADX)',
+                'low_volume': '📊 Низкий объём',
+                'whale_against': '🐋 Киты против',
+                'cvd_against': '💹 CVD против',
+                'orderbook_against': '📕 Orderbook против',
+                'btc_against': '₿ BTC против'
+            }.get(reason, reason)
+            reasons_text += f"• {reason_name}: {count}\n"
+    
+    if not reasons_text:
+        reasons_text = "Нет отклонений\n"
+    
+    text = f"""<b>📊 Статистика сигналов</b>
+
+Проанализировано: {total}
+✅ Принято: {accepted}
+❌ Отклонено: {rejected}
+📈 Конверсия: {rate:.1f}%
+
+<b>Причины отклонения:</b>
+{reasons_text}
+Сброс: /signalstats reset"""
+    
+    await update.message.reply_text(text, parse_mode="HTML")
+
 async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Управление авто-торговлей: /autotrade [on|off|status|balance AMOUNT]"""
     global AUTO_TRADE_ENABLED
@@ -2907,6 +2970,7 @@ def main() -> None:
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
+    app.add_handler(CommandHandler("signalstats", signal_stats_cmd))
     app.add_handler(CommandHandler("autotrade", autotrade_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("reset", reset_all))
