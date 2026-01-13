@@ -1821,12 +1821,34 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     # ==================== АВТО-ТОРГОВЛЯ ====================
     auto_trade_executed = False  # Флаг для предотвращения дублирования сигнала
     try:
-        if AUTO_TRADE_ENABLED and AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
+        if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
             auto_user = get_user(AUTO_TRADE_USER_ID)
             auto_positions = get_positions(AUTO_TRADE_USER_ID)
             auto_balance = auto_user.get('balance', 0)
             
-            if auto_balance >= AUTO_TRADE_MIN_BET:
+            # === ПРОВЕРЯЕМ ПОЛЬЗОВАТЕЛЬСКИЕ НАСТРОЙКИ АВТО-ТРЕЙДА ===
+            user_auto_enabled = auto_user.get('auto_trade', False)
+            user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
+            user_max_daily = auto_user.get('auto_trade_max_daily', 10)
+            user_today_count = auto_user.get('auto_trade_today', 0)
+            
+            # Сброс счётчика если новый день
+            import datetime
+            today = datetime.date.today().isoformat()
+            last_reset = auto_user.get('auto_trade_last_reset')
+            if last_reset != today:
+                user_today_count = 0
+                auto_user['auto_trade_today'] = 0
+                auto_user['auto_trade_last_reset'] = today
+                db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0, auto_trade_last_reset=today)
+            
+            if not user_auto_enabled:
+                logger.info(f"[AUTO-TRADE] Skip: авто-трейд выключен в настройках")
+            elif winrate < user_min_winrate:
+                logger.info(f"[AUTO-TRADE] Skip: winrate {winrate}% < min {user_min_winrate}%")
+            elif user_today_count >= user_max_daily:
+                logger.info(f"[AUTO-TRADE] Skip: лимит сделок {user_today_count}/{user_max_daily}")
+            elif auto_balance >= AUTO_TRADE_MIN_BET:
                 # Рассчитываем ставку и плечо на основе уверенности
                 auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance)
                 
@@ -1935,10 +1957,13 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
                     logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
                     auto_trade_executed = True  # Авто-сделка открыта, не дублировать сигнал
+                    
+                    # Инкрементируем счётчик сделок за день
+                    auto_user['auto_trade_today'] = user_today_count + 1
+                    db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
+                    logger.info(f"[AUTO-TRADE] Сделок сегодня: {user_today_count + 1}/{user_max_daily}")
                 else:
                     logger.info(f"[AUTO-TRADE] Skip: bet ${auto_bet} > balance ${auto_balance}")
-            else:
-                logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
     except Exception as e:
         logger.error(f"[AUTO-TRADE] Error: {e}")
         import traceback
@@ -3302,7 +3327,8 @@ User ID: {AUTO_TRADE_USER_ID}
 Команды:
 /autotrade on — включить
 /autotrade off — выключить
-/autotrade balance 1500 — установить баланс"""
+/autotrade balance 1500 — установить баланс
+/autotrade clear — очистить позиции и историю"""
         
         await update.message.reply_text(text, parse_mode="HTML")
         return
@@ -3325,8 +3351,24 @@ User ID: {AUTO_TRADE_USER_ID}
             await update.message.reply_text(f"✅ Баланс установлен: ${new_balance:.0f}")
         except ValueError:
             await update.message.reply_text("❌ Неверная сумма")
+    elif cmd == "clear":
+        # Очистить все позиции и историю для авто-трейда
+        run_sql("DELETE FROM positions WHERE user_id = ?", (AUTO_TRADE_USER_ID,))
+        run_sql("DELETE FROM history WHERE user_id = ?", (AUTO_TRADE_USER_ID,))
+        
+        # Сбрасываем кэш
+        if AUTO_TRADE_USER_ID in positions_cache:
+            positions_cache[AUTO_TRADE_USER_ID] = []
+        
+        # Сбрасываем счётчик сделок
+        if AUTO_TRADE_USER_ID in users_cache:
+            users_cache[AUTO_TRADE_USER_ID]['auto_trade_today'] = 0
+        db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0)
+        
+        await update.message.reply_text("✅ Все позиции и история очищены")
+        logger.info(f"[ADMIN] User {user_id} cleared all auto-trade data")
     else:
-        await update.message.reply_text("❌ Неизвестная команда. Используй: on, off, balance AMOUNT")
+        await update.message.reply_text("❌ Неизвестная команда. Используй: on, off, balance AMOUNT, clear")
 
 async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест подключения к Bybit"""
