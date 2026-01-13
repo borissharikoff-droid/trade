@@ -2314,18 +2314,42 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     logger.info(f"[ADAPTIVE] Position {pos['id']}: TP {old_tp:.4f} -> {pos['tp']:.4f} ({adjustment['reason']})")
                 
-                # Критическая рекомендация - закрыть раньше
+                # Критическая рекомендация - АВТОМАТИЧЕСКИ закрываем позицию
                 if adjustment['action'] == 'CLOSE_EARLY' and adjustment['urgency'] == 'CRITICAL':
-                    # Отправляем уведомление пользователю
                     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    
+                    # Закрываем на Bybit
+                    if await is_hedging_enabled():
+                        bybit_qty = pos.get('bybit_qty', 0)
+                        if bybit_qty > 0:
+                            await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
+                            logger.info(f"[EARLY_CLOSE] Bybit closed {ticker} qty={bybit_qty}")
+                    
+                    # Возвращаем деньги пользователю
+                    returned = pos['amount'] + pos['pnl']
+                    user['balance'] += returned
+                    user['total_profit'] += pos['pnl']
+                    save_user(user_id)
+                    
+                    # Закрываем в БД
+                    db_close_position(pos['id'], pos['current'], pos['pnl'], 'EARLY_CLOSE')
+                    user_positions.remove(pos)
+                    
+                    # Уведомление о факте закрытия
+                    pnl_sign = "+" if pos['pnl'] >= 0 else ""
                     try:
                         await context.bot.send_message(
                             user_id,
-                            f"<b>⚠️ Рекомендация</b>\n\n{ticker}: лучше закрыть\n{adjustment['reason']}",
+                            f"<b>🔒 Авто-закрытие</b>\n\n"
+                            f"{ticker} | {pnl_sign}${pos['pnl']:.0f}\n"
+                            f"{adjustment['reason']}\n\n"
+                            f"💰 ${user['balance']:.0f}",
                             parse_mode="HTML"
                         )
-                    except:
-                        pass
+                        logger.info(f"[EARLY_CLOSE] User {user_id} {ticker}: ${pos['pnl']:.2f}, reason: {adjustment['reason']}")
+                    except Exception as e:
+                        logger.error(f"[EARLY_CLOSE] Notify error: {e}")
+                    continue  # Переходим к следующей позиции
                         
             except Exception as e:
                 logger.warning(f"[ADAPTIVE] Ошибка: {e}")
