@@ -551,12 +551,12 @@ class MarketAnalyzer:
         'trump', 'biden', 'president', 'white house', 'congress', 'senate',
         'sec', 'cftc', 'fed', 'federal reserve', 'powell', 'gensler',
         'regulation', 'regulatory', 'law', 'legislation', 'bill passed',
-        'etf', 'spot etf', 'bitcoin etf', 'eth etf',
-        'china', 'russia', 'us government', 'treasury',
-        'ban', 'bans', 'banned', 'illegal', 'legal',
+        'etf approved', 'spot etf', 'bitcoin etf', 'eth etf',
+        'china ban', 'russia', 'us government',
+        'ban crypto', 'banned', 'illegal',
         'blackrock', 'fidelity', 'grayscale', 'microstrategy', 'tesla',
-        'hack', 'hacked', 'exploit', 'stolen', 'million stolen', 'billion',
-        'breaking', 'just in', 'urgent', 'alert', 'emergency'
+        'hack', 'hacked', 'exploit', 'stolen', 'million stolen',
+        'breaking:', 'just in:', 'urgent:', 'emergency'
     ]
     
     URGENCY_KEYWORDS = [
@@ -736,11 +736,15 @@ class MarketAnalyzer:
             news_sentiment['bias'] = 'NEUTRAL'
         
         # === ТОРГОВАЯ РЕКОМЕНДАЦИЯ ===
+        # PAUSE только при CRITICAL + сильно противоречивых новостях (много bull И много bear)
         if news_sentiment['impact'] == 'CRITICAL':
             if news_sentiment['bias'] in ['STRONG_BULLISH', 'STRONG_BEARISH']:
                 news_sentiment['trade_recommendation'] = 'AGGRESSIVE'  # Торгуем по тренду новостей
+            elif news_sentiment['bias'] in ['BULLISH', 'BEARISH']:
+                news_sentiment['trade_recommendation'] = 'CAUTION'  # Есть направление, но осторожно
             else:
-                news_sentiment['trade_recommendation'] = 'PAUSE'  # Ждём ясности
+                # NEUTRAL = новости не дают направления, торгуем нормально
+                news_sentiment['trade_recommendation'] = 'NORMAL'
         elif news_sentiment['impact'] == 'HIGH':
             news_sentiment['trade_recommendation'] = 'CAUTION'  # Уменьшенный размер
         else:
@@ -2213,7 +2217,10 @@ class MarketAnalyzer:
             'new_tp': current_tp,
             'reason': None,
             'action': 'HOLD',
-            'urgency': 'LOW'
+            'urgency': 'LOW',
+            'should_flip': False,  # Переворот позиции
+            'flip_direction': None,
+            'pnl_percent': 0  # Текущий PnL для защиты от добавления
         }
         
         try:
@@ -2234,6 +2241,9 @@ class MarketAnalyzer:
                 progress_to_sl = (current_price - entry) / (current_sl - entry) * 100 if current_sl != entry else 0
             
             logger.info(f"[POSITION_MONITOR] {symbol} {direction}: PnL={pnl_percent:.2f}%, ToTP={progress_to_tp:.0f}%, ToSL={progress_to_sl:.0f}%")
+            
+            # Сохраняем PnL для защиты от добавления в убыток
+            adjustment['pnl_percent'] = pnl_percent
             
             # === АГРЕССИВНЫЙ TRAILING STOP ===
             # Начинаем защищать профит РАНО и МНОГО
@@ -2345,15 +2355,33 @@ class MarketAnalyzer:
             if progress_to_sl > 80 and not manipulation['detected']:
                 # Проверяем давление
                 unfavorable_pressure = False
-                if direction == "LONG" and (orderbook['signal'] in ['STRONG_SELL'] or cvd['signal'] in ['STRONG_SELL']):
-                    unfavorable_pressure = True
-                elif direction == "SHORT" and (orderbook['signal'] in ['STRONG_BUY'] or cvd['signal'] in ['STRONG_BUY']):
-                    unfavorable_pressure = True
+                strong_opposite_signal = False
+                
+                if direction == "LONG":
+                    if orderbook['signal'] in ['STRONG_SELL'] or cvd['signal'] in ['STRONG_SELL']:
+                        unfavorable_pressure = True
+                    # Очень сильный сигнал на переворот
+                    if orderbook['signal'] == 'STRONG_SELL' and cvd['signal'] == 'STRONG_SELL':
+                        strong_opposite_signal = True
+                elif direction == "SHORT":
+                    if orderbook['signal'] in ['STRONG_BUY'] or cvd['signal'] in ['STRONG_BUY']:
+                        unfavorable_pressure = True
+                    if orderbook['signal'] == 'STRONG_BUY' and cvd['signal'] == 'STRONG_BUY':
+                        strong_opposite_signal = True
                 
                 if unfavorable_pressure:
-                    adjustment['reason'] = "Сильное давление против позиции - рекомендуем закрыть"
+                    adjustment['reason'] = "Сильное давление против позиции"
                     adjustment['action'] = 'CLOSE_EARLY'
                     adjustment['urgency'] = 'CRITICAL'
+                    
+                    # === FLIP LOGIC ===
+                    # Если оба сигнала (orderbook + CVD) сильно против нас - предлагаем переворот
+                    if strong_opposite_signal and not oi_change['falling']:
+                        # OI не падает = это новый тренд, а не просто ликвидации
+                        adjustment['should_flip'] = True
+                        adjustment['flip_direction'] = "SHORT" if direction == "LONG" else "LONG"
+                        adjustment['reason'] = f"Сильный разворот рынка - переворот в {adjustment['flip_direction']}"
+                        logger.info(f"[FLIP] {symbol}: Рекомендуем переворот {direction} -> {adjustment['flip_direction']}")
             
             if adjustment['action'] != 'HOLD':
                 logger.info(f"[POSITION_MONITOR] Рекомендация: {adjustment['action']} - {adjustment['reason']}")

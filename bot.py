@@ -1710,6 +1710,28 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
 
+    # === ЗАЩИТА: Не добавлять к убыточной позиции ===
+    for p in user_positions:
+        if p['symbol'] == symbol and p['direction'] == direction:
+            # Рассчитываем текущий PnL%
+            if p.get('current') and p.get('entry'):
+                if direction == "LONG":
+                    pnl_pct = (p['current'] - p['entry']) / p['entry'] * 100
+                else:
+                    pnl_pct = (p['entry'] - p['current']) / p['entry'] * 100
+                
+                # Если позиция в минусе более 1.5% - не добавляем
+                if pnl_pct < -1.5:
+                    await query.edit_message_text(
+                        f"<b>⛔ Добавление заблокировано</b>\n\n"
+                        f"{ticker} {direction} уже в минусе {pnl_pct:.1f}%\n"
+                        f"Нельзя усреднять убыточную позицию",
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"[PROTECTION] User {user_id}: blocked adding to losing {ticker} {direction} (PnL={pnl_pct:.1f}%)")
+                    return
+            break
+
     # === ПОКАЗЫВАЕМ "ОТКРЫВАЕМ..." ===
     await query.edit_message_text(f"<b>⏳ Открываем</b>\n\n{ticker} | {direction} | ${amount:.0f}", parse_mode="HTML")
 
@@ -2107,6 +2129,27 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     tp3 = float(trade.get('tp3', entry + (tp1 - entry) * 3.5 if direction == "LONG" else entry - (entry - tp1) * 3.5))
     tp = tp1  # для совместимости
     winrate = int(trade.get('winrate', 75))
+    ticker = symbol.split("/")[0] if "/" in symbol else symbol
+
+    # === ЗАЩИТА: Не добавлять к убыточной позиции ===
+    for p in user_positions:
+        if p['symbol'] == symbol and p['direction'] == direction:
+            if p.get('current') and p.get('entry'):
+                if direction == "LONG":
+                    pnl_pct = (p['current'] - p['entry']) / p['entry'] * 100
+                else:
+                    pnl_pct = (p['entry'] - p['current']) / p['entry'] * 100
+                
+                if pnl_pct < -1.5:
+                    await update.message.reply_text(
+                        f"<b>⛔ Добавление заблокировано</b>\n\n"
+                        f"{ticker} {direction} уже в минусе {pnl_pct:.1f}%\n"
+                        f"Нельзя усреднять убыточную позицию",
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"[PROTECTION] User {user_id}: blocked adding to losing {ticker} {direction} (PnL={pnl_pct:.1f}%)")
+                    return
+            break
 
     # Комиссия за открытие
     commission = amount * (COMMISSION_PERCENT / 100)
@@ -2123,13 +2166,13 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
             existing = p
             break
 
-    # === ХЕДЖИРОВАНИЕ: открываем на Bybit ===
+    # === ХЕДЖИРОВАНИЕ: открываем на Bybit с частичными TP ===
     bybit_qty = 0
     if await is_hedging_enabled():
-        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, tp=tp, sl=sl)
+        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3)
         if hedge_result:
             bybit_qty = hedge_result.get('qty', 0)
-            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}")
+            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
         else:
             logger.warning(f"[HEDGE] ✗ Failed to hedge")
 
@@ -2317,6 +2360,10 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # Критическая рекомендация - АВТОМАТИЧЕСКИ закрываем позицию
                 if adjustment['action'] == 'CLOSE_EARLY' and adjustment['urgency'] == 'CRITICAL':
                     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    old_direction = pos['direction']
+                    old_amount = pos['amount']
+                    should_flip = adjustment.get('should_flip', False)
+                    flip_direction = adjustment.get('flip_direction')
                     
                     # Закрываем на Bybit
                     if await is_hedging_enabled():
@@ -2335,18 +2382,66 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     db_close_position(pos['id'], pos['current'], pos['pnl'], 'EARLY_CLOSE')
                     user_positions.remove(pos)
                     
-                    # Уведомление о факте закрытия
+                    # === FLIP: Переворот позиции ===
+                    flip_opened = False
+                    if should_flip and flip_direction and user['balance'] >= old_amount:
+                        # Открываем позицию в противоположном направлении
+                        flip_entry = pos['current']
+                        # Базовые TP/SL для флипа (0.8% TP, 0.4% SL)
+                        if flip_direction == "LONG":
+                            flip_sl = flip_entry * 0.996
+                            flip_tp = flip_entry * 1.008
+                        else:
+                            flip_sl = flip_entry * 1.004
+                            flip_tp = flip_entry * 0.992
+                        
+                        # Открываем хедж на Bybit
+                        flip_bybit_qty = 0
+                        if await is_hedging_enabled():
+                            flip_result = await hedge_open(0, pos['symbol'], flip_direction, old_amount * LEVERAGE, sl=flip_sl, tp1=flip_tp, tp2=flip_tp, tp3=flip_tp)
+                            if flip_result:
+                                flip_bybit_qty = flip_result.get('qty', 0)
+                        
+                        # Снимаем сумму с баланса
+                        user['balance'] -= old_amount
+                        save_user(user_id)
+                        
+                        # Создаём позицию в БД
+                        new_pos = {
+                            'symbol': pos['symbol'],
+                            'direction': flip_direction,
+                            'entry': flip_entry,
+                            'amount': old_amount,
+                            'sl': flip_sl,
+                            'tp': flip_tp,
+                            'tp1': flip_tp,
+                            'tp2': flip_tp * (1.01 if flip_direction == "LONG" else 0.99),
+                            'tp3': flip_tp * (1.015 if flip_direction == "LONG" else 0.985),
+                            'bybit_qty': flip_bybit_qty
+                        }
+                        new_pos_id = db_add_position(user_id, new_pos)
+                        new_pos['id'] = new_pos_id
+                        user_positions.append(new_pos)
+                        flip_opened = True
+                        logger.info(f"[FLIP] User {user_id}: {ticker} {old_direction} -> {flip_direction} (${old_amount})")
+                    
+                    # Уведомление о факте закрытия (и флипа)
                     pnl_sign = "+" if pos['pnl'] >= 0 else ""
+                    if flip_opened:
+                        msg = (f"<b>🔄 Переворот позиции</b>\n\n"
+                               f"{ticker} | {old_direction} закрыт {pnl_sign}${pos['pnl']:.0f}\n"
+                               f"Открыт {flip_direction} @ {flip_entry:.2f}\n"
+                               f"{adjustment['reason']}\n\n"
+                               f"💰 ${user['balance']:.0f}")
+                    else:
+                        msg = (f"<b>🔒 Авто-закрытие</b>\n\n"
+                               f"{ticker} | {pnl_sign}${pos['pnl']:.0f}\n"
+                               f"{adjustment['reason']}\n\n"
+                               f"💰 ${user['balance']:.0f}")
+                    
                     try:
-                        await context.bot.send_message(
-                            user_id,
-                            f"<b>🔒 Авто-закрытие</b>\n\n"
-                            f"{ticker} | {pnl_sign}${pos['pnl']:.0f}\n"
-                            f"{adjustment['reason']}\n\n"
-                            f"💰 ${user['balance']:.0f}",
-                            parse_mode="HTML"
-                        )
-                        logger.info(f"[EARLY_CLOSE] User {user_id} {ticker}: ${pos['pnl']:.2f}, reason: {adjustment['reason']}")
+                        await context.bot.send_message(user_id, msg, parse_mode="HTML")
+                        logger.info(f"[EARLY_CLOSE] User {user_id} {ticker}: ${pos['pnl']:.2f}, flip={flip_opened}")
                     except Exception as e:
                         logger.error(f"[EARLY_CLOSE] Notify error: {e}")
                     continue  # Переходим к следующей позиции
