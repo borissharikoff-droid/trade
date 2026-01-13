@@ -246,7 +246,7 @@ class BybitHedger:
             amount_usd: Сумма в USD
             tp: Take Profit цена (legacy, используется как TP1 если tp1 не указан)
             sl: Stop Loss цена
-            tp1, tp2, tp3: Частичные тейки (40%, 40%, 20%)
+            tp1, tp2, tp3: Частичные тейки (50%, 30%, 20%)
         
         Returns:
             {'order_id': str, 'qty': float} если успешно, None если ошибка
@@ -435,9 +435,9 @@ class BybitHedger:
         min_qty = spec["min_qty"]
         
         # Рассчитываем qty для каждого TP
-        qty1 = round(qty * 0.40, precision)  # 40%
-        qty2 = round(qty * 0.40, precision)  # 40%
-        qty3 = round(qty * 0.20, precision)  # 20%
+        qty1 = round(qty * 0.50, precision)  # 50% - быстро забрать
+        qty2 = round(qty * 0.30, precision)  # 30%
+        qty3 = round(qty * 0.20, precision)  # 20% - moonbag
         
         # Проверяем минимумы
         if qty1 < min_qty:

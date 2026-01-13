@@ -1407,17 +1407,18 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     logger.info(f"[SIGNAL] Активных юзеров: {len(active_users)}")
     
-    # Анализируем несколько пар (топ волатильные)
-    symbols = [
-        "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT",
-        "XRP/USDT", "DOGE/USDT", "AVAX/USDT", "LINK/USDT",
-        "MATIC/USDT", "ARB/USDT", "OP/USDT", "APT/USDT"
-    ]
+    # === MOMENTUM SCANNER: ищем монеты с импульсом ===
+    try:
+        symbols = await analyzer.scan_momentum_coins(top_n=15)
+        logger.info(f"[SIGNAL] Momentum coins: {len(symbols)}")
+    except Exception as e:
+        logger.warning(f"[SIGNAL] Scanner error, using defaults: {e}")
+        symbols = analyzer._get_default_coins()
     
     best_signal = None
     
     try:
-        # Ищем лучший сигнал
+        # Ищем лучший сигнал среди momentum монет
         for symbol in symbols:
             analysis = await analyzer.analyze_signal(symbol)
             if analysis:
@@ -1581,15 +1582,21 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 <b>Вход:</b> {format_price(entry)}
 
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
 <b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
 
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${new_balance:.0f}"""
                     
-                    await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML")
+                    # Кнопки под авто-сделкой
+                    auto_keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ Закрыть все", callback_data="close_all"),
+                         InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                    ])
+                    
+                    await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
                     logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
                     auto_trade_executed = True  # Авто-сделка открыта, не дублировать сигнал
                 else:
@@ -1626,8 +1633,8 @@ Winrate: {winrate}%
 
 <b>Вход:</b> {format_price(entry)}
 
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
 <b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
 
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
@@ -1840,8 +1847,8 @@ Winrate: {winrate}%
 
 <b>Вход:</b> {format_price(entry)}
 
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
 <b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
 
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
@@ -2256,8 +2263,8 @@ Winrate: {winrate}%
 
 <b>Вход:</b> {format_price(entry)}
 
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 40%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 40%
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
 <b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
 
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
@@ -2472,9 +2479,9 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 hit_tp3 = pos['current'] <= tp3
                 hit_sl = pos['current'] >= pos['sl']
             
-            # === TP1: Закрываем 40%, двигаем SL в безубыток ===
+            # === TP1: Закрываем 50%, двигаем SL в безубыток ===
             if hit_tp1 and not hit_sl:
-                close_percent = 0.40
+                close_percent = 0.50
                 close_amount = pos['amount'] * close_percent
                 remaining_amount = pos['amount'] - close_amount
                 
@@ -2509,7 +2516,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await context.bot.send_message(user_id, f"""<b>✅ TP1 достигнут</b>
 
 {ticker} | +${partial_pnl:.1f}
-Закрыто 40%, SL → безубыток
+Закрыто 50%, SL → безубыток
 Следующая цель: TP2
 
 💰 ${user['balance']:.0f}""", parse_mode="HTML")
@@ -2518,9 +2525,9 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.error(f"[TP1] Notify error: {e}")
                 continue
             
-            # === TP2: Закрываем ещё 40%, запускаем агрессивный трейлинг ===
+            # === TP2: Закрываем ещё 30%, запускаем агрессивный трейлинг ===
             if hit_tp2 and pos.get('tp1_hit', False) and not hit_sl:
-                close_percent = 0.40 / 0.60  # 40% от оставшихся 60% = ~67% текущей позиции
+                close_percent = 0.30 / 0.50  # 30% от оставшихся 50% = 60% текущей позиции
                 close_amount = pos['amount'] * close_percent
                 remaining_amount = pos['amount'] - close_amount
                 
@@ -2556,8 +2563,8 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     await context.bot.send_message(user_id, f"""<b>✅ TP2 достигнут</b>
 
 {ticker} | +${partial_pnl:.1f}
-Закрыто 80% всего, остался runner 20%
-Цель: TP3 (runner)
+Закрыто 80%, moonbag 20%
+Цель: TP3
 
 💰 ${user['balance']:.0f}""", parse_mode="HTML")
                     logger.info(f"[TP2] User {user_id} {ticker}: +${partial_pnl:.2f}, runner {remaining_amount:.0f}")

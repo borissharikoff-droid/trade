@@ -218,6 +218,131 @@ class MarketAnalyzer:
             logger.warning(f"[FETCH] Ошибка {url}: {e}")
         return None
     
+    # ==================== MOMENTUM SCANNER ====================
+    
+    async def scan_momentum_coins(self, top_n: int = 15) -> List[str]:
+        """
+        Сканирует Bybit для поиска монет с импульсом.
+        
+        Критерии:
+        - Изменение цены за 24h > 3% (вверх или вниз)
+        - Объём за 24h > $10M
+        - Сортировка по комбинации объёма и изменения цены
+        
+        Returns:
+            Список символов типа ['BTC/USDT', 'ETH/USDT', ...]
+        """
+        try:
+            session = await self._get_session()
+            url = "https://api.bybit.com/v5/market/tickers?category=linear"
+            
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"[SCANNER] Bybit API error: {resp.status}")
+                    return self._get_default_coins()
+                
+                data = await resp.json()
+                
+            if data.get('retCode') != 0:
+                logger.warning(f"[SCANNER] Bybit error: {data.get('retMsg')}")
+                return self._get_default_coins()
+            
+            tickers = data.get('result', {}).get('list', [])
+            candidates = []
+            
+            for ticker in tickers:
+                symbol = ticker.get('symbol', '')
+                
+                # Только USDT пары
+                if not symbol.endswith('USDT'):
+                    continue
+                
+                # Пропускаем стейблы и специфичные токены
+                skip_tokens = ['USDC', 'BUSD', 'TUSD', 'DAI', 'FDUSD', 'EUR', 'GBP', 'USDE']
+                if any(skip in symbol for skip in skip_tokens):
+                    continue
+                
+                try:
+                    price_change_pct = float(ticker.get('price24hPcnt', '0')) * 100
+                    turnover_24h = float(ticker.get('turnover24h', '0'))
+                    volume_24h = float(ticker.get('volume24h', '0'))
+                    last_price = float(ticker.get('lastPrice', '0'))
+                    
+                    # Фильтры
+                    # 1. Минимальный объём $10M за 24h
+                    if turnover_24h < 10_000_000:
+                        continue
+                    
+                    # 2. Изменение цены > 1.5% (движение есть)
+                    if abs(price_change_pct) < 1.5:
+                        continue
+                    
+                    # Momentum score = |изменение| * log(объём)
+                    # Больше движение + больше объём = выше приоритет
+                    import math
+                    momentum_score = abs(price_change_pct) * math.log10(max(turnover_24h, 1))
+                    
+                    # Конвертируем в наш формат
+                    base = symbol.replace('USDT', '')
+                    our_symbol = f"{base}/USDT"
+                    
+                    candidates.append({
+                        'symbol': our_symbol,
+                        'bybit_symbol': symbol,
+                        'price_change': price_change_pct,
+                        'turnover': turnover_24h,
+                        'volume': volume_24h,
+                        'price': last_price,
+                        'momentum_score': momentum_score,
+                        'direction_hint': 'LONG' if price_change_pct > 0 else 'SHORT'
+                    })
+                    
+                except (ValueError, TypeError):
+                    continue
+            
+            # Сортируем по momentum score
+            candidates.sort(key=lambda x: x['momentum_score'], reverse=True)
+            
+            # Берём топ N
+            top_coins = [c['symbol'] for c in candidates[:top_n]]
+            
+            # Логируем
+            if candidates[:5]:
+                top_5_info = ", ".join([f"{c['symbol']}({c['price_change']:+.1f}%)" for c in candidates[:5]])
+                logger.info(f"[SCANNER] Top momentum: {top_5_info}")
+            
+            # Всегда включаем BTC и ETH в начало (ликвидность)
+            priority = ['BTC/USDT', 'ETH/USDT']
+            for p in priority:
+                if p not in top_coins:
+                    top_coins.insert(0, p)
+                else:
+                    top_coins.remove(p)
+                    top_coins.insert(0, p)
+            
+            logger.info(f"[SCANNER] Found {len(candidates)} momentum coins, using top {len(top_coins)}")
+            return top_coins[:top_n]
+            
+        except Exception as e:
+            logger.error(f"[SCANNER] Error: {e}")
+            return self._get_default_coins()
+    
+    def _get_default_coins(self) -> List[str]:
+        """Дефолтный список монет (fallback)"""
+        return [
+            'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 
+            'XRP/USDT', 'DOGE/USDT', 'AVAX/USDT', 'LINK/USDT',
+            'ARB/USDT', 'OP/USDT', 'APT/USDT', 'SUI/USDT'
+        ]
+    
+    async def get_momentum_candidates(self) -> List[Dict]:
+        """
+        Получить полную информацию о momentum кандидатах
+        (для отладки и логирования)
+        """
+        coins = await self.scan_momentum_coins(20)
+        return coins
+    
     # ==================== ДАННЫЕ С BINANCE ====================
     
     async def get_klines(self, symbol: str, interval: str = '1h', limit: int = 100) -> List:
@@ -2029,31 +2154,32 @@ class MarketAnalyzer:
         # TP2: 3 ATR (средний)
         # TP3: 5+ ATR (runner)
         
+        # === MOMENTUM SCALP STRATEGY ===
+        # Фиксированные близкие тейки для быстрого выхода
+        # После TP1 - SL в безубыток, позиция бесплатная
+        
+        # Минимальные проценты (агрессивный скальпинг)
+        min_sl_percent = 0.0025   # 0.25%
+        min_tp1_percent = 0.003   # 0.3% - быстро забрать
+        min_tp2_percent = 0.006   # 0.6% - хороший профит
+        min_tp3_percent = 0.012   # 1.2% - moonbag
+        
+        # Множители для волатильности (влияют только если ATR > минимума)
         if volatility == 'HIGH':
-            sl_mult = 1.2   # Чуть шире при высокой волатильности
-            tp1_mult = 1.0
-            tp2_mult = 2.0
-            tp3_mult = 4.0
+            sl_mult = 1.3   # Чуть шире при высокой волатильности
+            tp_mult = 1.2   # Тейки тоже чуть дальше
         elif volatility == 'MEDIUM':
             sl_mult = 1.0
-            tp1_mult = 1.2
-            tp2_mult = 2.5
-            tp3_mult = 5.0
+            tp_mult = 1.0
         else:  # LOW
-            sl_mult = 0.8
-            tp1_mult = 1.5
-            tp2_mult = 3.0
-            tp3_mult = 6.0
+            sl_mult = 0.9   # Узкие стопы при низкой волатильности
+            tp_mult = 0.9
         
-        # Минимальные проценты (не меньше чем)
-        min_sl_percent = 0.002   # 0.2%
-        min_tp1_percent = 0.003  # 0.3%
-        
-        # Расчёт уровней
+        # Расчёт уровней (берём максимум из ATR и минимума)
         sl_distance = max(atr_percent * sl_mult, min_sl_percent)
-        tp1_distance = max(atr_percent * tp1_mult, min_tp1_percent)
-        tp2_distance = atr_percent * tp2_mult
-        tp3_distance = atr_percent * tp3_mult
+        tp1_distance = max(atr_percent * 1.2 * tp_mult, min_tp1_percent)
+        tp2_distance = max(atr_percent * 2.4 * tp_mult, min_tp2_percent)
+        tp3_distance = max(atr_percent * 4.8 * tp_mult, min_tp3_percent)
         
         # === КОРРЕКТИРОВКА ПО S/R УРОВНЯМ ===
         if direction == "LONG":
@@ -2152,19 +2278,19 @@ class MarketAnalyzer:
             'tp1': {
                 'price': tp1,
                 'percent': tp1_percent,
-                'close_percent': 40,  # Закрываем 40% позиции
-                'move_sl_to_be': True  # После TP1 двигаем SL в безубыток
+                'close_percent': 50,  # Закрываем 50% - быстро забрать
+                'move_sl_to_be': True  # После TP1 двигаем SL в безубыток (бесплатная позиция)
             },
             'tp2': {
                 'price': tp2,
                 'percent': tp2_percent,
-                'close_percent': 40,  # Ещё 40%
+                'close_percent': 30,  # Ещё 30%
                 'trailing_start': True  # Начинаем трейлинг
             },
             'tp3': {
                 'price': tp3,
                 'percent': tp3_percent,
-                'close_percent': 20,  # Последние 20%
+                'close_percent': 20,  # Moonbag 20%
                 'is_runner': True  # Runner позиция
             }
         }
