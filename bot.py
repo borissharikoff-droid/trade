@@ -1750,6 +1750,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         symbols = analyzer._get_default_coins()
     
     best_signal = None
+    signal_data = None  # Данные для отправки
     
     try:
         # Ищем лучший сигнал среди momentum монет
@@ -1826,9 +1827,41 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             potential_profit = ((entry - tp) / entry) * 100
         
         logger.info(f"[SIGNAL] ✓ Готово к отправке: {symbol} {direction} entry={entry:.4f} WR={winrate}%")
+        signal_data = {
+            'symbol': symbol, 'direction': direction, 'entry': entry,
+            'sl': sl, 'tp': tp, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+            'winrate': winrate, 'tp1_percent': tp1_percent, 'tp2_percent': tp2_percent,
+            'tp3_percent': tp3_percent, 'sl_percent': sl_percent, 'potential_profit': potential_profit
+        }
         
+    except Exception as e:
+        logger.error(f"[SIGNAL] ❌ Ошибка при подготовке сигнала: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        await analyzer.close()
+        return
     finally:
         await analyzer.close()
+    
+    if not signal_data:
+        logger.info("[SIGNAL] Нет данных для отправки")
+        return
+    
+    # Распаковываем данные
+    symbol = signal_data['symbol']
+    direction = signal_data['direction']
+    entry = signal_data['entry']
+    sl = signal_data['sl']
+    tp = signal_data['tp']
+    tp1 = signal_data['tp1']
+    tp2 = signal_data['tp2']
+    tp3 = signal_data['tp3']
+    winrate = signal_data['winrate']
+    tp1_percent = signal_data['tp1_percent']
+    tp2_percent = signal_data['tp2_percent']
+    tp3_percent = signal_data['tp3_percent']
+    sl_percent = signal_data['sl_percent']
+    potential_profit = signal_data['potential_profit']
     
     # ==================== АВТО-ТОРГОВЛЯ ====================
     auto_trade_executed = False  # Флаг для предотвращения дублирования сигнала

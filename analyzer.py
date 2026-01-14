@@ -265,7 +265,8 @@ class MarketAnalyzer:
                 # Пропускаем символы, которые есть на Bybit, но нет на Binance
                 base = symbol.replace('USDT', '')
                 binance_missing = ['IP', 'H', 'KAITO', 'GPS', 'SHELL', 'BMT', 'PARTI', 'NIL', 
-                                   'WHITEWHALE', 'RIVER', 'LAYER', 'TST', 'BROCCOLI', 'BANANAS31']
+                                   'WHITEWHALE', 'RIVER', 'LAYER', 'TST', 'BROCCOLI', 'BANANAS31',
+                                   'ARC', 'ONDO', 'HYPE', 'PLUME', 'ANIME', 'SOLV']
                 if base in binance_missing or len(base) < 2:
                     continue
                 
