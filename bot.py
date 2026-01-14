@@ -1878,8 +1878,8 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             user_today_count = auto_user.get('auto_trade_today', 0)
             
             # Сброс счётчика если новый день
-            import datetime
-            today = datetime.date.today().isoformat()
+            from datetime import date as dt_date
+            today = dt_date.today().isoformat()
             last_reset = auto_user.get('auto_trade_last_reset')
             if last_reset != today:
                 user_today_count = 0
