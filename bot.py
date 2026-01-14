@@ -1722,6 +1722,8 @@ def calculate_auto_bet(confidence: float, balance: float) -> tuple:
 async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправка сигнала с реальной аналитикой"""
     global analyzer
+    
+    logger.info("[SIGNAL] ========== Начало цикла send_signal ==========")
 
     # Получаем активных юзеров из БД (не из кэша!)
     rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
@@ -1760,6 +1762,8 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         if not best_signal:
             logger.info("[SIGNAL] Нет качественных сигналов")
             return
+        
+        logger.info(f"[SIGNAL] ✓ Лучший сигнал: {best_signal['symbol']} {best_signal['direction']} (conf={best_signal['confidence']:.2%})")
         
         # Получаем Entry, SL, TP
         price_data = await analyzer.calculate_entry_price(
@@ -1820,6 +1824,8 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             potential_profit = ((tp - entry) / entry) * 100
         else:
             potential_profit = ((entry - tp) / entry) * 100
+        
+        logger.info(f"[SIGNAL] ✓ Готово к отправке: {symbol} {direction} entry={entry:.4f} WR={winrate}%")
         
     finally:
         await analyzer.close()
