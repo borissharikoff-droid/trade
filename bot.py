@@ -1741,7 +1741,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # === MOMENTUM SCANNER: ищем монеты с импульсом ===
     try:
-        symbols = await analyzer.scan_momentum_coins(top_n=15)
+        symbols = await analyzer.scan_momentum_coins(top_n=10)  # Уменьшено с 15 для скорости
         logger.info(f"[SIGNAL] Momentum coins: {len(symbols)}")
     except Exception as e:
         logger.warning(f"[SIGNAL] Scanner error, using defaults: {e}")
@@ -3803,7 +3803,7 @@ def main() -> None:
     
     if app.job_queue:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
-        app.job_queue.run_repeating(send_signal, interval=30, first=10)  # Каждые 30 сек (было 60)
+        app.job_queue.run_repeating(send_signal, interval=60, first=10)  # 60 сек - даём время на анализ
         app.job_queue.run_repeating(check_alerts, interval=30, first=15)
         logger.info("[JOBS] JobQueue configured (positions, signals, alerts)")
     else:
