@@ -1703,14 +1703,18 @@ class MarketAnalyzer:
         orderbook, oi_change, cvd, whale, liquidations, btc_corr = results[6:12]
         news_sentiment, manipulation = results[12:14]
         
-        # === ПРОВЕРКА МАНИПУЛЯЦИЙ - ОТКЛОНЯЕМ ЕСЛИ ВЫСОКИЙ РИСК ===
-        if manipulation['recommendation'] == 'AVOID':
-            logger.warning(f"[ANALYZER] ❌ Обнаружены манипуляции - пропуск сигнала")
+        # === ПРОВЕРКА МАНИПУЛЯЦИЙ (включена - блокируем только HIGH severity) ===
+        if manipulation['severity'] == 'HIGH' and manipulation['recommendation'] == 'AVOID':
+            logger.warning(f"[ANALYZER] ❌ Высокий риск манипуляций - пропуск сигнала")
             for sig in manipulation['signals']:
                 logger.warning(f"[ANALYZER] {sig}")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['manipulation'] += 1
             return None
+        elif manipulation['detected']:
+            logger.info(f"[ANALYZER] ⚠️ Возможные манипуляции (продолжаем с осторожностью)")
+            for sig in manipulation['signals']:
+                logger.info(f"[ANALYZER] {sig}")
         
         # === ПРОВЕРКА НОВОСТНОГО ФОНА (РАСШИРЕННАЯ) ===
         news_trade_rec = news_sentiment.get('trade_recommendation', 'NORMAL')
@@ -1805,31 +1809,32 @@ class MarketAnalyzer:
             market_context['insights'].append(f"📈 BTC растёт, альт коррелирует ({btc_corr['correlation']:.0%}) — попутный ветер")
             market_context['bullish_factors'] += 1
         
-        # === NEWS SENTIMENT (РАСШИРЕННЫЙ) ===
+        # === NEWS SENTIMENT (ОСЛАБЛЕНО - общие новости не должны сильно влиять на конкретные монеты) ===
         news_bullish = news_sentiment.get('bullish_count', 0)
         news_bearish = news_sentiment.get('bearish_count', 0)
         
+        # Новости влияют слабее (+1/+2 вместо +2/+4) - они часто общие для рынка
         if news_bias == 'STRONG_BULLISH':
             market_context['insights'].insert(0, f"📰 СИЛЬНЫЕ бычьи новости ({news_bullish} упоминаний)")
-            market_context['bullish_factors'] += 4
+            market_context['bullish_factors'] += 2  # Было 4
         elif news_bias == 'BULLISH':
             market_context['insights'].append(f"📰 Положительный новостной фон ({news_bullish} упоминаний)")
-            market_context['bullish_factors'] += 2
+            market_context['bullish_factors'] += 1  # Было 2
         elif news_bias == 'STRONG_BEARISH':
             market_context['warnings'].insert(0, f"📰 СИЛЬНЫЕ медвежьи новости ({news_bearish} упоминаний)")
-            market_context['bearish_factors'] += 4
+            market_context['bearish_factors'] += 2  # Было 4
         elif news_bias == 'BEARISH':
             market_context['warnings'].append(f"📰 Негативный новостной фон ({news_bearish} упоминаний)")
-            market_context['bearish_factors'] += 2
+            market_context['bearish_factors'] += 1  # Было 2
         
-        # Breaking news бонус
+        # Breaking news бонус (ослаблен)
         if is_breaking:
             if news_bias in ['BULLISH', 'STRONG_BULLISH']:
                 market_context['insights'].insert(0, "🚨 BREAKING: Срочные бычьи новости!")
-                market_context['bullish_factors'] += 2
+                market_context['bullish_factors'] += 1  # Было 2
             elif news_bias in ['BEARISH', 'STRONG_BEARISH']:
                 market_context['warnings'].insert(0, "🚨 BREAKING: Срочные медвежьи новости!")
-                market_context['bearish_factors'] += 2
+                market_context['bearish_factors'] += 1  # Было 2
         
         # Предупреждения из новостей (все важные)
         for warning in news_sentiment.get('warnings', [])[:3]:
@@ -1941,126 +1946,113 @@ class MarketAnalyzer:
             signal_stats['reasons']['weak_score'] += 1
             return None
         
-        # === ПРОВЕРКА СОГЛАСОВАННОСТИ (смягчена - блокируем только STRONG контекст) ===
-        # Сигнал блокируется только при СИЛЬНОМ противоположном контексте
-        if direction == "LONG" and market_context['bias'] == "STRONG_SHORT":
-            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал LONG, но контекст сильно медвежий ({market_context['bias']})")
-            signal_stats['rejected'] += 1
-            signal_stats['reasons']['context_conflict'] += 1
-            return None
-        if direction == "SHORT" and market_context['bias'] == "STRONG_LONG":
-            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал SHORT, но контекст сильно бычий ({market_context['bias']})")
-            signal_stats['rejected'] += 1
-            signal_stats['reasons']['context_conflict'] += 1
-            return None
+        # === ПРОВЕРКА СОГЛАСОВАННОСТИ (отключена - слишком много блокировок) ===
+        # Контекст теперь только влияет на confidence через context_score
+        # if direction == "LONG" and market_context['bias'] == "STRONG_SHORT":
+        #     logger.info(f"[ANALYZER] ❌ Конфликт: сигнал LONG, но контекст сильно медвежий ({market_context['bias']})")
+        #     signal_stats['rejected'] += 1
+        #     signal_stats['reasons']['context_conflict'] += 1
+        #     return None
+        # if direction == "SHORT" and market_context['bias'] == "STRONG_LONG":
+        #     logger.info(f"[ANALYZER] ❌ Конфликт: сигнал SHORT, но контекст сильно бычий ({market_context['bias']})")
+        #     signal_stats['rejected'] += 1
+        #     signal_stats['reasons']['context_conflict'] += 1
+        #     return None
         
-        # === MTF ДОЛЖЕН ПОДТВЕРЖДАТЬ ===
-        if mtf['confluence'] != "NONE":
-            if direction == "LONG" and mtf['confluence'] == "BEARISH":
-                logger.info(f"[ANALYZER] ❌ MTF не подтверждает LONG (confluence={mtf['confluence']})")
-                signal_stats['rejected'] += 1
-                signal_stats['reasons']['mtf_conflict'] += 1
-                return None
-            if direction == "SHORT" and mtf['confluence'] == "BULLISH":
-                logger.info(f"[ANALYZER] ❌ MTF не подтверждает SHORT (confluence={mtf['confluence']})")
-                signal_stats['rejected'] += 1
-                signal_stats['reasons']['mtf_conflict'] += 1
-                return None
+        # === MTF ПОДТВЕРЖДЕНИЕ (отключено - слишком много блокировок) ===
+        # MTF теперь только влияет на confidence, не блокирует
+        # if mtf['confluence'] != "NONE":
+        #     if direction == "LONG" and mtf['confluence'] == "BEARISH":
+        #         logger.info(f"[ANALYZER] ❌ MTF не подтверждает LONG (confluence={mtf['confluence']})")
+        #         signal_stats['rejected'] += 1
+        #         signal_stats['reasons']['mtf_conflict'] += 1
+        #         return None
+        #     if direction == "SHORT" and mtf['confluence'] == "BULLISH":
+        #         logger.info(f"[ANALYZER] ❌ MTF не подтверждает SHORT (confluence={mtf['confluence']})")
+        #         signal_stats['rejected'] += 1
+        #         signal_stats['reasons']['mtf_conflict'] += 1
+        #         return None
         
-        # === МИНИМУМ ФАКТОРОВ В НАШУ СТОРОНУ (смягчено - достаточно равенства) ===
+        # === МИНИМУМ ФАКТОРОВ (сильно смягчено - допускаем небольшой дисбаланс) ===
         bf = market_context['bullish_factors']
         bef = market_context['bearish_factors']
-        if direction == "LONG" and bf < bef:
-            logger.info(f"[ANALYZER] ❌ Недостаточно бычьих факторов для LONG (bull={bf}, bear={bef})")
+        # Блокируем только при СИЛЬНОМ дисбалансе (разница > 3)
+        if direction == "LONG" and bf < bef - 3:
+            logger.info(f"[ANALYZER] ❌ Сильный дисбаланс против LONG (bull={bf}, bear={bef})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_factors'] += 1
             return None
-        if direction == "SHORT" and bef < bf:
-            logger.info(f"[ANALYZER] ❌ Недостаточно медвежьих факторов для SHORT (bull={bf}, bear={bef})")
+        if direction == "SHORT" and bef < bf - 3:
+            logger.info(f"[ANALYZER] ❌ Сильный дисбаланс против SHORT (bull={bf}, bear={bef})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_factors'] += 1
             return None
         
-        # Confidence с учётом силы контекста и MTF
-        base_confidence = abs(total_score - 0.5) * 2
+        # Confidence с учётом силы контекста и MTF (увеличен базовый бонус)
+        base_confidence = abs(total_score - 0.5) * 2 + 0.15  # Добавлен базовый бонус 15%
         context_bonus = 0.2 if "STRONG" in market_context['bias'] else 0.1
         mtf_bonus = 0.15 if mtf['aligned'] else (0.05 if mtf['confluence'] != "NONE" else 0)
         div_bonus = 0.15 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
         confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
-        # === ПОРОГ УВЕРЕННОСТИ (смягчён для большего количества сделок) ===
-        if confidence < 0.18:
-            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >18%)")
+        # === ПОРОГ УВЕРЕННОСТИ (сильно смягчён) ===
+        if confidence < 0.15:
+            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >15%)")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_confidence'] += 1
             return None
         
-        # === ADX: НУЖЕН ТРЕНД (смягчён для большего количества сделок) ===
-        adx = tech['indicators'].get('adx', 20)
-        if adx < 12:
-            logger.info(f"[ANALYZER] ❌ Слабый тренд (ADX={adx:.1f}, требуется >12)")
-            signal_stats['rejected'] += 1
-            signal_stats['reasons']['weak_trend'] += 1
-            return None
+        # === ADX: НУЖЕН ТРЕНД (убран - слишком много блокировок) ===
+        # adx = tech['indicators'].get('adx', 20)
+        # if adx < 8:
+        #     logger.info(f"[ANALYZER] ❌ Слабый тренд (ADX={adx:.1f}, требуется >8)")
+        #     signal_stats['rejected'] += 1
+        #     signal_stats['reasons']['weak_trend'] += 1
+        #     return None
         
-        # === ОБЪЁМ ДОЛЖЕН ПОДТВЕРЖДАТЬ (смягчён) ===
+        # === ОБЪЁМ (отключён - только логируем) ===
         vol_ratio = tech['indicators'].get('volume_ratio', 1)
-        if vol_ratio < 0.3:  # Снижено с 0.5 до 0.3
-            logger.info(f"[ANALYZER] ❌ Низкий объём ({vol_ratio:.2f}x от среднего)")
-            signal_stats['rejected'] += 1
-            signal_stats['reasons']['low_volume'] += 1
-            return None
+        if vol_ratio < 0.3:
+            logger.info(f"[ANALYZER] ⚠️ Низкий объём ({vol_ratio:.2f}x от среднего)")
         
-        # === WHALE CONFIRMATION: Киты должны быть на нашей стороне (смягчён) ===
-        if whale['whale_trades_count'] >= 8:  # Увеличено с 5 до 8
+        # === WHALE CONFIRMATION (включён с мягким порогом >= 10 сделок) ===
+        if whale['whale_trades_count'] >= 10:
             if direction == "LONG" and whale['bias'] == "SELL":
-                logger.info(f"[ANALYZER] ❌ Киты продают ({whale['whale_trades_count']} сделок) - пропуск LONG")
+                logger.info(f"[ANALYZER] ❌ Киты массово продают ({whale['whale_trades_count']} сделок) - пропуск LONG")
                 signal_stats['rejected'] += 1
                 signal_stats['reasons']['whale_against'] += 1
                 return None
             if direction == "SHORT" and whale['bias'] == "BUY":
-                logger.info(f"[ANALYZER] ❌ Киты покупают ({whale['whale_trades_count']} сделок) - пропуск SHORT")
+                logger.info(f"[ANALYZER] ❌ Киты массово покупают ({whale['whale_trades_count']} сделок) - пропуск SHORT")
                 signal_stats['rejected'] += 1
                 signal_stats['reasons']['whale_against'] += 1
                 return None
         
-        # === CVD MOMENTUM: Реальное давление должно подтверждать (смягчён) ===
+        # === CVD MOMENTUM (включён с мягким порогом 35%) ===
         cvd_delta = cvd.get('delta_percent', 0)
-        if direction == "LONG" and cvd_delta < -25:  # Расширено с -15 до -25
+        if direction == "LONG" and cvd_delta < -35:
             logger.info(f"[ANALYZER] ❌ CVD сильно негативный ({cvd_delta:.1f}%) - пропуск LONG")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['cvd_against'] += 1
             return None
-        if direction == "SHORT" and cvd_delta > 25:  # Расширено с 15 до 25
+        if direction == "SHORT" and cvd_delta > 35:
             logger.info(f"[ANALYZER] ❌ CVD сильно позитивный ({cvd_delta:.1f}%) - пропуск SHORT")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['cvd_against'] += 1
             return None
         
-        # === ORDER BOOK: Не должен сильно противоречить ===
+        # === ORDER BOOK (отключён - только логируем) ===
         if direction == "LONG" and orderbook['signal'] == 'STRONG_SELL':
-            logger.info(f"[ANALYZER] ❌ Order book сильно против LONG ({orderbook['imbalance']:.1%})")
-            signal_stats['rejected'] += 1
-            signal_stats['reasons']['orderbook_against'] += 1
-            return None
+            logger.info(f"[ANALYZER] ⚠️ Order book против LONG ({orderbook['imbalance']:.1%})")
         if direction == "SHORT" and orderbook['signal'] == 'STRONG_BUY':
-            logger.info(f"[ANALYZER] ❌ Order book сильно против SHORT ({orderbook['imbalance']:.1%})")
-            signal_stats['rejected'] += 1
-            signal_stats['reasons']['orderbook_against'] += 1
-            return None
+            logger.info(f"[ANALYZER] ⚠️ Order book против SHORT ({orderbook['imbalance']:.1%})")
         
-        # === BTC TREND FILTER: Не торгуем альты против BTC ===
+        # === BTC TREND FILTER (отключён - только логируем) ===
         if symbol != "BTC/USDT" and btc_corr['correlation'] > 0.7:
             if direction == "LONG" and btc_corr.get('btc_trend') == "BEARISH":
-                logger.info(f"[ANALYZER] ❌ BTC падает, {symbol} коррелирует ({btc_corr['correlation']:.0%}) - пропуск LONG")
-                signal_stats['rejected'] += 1
-                signal_stats['reasons']['btc_against'] += 1
-                return None
+                logger.info(f"[ANALYZER] ⚠️ BTC падает, {symbol} коррелирует ({btc_corr['correlation']:.0%})")
             if direction == "SHORT" and btc_corr.get('btc_trend') == "BULLISH":
-                logger.info(f"[ANALYZER] ❌ BTC растёт, {symbol} коррелирует ({btc_corr['correlation']:.0%}) - пропуск SHORT")
-                signal_stats['rejected'] += 1
-                signal_stats['reasons']['btc_against'] += 1
-                return None
+                logger.info(f"[ANALYZER] ⚠️ BTC растёт, {symbol} коррелирует ({btc_corr['correlation']:.0%})")
         
         # Генерация обоснования с учётом всех данных
         market_context['mtf'] = mtf
