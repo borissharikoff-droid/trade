@@ -262,6 +262,12 @@ class MarketAnalyzer:
                 if any(skip in symbol for skip in skip_tokens):
                     continue
                 
+                # Пропускаем символы, которые есть на Bybit, но нет на Binance
+                base = symbol.replace('USDT', '')
+                binance_missing = ['IP', 'H', 'KAITO', 'GPS', 'SHELL', 'BMT', 'PARTI', 'NIL']
+                if base in binance_missing or len(base) < 2:
+                    continue
+                
                 try:
                     price_change_pct = float(ticker.get('price24hPcnt', '0')) * 100
                     turnover_24h = float(ticker.get('turnover24h', '0'))
@@ -949,11 +955,11 @@ class MarketAnalyzer:
             # === 6. WASH TRADING DETECTION ===
             # Много сделок одинакового размера подряд
             
-            # === SEVERITY ===
-            if len(manipulation['signals']) >= 3:
+            # === SEVERITY (смягчённые пороги для большего количества сделок) ===
+            if len(manipulation['signals']) >= 4:
                 manipulation['severity'] = 'HIGH'
                 manipulation['recommendation'] = 'AVOID'
-            elif len(manipulation['signals']) >= 2:
+            elif len(manipulation['signals']) >= 3:
                 manipulation['severity'] = 'MEDIUM'
                 manipulation['recommendation'] = 'CAUTION'
             elif manipulation['detected']:
@@ -1925,25 +1931,25 @@ class MarketAnalyzer:
                       mtf['score'] * mtf_weight)
         
         # === СБАЛАНСИРОВАННЫЕ ПОРОГИ: качество + достаточное количество ===
-        if total_score > 0.52:
+        if total_score > 0.51:
             direction = "LONG"
-        elif total_score < 0.48:
+        elif total_score < 0.49:
             direction = "SHORT"
         else:
-            logger.info(f"[ANALYZER] ❌ Недостаточно сильный сигнал (score={total_score:.2f}, требуется >0.52 или <0.48)")
+            logger.info(f"[ANALYZER] ❌ Недостаточно сильный сигнал (score={total_score:.2f}, требуется >0.51 или <0.49)")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['weak_score'] += 1
             return None
         
-        # === СТРОГАЯ ПРОВЕРКА СОГЛАСОВАННОСТИ ===
-        # Сигнал должен совпадать с контекстом
-        if direction == "LONG" and market_context['bias'] in ["STRONG_SHORT", "SHORT"]:
-            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал LONG, но контекст медвежий ({market_context['bias']})")
+        # === ПРОВЕРКА СОГЛАСОВАННОСТИ (смягчена - блокируем только STRONG контекст) ===
+        # Сигнал блокируется только при СИЛЬНОМ противоположном контексте
+        if direction == "LONG" and market_context['bias'] == "STRONG_SHORT":
+            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал LONG, но контекст сильно медвежий ({market_context['bias']})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['context_conflict'] += 1
             return None
-        if direction == "SHORT" and market_context['bias'] in ["STRONG_LONG", "LONG"]:
-            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал SHORT, но контекст бычий ({market_context['bias']})")
+        if direction == "SHORT" and market_context['bias'] == "STRONG_LONG":
+            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал SHORT, но контекст сильно бычий ({market_context['bias']})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['context_conflict'] += 1
             return None
@@ -1961,15 +1967,15 @@ class MarketAnalyzer:
                 signal_stats['reasons']['mtf_conflict'] += 1
                 return None
         
-        # === МИНИМУМ ФАКТОРОВ В НАШУ СТОРОНУ ===
+        # === МИНИМУМ ФАКТОРОВ В НАШУ СТОРОНУ (смягчено - достаточно равенства) ===
         bf = market_context['bullish_factors']
         bef = market_context['bearish_factors']
-        if direction == "LONG" and bf < bef + 1:
+        if direction == "LONG" and bf < bef:
             logger.info(f"[ANALYZER] ❌ Недостаточно бычьих факторов для LONG (bull={bf}, bear={bef})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_factors'] += 1
             return None
-        if direction == "SHORT" and bef < bf + 1:
+        if direction == "SHORT" and bef < bf:
             logger.info(f"[ANALYZER] ❌ Недостаточно медвежьих факторов для SHORT (bull={bf}, bear={bef})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_factors'] += 1
@@ -1982,31 +1988,31 @@ class MarketAnalyzer:
         div_bonus = 0.15 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
         confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
-        # === ПОРОГ УВЕРЕННОСТИ ===
-        if confidence < 0.22:
-            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >22%)")
+        # === ПОРОГ УВЕРЕННОСТИ (смягчён для большего количества сделок) ===
+        if confidence < 0.18:
+            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >18%)")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_confidence'] += 1
             return None
         
-        # === ADX: НУЖЕН ТРЕНД ===
+        # === ADX: НУЖЕН ТРЕНД (смягчён для большего количества сделок) ===
         adx = tech['indicators'].get('adx', 20)
-        if adx < 15:
-            logger.info(f"[ANALYZER] ❌ Слабый тренд (ADX={adx:.1f}, требуется >15)")
+        if adx < 12:
+            logger.info(f"[ANALYZER] ❌ Слабый тренд (ADX={adx:.1f}, требуется >12)")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['weak_trend'] += 1
             return None
         
-        # === ОБЪЁМ ДОЛЖЕН ПОДТВЕРЖДАТЬ ===
+        # === ОБЪЁМ ДОЛЖЕН ПОДТВЕРЖДАТЬ (смягчён) ===
         vol_ratio = tech['indicators'].get('volume_ratio', 1)
-        if vol_ratio < 0.5:
+        if vol_ratio < 0.3:  # Снижено с 0.5 до 0.3
             logger.info(f"[ANALYZER] ❌ Низкий объём ({vol_ratio:.2f}x от среднего)")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_volume'] += 1
             return None
         
-        # === WHALE CONFIRMATION: Киты должны быть на нашей стороне ===
-        if whale['whale_trades_count'] >= 5:
+        # === WHALE CONFIRMATION: Киты должны быть на нашей стороне (смягчён) ===
+        if whale['whale_trades_count'] >= 8:  # Увеличено с 5 до 8
             if direction == "LONG" and whale['bias'] == "SELL":
                 logger.info(f"[ANALYZER] ❌ Киты продают ({whale['whale_trades_count']} сделок) - пропуск LONG")
                 signal_stats['rejected'] += 1
@@ -2018,14 +2024,14 @@ class MarketAnalyzer:
                 signal_stats['reasons']['whale_against'] += 1
                 return None
         
-        # === CVD MOMENTUM: Реальное давление должно подтверждать ===
+        # === CVD MOMENTUM: Реальное давление должно подтверждать (смягчён) ===
         cvd_delta = cvd.get('delta_percent', 0)
-        if direction == "LONG" and cvd_delta < -15:
+        if direction == "LONG" and cvd_delta < -25:  # Расширено с -15 до -25
             logger.info(f"[ANALYZER] ❌ CVD сильно негативный ({cvd_delta:.1f}%) - пропуск LONG")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['cvd_against'] += 1
             return None
-        if direction == "SHORT" and cvd_delta > 15:
+        if direction == "SHORT" and cvd_delta > 25:  # Расширено с 15 до 25
             logger.info(f"[ANALYZER] ❌ CVD сильно позитивный ({cvd_delta:.1f}%) - пропуск SHORT")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['cvd_against'] += 1
