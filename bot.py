@@ -1727,11 +1727,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
     active_users = [row['user_id'] for row in rows] if rows else []
     
-    if not active_users:
-        logger.info("[SIGNAL] Нет активных юзеров с включённой торговлей")
+    # Проверяем есть ли авто-трейд пользователь
+    has_auto_trade = False
+    if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
+        auto_user_check = get_user(AUTO_TRADE_USER_ID)
+        has_auto_trade = auto_user_check.get('auto_trade', False)
+    
+    if not active_users and not has_auto_trade:
+        logger.info("[SIGNAL] Нет активных юзеров и авто-трейд выключен")
         return
     
-    logger.info(f"[SIGNAL] Активных юзеров: {len(active_users)}")
+    logger.info(f"[SIGNAL] Активных юзеров: {len(active_users)}, Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
     
     # === MOMENTUM SCANNER: ищем монеты с импульсом ===
     try:
@@ -1842,13 +1848,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 auto_user['auto_trade_last_reset'] = today
                 db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0, auto_trade_last_reset=today)
             
+            logger.info(f"[AUTO-TRADE] Проверка: enabled={user_auto_enabled}, WR={winrate}% (min={user_min_winrate}%), today={user_today_count}/{user_max_daily}, balance=${auto_balance}")
+            
             if not user_auto_enabled:
                 logger.info(f"[AUTO-TRADE] Skip: авто-трейд выключен в настройках")
             elif winrate < user_min_winrate:
                 logger.info(f"[AUTO-TRADE] Skip: winrate {winrate}% < min {user_min_winrate}%")
             elif user_today_count >= user_max_daily:
                 logger.info(f"[AUTO-TRADE] Skip: лимит сделок {user_today_count}/{user_max_daily}")
-            elif auto_balance >= AUTO_TRADE_MIN_BET:
+            elif auto_balance < AUTO_TRADE_MIN_BET:
+                logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
+            else:
                 # Рассчитываем ставку и плечо на основе уверенности
                 auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance)
                 
