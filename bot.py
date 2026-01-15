@@ -1240,8 +1240,14 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             save_user(user_id)
             
             db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
-            user_positions.remove(pos)
+            
+            # Явно удаляем из кэша по ID
+            pos_id_to_remove = pos['id']
+            if user_id in positions_cache:
+                positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+            
             synced += 1
+            logger.info(f"[SYNC] Orphan {pos_id_to_remove} removed from cache, remaining: {len(positions_cache.get(user_id, []))}")
             
             try:
                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
@@ -1280,10 +1286,14 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
 
             # Переносим в историю
             db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
-            user_positions.remove(pos)
+            
+            # Явно удаляем из кэша по ID (надёжнее чем remove)
+            pos_id_to_remove = pos['id']
+            if user_id in positions_cache:
+                positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
 
             synced += 1
-            logger.info(f"[SYNC] Position {pos['id']} synced: {pos['symbol']} PnL=${real_pnl:.2f}")
+            logger.info(f"[SYNC] Position {pos_id_to_remove} synced: {pos['symbol']} PnL=${real_pnl:.2f}, cache remaining: {len(positions_cache.get(user_id, []))}")
 
             # Отправляем уведомление
             try:
@@ -1460,7 +1470,10 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         user['total_profit'] += pnl
         
         db_close_position(pos['id'], real_price, pnl, 'MANUAL_CLOSE')
-        user_positions.remove(pos)
+        # Явно удаляем из кэша по ID
+        pos_id_to_remove = pos['id']
+        if user_id in positions_cache:
+            positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
     save_user(user_id)
     
@@ -1587,9 +1600,10 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
         # Закрываем в БД с реальной ценой
         db_close_position(pos['id'], close_price, pnl, 'CLOSE_ALL')
-        # Удаляем из кэша
-        if pos in user_positions:
-            user_positions.remove(pos)
+        # Явно удаляем из кэша по ID
+        pos_id_to_remove = pos['id']
+        if user_id in positions_cache:
+            positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
     # Обновляем баланс
     user['balance'] += total_returned
@@ -1645,10 +1659,20 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     user = get_user(user_id)
     
+    # Логируем состояние кэша ДО синхронизации
+    cache_before = len(positions_cache.get(user_id, []))
+    cache_ids_before = [p.get('id') for p in positions_cache.get(user_id, [])]
+    logger.info(f"[TRADES] Cache BEFORE sync: {cache_before} positions, IDs: {cache_ids_before}")
+    
     # Синхронизация с Bybit при обновлении
     synced = await sync_bybit_positions(user_id, context)
     if synced > 0:
         logger.info(f"[TRADES] Synced {synced} positions from Bybit")
+    
+    # Логируем состояние кэша ПОСЛЕ синхронизации
+    cache_after = len(positions_cache.get(user_id, []))
+    cache_ids_after = [p.get('id') for p in positions_cache.get(user_id, [])]
+    logger.info(f"[TRADES] Cache AFTER sync: {cache_after} positions, IDs: {cache_ids_after}")
     
     user_positions = get_positions(user_id)
     
@@ -2472,7 +2496,9 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     # Закрываем в БД и удаляем из кэша
     db_close_position(pos_id, pos['current'], pnl, 'MANUAL')
-    user_positions.remove(pos)
+    # Явно удаляем из кэша по ID
+    if user_id in positions_cache:
+        positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id]
     
     pnl_abs = abs(pnl)
     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
@@ -2603,7 +2629,10 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         
         # Закрываем в БД
         db_close_position(pos['id'], close_price, pnl, 'MANUAL')
-        user_positions.remove(pos)
+        # Явно удаляем из кэша по ID
+        pos_id_to_remove = pos['id']
+        if user_id in positions_cache:
+            positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
     # Обновляем баланс
     user['balance'] += total_returned
@@ -2959,7 +2988,12 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                         
                         # Закрываем в БД
                         db_close_position(pos['id'], exit_price, real_pnl, f'BYBIT_{reason}')
-                        user_positions.remove(pos)
+                        
+                        # Явно удаляем из кэша по ID (надёжнее чем remove)
+                        pos_id_to_remove = pos['id']
+                        if user_id in positions_cache:
+                            positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+                        logger.info(f"[BYBIT_SYNC] Position {pos_id_to_remove} removed from cache, remaining: {len(positions_cache.get(user_id, []))}")
                         
                         # Уведомление
                         pnl_sign = "+" if real_pnl >= 0 else ""
@@ -3076,7 +3110,10 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     # Закрываем в БД
                     db_close_position(pos['id'], pos['current'], pos['pnl'], 'EARLY_CLOSE')
-                    user_positions.remove(pos)
+                    # Явно удаляем из кэша по ID
+                    pos_id_to_remove = pos['id']
+                    if user_id in positions_cache:
+                        positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
                     
                     # === FLIP: Переворот позиции ===
                     flip_opened = False
@@ -3306,7 +3343,10 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 
                 reason = 'TP3' if hit_tp3 else 'SL'
                 db_close_position(pos['id'], pos['current'], pos['pnl'], reason)
-                user_positions.remove(pos)
+                # Явно удаляем из кэша по ID
+                pos_id_to_remove = pos['id']
+                if user_id in positions_cache:
+                    positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
                 
                 pnl_abs = abs(pos['pnl'])
                 
