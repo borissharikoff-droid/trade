@@ -2908,12 +2908,14 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
     bybit_open_symbols = set()
+    bybit_sync_available = False  # Флаг что данные с Bybit получены успешно
+    
     if await is_hedging_enabled():
         try:
             bybit_positions = await hedger.get_all_positions()
             bybit_open_symbols = {p['symbol'] for p in bybit_positions}
-            if bybit_positions:
-                logger.debug(f"[BYBIT_SYNC] Открытых позиций на Bybit: {len(bybit_positions)}")
+            bybit_sync_available = True  # Успешно получили данные (даже если список пустой)
+            logger.debug(f"[BYBIT_SYNC] Открытых позиций на Bybit: {len(bybit_positions)}")
         except Exception as e:
             logger.warning(f"[BYBIT_SYNC] Ошибка получения позиций: {e}")
     
@@ -2921,13 +2923,15 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
         user = get_user(user_id)
         
         # === ПРОВЕРКА: позиция закрылась на Bybit? ===
-        if await is_hedging_enabled() and bybit_open_symbols:
+        # Проверяем если данные с Bybit получены успешно (даже если там 0 позиций)
+        if bybit_sync_available:
             for pos in user_positions[:]:
                 if pos.get('bybit_qty', 0) > 0:
                     bybit_symbol = pos['symbol'].replace('/', '')
                     
                     # Если позиция была на Bybit но её больше нет - закрылась по TP/SL
                     if bybit_symbol not in bybit_open_symbols:
+                        logger.info(f"[BYBIT_SYNC] Position {bybit_symbol} not found on Bybit! Bot has bybit_qty={pos.get('bybit_qty', 0)}")
                         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                         
                         # Получаем реальный PnL с Bybit
