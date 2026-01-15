@@ -1225,8 +1225,38 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
         expected_qty = pos.get('bybit_qty', 0)
 
         # Проверяем закрыта ли позиция:
-        # 1. Размер на Bybit = 0
-        # 2. Или размер сильно меньше ожидаемого (позиция закрылась по TP/SL)
+        # 1. bybit_qty > 0 и размер на Bybit = 0 -> позиция закрылась на Bybit
+        # 2. bybit_qty > 0 и размер сильно меньше ожидаемого -> частичное закрытие
+        # 3. bybit_qty == 0 при включенном хеджировании -> "фейковая" позиция (ошибка при открытии)
+        
+        if expected_qty == 0:
+            # Позиция без bybit_qty - возможно не открылась на Bybit
+            # Помечаем как "orphan" и закрываем без PnL
+            logger.warning(f"[SYNC] Orphan position {pos['id']}: {bybit_symbol} has no bybit_qty - closing")
+            
+            # Возвращаем только amount без PnL (позиция не была реально открыта)
+            returned = pos['amount']
+            user['balance'] += returned
+            save_user(user_id)
+            
+            db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
+            user_positions.remove(pos)
+            synced += 1
+            
+            try:
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                await context.bot.send_message(
+                    user_id, 
+                    f"<b>⚠️ Синхронизация</b>\n\n"
+                    f"{ticker} закрыт (не был на Bybit)\n"
+                    f"Возврат: ${returned:.0f}\n\n"
+                    f"💰 ${user['balance']:.0f}",
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"[SYNC] Failed to notify orphan: {e}")
+            continue
+        
         is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1)
 
         if is_closed:
@@ -1373,14 +1403,36 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await query.edit_message_text(f"⏳ Закрываем {ticker}...")
     
-    # Закрываем на Bybit
-    if await is_hedging_enabled():
+    # СНАЧАЛА закрываем на Bybit
+    hedging_enabled = await is_hedging_enabled()
+    failed_positions = []
+    
+    if hedging_enabled:
         for pos in positions_to_close:
             bybit_qty = pos.get('bybit_qty', 0)
             if bybit_qty > 0:
-                await hedge_close(pos['id'], symbol, pos['direction'], bybit_qty)
+                hedge_result = await hedge_close(pos['id'], symbol, pos['direction'], bybit_qty)
+                if not hedge_result:
+                    logger.error(f"[CLOSE_SYMBOL] ❌ Failed to close {symbol} pos {pos['id']} on Bybit")
+                    failed_positions.append(pos)
             else:
-                await hedge_close(pos['id'], symbol, pos['direction'], None)
+                hedge_result = await hedge_close(pos['id'], symbol, pos['direction'], None)
+                if not hedge_result:
+                    logger.error(f"[CLOSE_SYMBOL] ❌ Failed to close {symbol} pos {pos['id']} on Bybit")
+                    failed_positions.append(pos)
+    
+    # Убираем позиции которые не удалось закрыть на Bybit
+    if failed_positions and hedging_enabled:
+        positions_to_close = [p for p in positions_to_close if p not in failed_positions]
+        if not positions_to_close:
+            await query.edit_message_text(
+                f"<b>❌ Ошибка закрытия</b>\n\n"
+                f"Не удалось закрыть позиции на Bybit.\n"
+                f"Попробуйте ещё раз.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+            )
+            return
     
     # Закрываем в БД и считаем PnL
     total_pnl = 0
@@ -1449,7 +1501,10 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # === ГРУППИРУЕМ ПОЗИЦИИ ПО СИМВОЛУ ДЛЯ ЗАКРЫТИЯ НА BYBIT ===
     # Bybit хранит одну позицию на символ, поэтому закрываем один раз за группу
     close_prices = {}  # (symbol, direction) -> close_price
-    if await is_hedging_enabled():
+    failed_symbols = []  # Символы которые не удалось закрыть
+    hedging_enabled = await is_hedging_enabled()
+    
+    if hedging_enabled:
         by_symbol = {}
         for pos in user_positions:
             key = (pos['symbol'], pos['direction'])
@@ -1461,19 +1516,44 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         for (symbol, direction), positions in by_symbol.items():
             total_qty = sum(p.get('bybit_qty', 0) for p in positions)
             if total_qty > 0:
-                await hedge_close(positions[0]['id'], symbol, direction, total_qty)
-                logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} qty={total_qty}")
+                hedge_result = await hedge_close(positions[0]['id'], symbol, direction, total_qty)
+                if hedge_result:
+                    logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} qty={total_qty}")
+                else:
+                    logger.error(f"[CLOSE_ALL] ❌ Failed to close {symbol} {direction} on Bybit")
+                    failed_symbols.append((symbol, direction))
+                    continue
             else:
                 # Если bybit_qty не сохранён, закрываем всю позицию на Bybit
-                await hedge_close(positions[0]['id'], symbol, direction, None)
-                logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} (full)")
+                hedge_result = await hedge_close(positions[0]['id'], symbol, direction, None)
+                if hedge_result:
+                    logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} (full)")
+                else:
+                    logger.error(f"[CLOSE_ALL] ❌ Failed to close {symbol} {direction} on Bybit")
+                    failed_symbols.append((symbol, direction))
+                    continue
             
             # Получаем реальную цену закрытия
+            await asyncio.sleep(0.3)
             close_side = "Sell" if direction == "LONG" else "Buy"
             order_info = await hedger.get_last_order_price(symbol, close_side)
             if order_info and order_info.get('price'):
                 close_prices[(symbol, direction)] = order_info['price']
                 logger.info(f"[CLOSE_ALL] Real close price {symbol}: ${order_info['price']:.4f}")
+    
+    # Убираем позиции которые не удалось закрыть на Bybit
+    positions_to_close = user_positions[:]
+    if failed_symbols and hedging_enabled:
+        positions_to_close = [p for p in user_positions if (p['symbol'], p['direction']) not in failed_symbols]
+        if not positions_to_close:
+            await query.edit_message_text(
+                f"<b>❌ Ошибка закрытия</b>\n\n"
+                f"Не удалось закрыть позиции на Bybit.\n"
+                f"Попробуйте ещё раз.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+            )
+            return
     
     # === ЗАКРЫВАЕМ ВСЕ ПОЗИЦИИ В БД ===
     total_pnl = 0
@@ -1482,7 +1562,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     winners = 0
     losers = 0
     
-    for pos in user_positions[:]:
+    for pos in positions_to_close:
         # Получаем реальную цену закрытия если есть
         close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
         
@@ -1507,14 +1587,14 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         
         # Закрываем в БД с реальной ценой
         db_close_position(pos['id'], close_price, pnl, 'CLOSE_ALL')
+        # Удаляем из кэша
+        if pos in user_positions:
+            user_positions.remove(pos)
     
     # Обновляем баланс
     user['balance'] += total_returned
     user['total_profit'] += total_pnl
     save_user(user_id)
-    
-    # Очищаем кэш позиций
-    positions_cache[user_id] = []
     
     # Формируем итоговое сообщение
     pnl_abs = abs(total_pnl)
@@ -1904,85 +1984,101 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if auto_bet <= auto_balance:
                     ticker = symbol.split("/")[0]
                     
-                    # Комиссия
-                    commission = auto_bet * (COMMISSION_PERCENT / 100)
-                    
-                    # Обновляем баланс юзера
-                    auto_user['balance'] -= auto_bet
-                    new_balance = auto_user['balance']
-                    save_user(AUTO_TRADE_USER_ID)
-                    
-                    # Добавляем комиссию в накопитель
-                    await add_commission(commission)
-                    
-                    # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
-                    existing = None
-                    for p in auto_positions:
-                        if p['symbol'] == symbol and p['direction'] == direction:
-                            existing = p
-                            break
-                    
-                    # Хеджирование на Bybit
+                    # === СНАЧАЛА пробуем открыть на Bybit ===
                     bybit_qty = 0
-                    if await is_hedging_enabled():
+                    hedging_enabled = await is_hedging_enabled()
+                    bybit_open_success = True  # Флаг успешности открытия
+                    
+                    if hedging_enabled:
                         hedge_amount = float(auto_bet * auto_leverage)
                         hedge_result = await hedge_open(0, symbol, direction, hedge_amount, sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
                         if hedge_result:
                             bybit_qty = hedge_result.get('qty', 0)
                             logger.info(f"[AUTO-TRADE] ✓ Hedge opened: qty={bybit_qty}")
+                            
+                            # Верификация что позиция реально открылась
+                            await asyncio.sleep(0.5)
+                            bybit_pos = await hedger.get_position_data(symbol)
+                            if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                                logger.error(f"[AUTO-TRADE] ❌ VERIFICATION FAILED: position not found on Bybit")
+                                bybit_open_success = False
+                        else:
+                            logger.error(f"[AUTO-TRADE] ❌ Failed to open on Bybit - skipping trade")
+                            bybit_open_success = False
                     
-                    if existing:
-                        # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
-                        old_amount = existing['amount']
-                        new_amount = old_amount + float(auto_bet)
-                        new_entry_price = (existing['entry'] * old_amount + float(entry) * float(auto_bet)) / new_amount
-                        new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
-                        
-                        existing['amount'] = new_amount
-                        existing['entry'] = new_entry_price
-                        existing['commission'] = existing.get('commission', 0) + float(commission)
-                        existing['bybit_qty'] = new_bybit_qty
-                        existing['pnl'] = -existing['commission']
-                        
-                        db_update_position(existing['id'], 
-                            amount=new_amount, 
-                            entry=new_entry_price, 
-                            commission=existing['commission'],
-                            bybit_qty=new_bybit_qty,
-                            pnl=existing['pnl']
-                        )
-                        pos_id = existing['id']
-                        logger.info(f"[AUTO-TRADE] Added to existing position {pos_id}")
+                    if not bybit_open_success:
+                        logger.info(f"[AUTO-TRADE] Skipped due to Bybit failure")
                     else:
-                        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
-                        position = {
-                            'symbol': symbol,
-                            'direction': direction,
-                            'entry': float(entry),
-                            'current': float(entry),
-                            'amount': float(auto_bet),
-                            'tp': float(tp1),
-                            'tp1': float(tp1),
-                            'tp2': float(tp2),
-                            'tp3': float(tp3),
-                            'tp1_hit': False,
-                            'tp2_hit': False,
-                            'sl': float(sl),
-                            'commission': float(commission),
-                            'pnl': float(-commission),
-                            'bybit_qty': bybit_qty,
-                            'original_amount': float(auto_bet)
-                        }
+                        # Комиссия (только после успешного открытия на Bybit)
+                        commission = auto_bet * (COMMISSION_PERCENT / 100)
                         
-                        pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
-                        position['id'] = pos_id
+                        # Обновляем баланс юзера
+                        auto_user['balance'] -= auto_bet
+                        new_balance = auto_user['balance']
+                        save_user(AUTO_TRADE_USER_ID)
                         
-                        if AUTO_TRADE_USER_ID not in positions_cache:
-                            positions_cache[AUTO_TRADE_USER_ID] = []
-                        positions_cache[AUTO_TRADE_USER_ID].append(position)
-                    
-                    # Уведомление с тремя TP
-                    auto_msg = f"""<b>🤖 Авто-сделка</b>
+                        # Добавляем комиссию в накопитель
+                        await add_commission(commission)
+                        
+                        # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
+                        existing = None
+                        for p in auto_positions:
+                            if p['symbol'] == symbol and p['direction'] == direction:
+                                existing = p
+                                break
+                        
+                        if existing:
+                            # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
+                            old_amount = existing['amount']
+                            new_amount = old_amount + float(auto_bet)
+                            new_entry_price = (existing['entry'] * old_amount + float(entry) * float(auto_bet)) / new_amount
+                            new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
+                            
+                            existing['amount'] = new_amount
+                            existing['entry'] = new_entry_price
+                            existing['commission'] = existing.get('commission', 0) + float(commission)
+                            existing['bybit_qty'] = new_bybit_qty
+                            existing['pnl'] = -existing['commission']
+                            
+                            db_update_position(existing['id'], 
+                                amount=new_amount, 
+                                entry=new_entry_price, 
+                                commission=existing['commission'],
+                                bybit_qty=new_bybit_qty,
+                                pnl=existing['pnl']
+                            )
+                            pos_id = existing['id']
+                            logger.info(f"[AUTO-TRADE] Added to existing position {pos_id}")
+                        else:
+                            # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
+                            position = {
+                                'symbol': symbol,
+                                'direction': direction,
+                                'entry': float(entry),
+                                'current': float(entry),
+                                'amount': float(auto_bet),
+                                'tp': float(tp1),
+                                'tp1': float(tp1),
+                                'tp2': float(tp2),
+                                'tp3': float(tp3),
+                                'tp1_hit': False,
+                                'tp2_hit': False,
+                                'sl': float(sl),
+                                'commission': float(commission),
+                                'pnl': float(-commission),
+                                'bybit_qty': bybit_qty,
+                                'original_amount': float(auto_bet)
+                            }
+                            
+                            pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
+                            position['id'] = pos_id
+                            
+                            if AUTO_TRADE_USER_ID not in positions_cache:
+                                positions_cache[AUTO_TRADE_USER_ID] = []
+                            positions_cache[AUTO_TRADE_USER_ID].append(position)
+                        
+                        # Уведомление с тремя TP
+                        auto_msg = f"""<b>🤖 Авто-сделка</b>
 
 {ticker} | {direction} | ${auto_bet:.0f} | x{auto_leverage}
 Уверенность: {winrate}%
@@ -1996,21 +2092,21 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
 
 💰 ${new_balance:.0f}"""
-                    
-                    # Кнопки под авто-сделкой
-                    auto_keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
-                         InlineKeyboardButton("📊 Сделки", callback_data="trades")]
-                    ])
-                    
-                    await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
-                    logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
-                    auto_trade_executed = True  # Авто-сделка открыта, не дублировать сигнал
-                    
-                    # Инкрементируем счётчик сделок за день
-                    auto_user['auto_trade_today'] = user_today_count + 1
-                    db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
-                    logger.info(f"[AUTO-TRADE] Сделок сегодня: {user_today_count + 1}/{user_max_daily}")
+                        
+                        # Кнопки под авто-сделкой
+                        auto_keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
+                             InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                        ])
+                        
+                        await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
+                        logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
+                        auto_trade_executed = True  # Авто-сделка открыта, не дублировать сигнал
+                        
+                        # Инкрементируем счётчик сделок за день
+                        auto_user['auto_trade_today'] = user_today_count + 1
+                        db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
+                        logger.info(f"[AUTO-TRADE] Сделок сегодня: {user_today_count + 1}/{user_max_daily}")
                 else:
                     logger.info(f"[AUTO-TRADE] Skip: bet ${auto_bet} > balance ${auto_balance}")
     except Exception as e:
@@ -2158,7 +2254,41 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # === ПОКАЗЫВАЕМ "ОТКРЫВАЕМ..." ===
     await query.edit_message_text(f"<b>⏳ Открываем</b>\n\n{ticker} | {direction} | ${amount:.0f}", parse_mode="HTML")
 
-    # Комиссия за открытие
+    # === ХЕДЖИРОВАНИЕ: СНАЧАЛА открываем на Bybit ===
+    bybit_qty = 0
+    hedging_enabled = await is_hedging_enabled()
+    
+    if hedging_enabled:
+        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3)
+        if hedge_result:
+            bybit_qty = hedge_result.get('qty', 0)
+            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
+            
+            # === ВЕРИФИКАЦИЯ: проверяем что позиция реально открылась на Bybit ===
+            await asyncio.sleep(0.5)  # Даём Bybit время на обработку
+            bybit_pos = await hedger.get_position_data(symbol)
+            if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                logger.error(f"[HEDGE] ❌ VERIFICATION FAILED: Bybit position not found after open!")
+                # Позиция не появилась - отменяем
+                await query.edit_message_text(
+                    f"<b>❌ Ошибка открытия</b>\n\n"
+                    f"Bybit не подтвердил позицию.\n"
+                    f"Попробуйте ещё раз.",
+                    parse_mode="HTML"
+                )
+                return
+        else:
+            # Bybit не открыл позицию - НЕ создаём в боте
+            logger.error(f"[HEDGE] ❌ Failed to open on Bybit - aborting trade")
+            await query.edit_message_text(
+                f"<b>❌ Ошибка открытия</b>\n\n"
+                f"Не удалось открыть позицию на Bybit.\n"
+                f"Проверьте баланс и настройки API.",
+                parse_mode="HTML"
+            )
+            return
+
+    # Комиссия за открытие (только после успешного открытия на Bybit)
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
     save_user(user_id)  # Сохраняем в БД
@@ -2172,16 +2302,6 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if p['symbol'] == symbol and p['direction'] == direction:
             existing = p
             break
-
-    # === ХЕДЖИРОВАНИЕ: открываем на Bybit с частичными TP ===
-    bybit_qty = 0
-    if await is_hedging_enabled():
-        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3)
-        if hedge_result:
-            bybit_qty = hedge_result.get('qty', 0)
-            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
-        else:
-            logger.warning(f"[HEDGE] ✗ Failed to hedge")
 
     if existing:
         # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
@@ -2288,14 +2408,25 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("Позиция не найдена", show_alert=True)
         return
     
-    # === ХЕДЖИРОВАНИЕ: закрываем позицию на Bybit используя сохранённый qty ===
+    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+    
+    # Показываем статус
+    await query.edit_message_text(f"<b>⏳ Закрываем {ticker}...</b>", parse_mode="HTML")
+    
+    # === ХЕДЖИРОВАНИЕ: СНАЧАЛА закрываем на Bybit ===
     close_price = pos.get('current', pos['entry'])
-    if await is_hedging_enabled():
+    hedging_enabled = await is_hedging_enabled()
+    
+    if hedging_enabled:
         bybit_qty = pos.get('bybit_qty', 0)
         if bybit_qty > 0:
             hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], bybit_qty)
             if hedge_result:
                 logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit (qty={bybit_qty})")
+                
+                # Верификация: проверяем что позиция реально закрылась
+                await asyncio.sleep(0.5)
+                bybit_pos = await hedger.get_position_data(pos['symbol'])
                 
                 # Получаем реальную цену закрытия с Bybit
                 close_side = "Sell" if pos['direction'] == "LONG" else "Buy"
@@ -2303,8 +2434,22 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 if order_info and order_info.get('price'):
                     close_price = order_info['price']
                     logger.info(f"[HEDGE] Real close price: ${close_price:.4f}")
+                
+                # Если позиция ещё есть на Bybit - возможно частичное закрытие
+                if bybit_pos and bybit_pos.get('size', 0) > 0:
+                    remaining = bybit_pos['size']
+                    logger.warning(f"[HEDGE] ⚠️ Position partially closed, remaining: {remaining}")
             else:
-                logger.warning(f"[HEDGE] ✗ Failed to close hedge for position {pos_id}")
+                # Bybit не закрыл - НЕ закрываем в боте
+                logger.error(f"[HEDGE] ❌ Failed to close on Bybit - position kept open")
+                await query.edit_message_text(
+                    f"<b>❌ Ошибка закрытия</b>\n\n"
+                    f"Не удалось закрыть позицию на Bybit.\n"
+                    f"Позиция сохранена. Попробуйте ещё раз.",
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                )
+                return
     
     # Пересчитываем PnL с реальной ценой закрытия
     if pos['direction'] == "LONG":
@@ -2386,7 +2531,10 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # === ГРУППИРУЕМ ПО СИМВОЛУ ДЛЯ BYBIT ===
     close_prices = {}  # symbol -> close_price
-    if await is_hedging_enabled():
+    failed_closes = []  # Позиции которые не удалось закрыть на Bybit
+    hedging_enabled = await is_hedging_enabled()
+    
+    if hedging_enabled:
         by_symbol = {}
         for pos in to_close:
             key = (pos['symbol'], pos['direction'])
@@ -2398,15 +2546,34 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         for (symbol, direction), positions in by_symbol.items():
             total_qty = sum(p.get('bybit_qty', 0) for p in positions)
             if total_qty > 0:
-                await hedge_close(positions[0]['id'], symbol, direction, total_qty)
-                logger.info(f"[CLOSE_STACKED] Bybit closed {symbol} {direction} qty={total_qty}")
-                
-                # Получаем реальную цену закрытия
-                close_side = "Sell" if direction == "LONG" else "Buy"
-                order_info = await hedger.get_last_order_price(symbol, close_side)
-                if order_info and order_info.get('price'):
-                    close_prices[(symbol, direction)] = order_info['price']
-                    logger.info(f"[CLOSE_STACKED] Real close price {symbol}: ${order_info['price']:.4f}")
+                hedge_result = await hedge_close(positions[0]['id'], symbol, direction, total_qty)
+                if hedge_result:
+                    logger.info(f"[CLOSE_STACKED] Bybit closed {symbol} {direction} qty={total_qty}")
+                    
+                    # Получаем реальную цену закрытия
+                    await asyncio.sleep(0.3)
+                    close_side = "Sell" if direction == "LONG" else "Buy"
+                    order_info = await hedger.get_last_order_price(symbol, close_side)
+                    if order_info and order_info.get('price'):
+                        close_prices[(symbol, direction)] = order_info['price']
+                        logger.info(f"[CLOSE_STACKED] Real close price {symbol}: ${order_info['price']:.4f}")
+                else:
+                    # Не удалось закрыть на Bybit - помечаем эти позиции
+                    logger.error(f"[CLOSE_STACKED] ❌ Failed to close {symbol} {direction} on Bybit")
+                    failed_closes.extend(positions)
+    
+    # Убираем позиции которые не удалось закрыть на Bybit
+    if failed_closes and hedging_enabled:
+        to_close = [p for p in to_close if p not in failed_closes]
+        if not to_close:
+            await query.edit_message_text(
+                f"<b>❌ Ошибка закрытия</b>\n\n"
+                f"Не удалось закрыть позиции на Bybit.\n"
+                f"Позиции сохранены. Попробуйте ещё раз.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+            )
+            return
     
     # === ЗАКРЫВАЕМ В БД ===
     total_pnl = 0
@@ -2574,7 +2741,39 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
                     return
             break
 
-    # Комиссия за открытие
+    # === ХЕДЖИРОВАНИЕ: СНАЧАЛА открываем на Bybit ===
+    bybit_qty = 0
+    hedging_enabled = await is_hedging_enabled()
+    
+    if hedging_enabled:
+        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3)
+        if hedge_result:
+            bybit_qty = hedge_result.get('qty', 0)
+            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
+            
+            # Верификация что позиция реально открылась
+            await asyncio.sleep(0.5)
+            bybit_pos = await hedger.get_position_data(symbol)
+            if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                logger.error(f"[HEDGE] ❌ VERIFICATION FAILED: position not found on Bybit")
+                await update.message.reply_text(
+                    f"<b>❌ Ошибка открытия</b>\n\n"
+                    f"Bybit не подтвердил позицию.\n"
+                    f"Попробуйте ещё раз.",
+                    parse_mode="HTML"
+                )
+                return
+        else:
+            logger.error(f"[HEDGE] ❌ Failed to open on Bybit - aborting trade")
+            await update.message.reply_text(
+                f"<b>❌ Ошибка открытия</b>\n\n"
+                f"Не удалось открыть позицию на Bybit.\n"
+                f"Проверьте баланс и настройки API.",
+                parse_mode="HTML"
+            )
+            return
+
+    # Комиссия за открытие (только после успешного открытия на Bybit)
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
     save_user(user_id)
@@ -2588,16 +2787,6 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         if p['symbol'] == symbol and p['direction'] == direction:
             existing = p
             break
-
-    # === ХЕДЖИРОВАНИЕ: открываем на Bybit с частичными TP ===
-    bybit_qty = 0
-    if await is_hedging_enabled():
-        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3)
-        if hedge_result:
-            bybit_qty = hedge_result.get('qty', 0)
-            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
-        else:
-            logger.warning(f"[HEDGE] ✗ Failed to hedge")
 
     if existing:
         # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
@@ -2854,12 +3043,17 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     should_flip = adjustment.get('should_flip', False)
                     flip_direction = adjustment.get('flip_direction')
                     
-                    # Закрываем на Bybit
-                    if await is_hedging_enabled():
+                    # СНАЧАЛА закрываем на Bybit
+                    hedging_enabled = await is_hedging_enabled()
+                    if hedging_enabled:
                         bybit_qty = pos.get('bybit_qty', 0)
                         if bybit_qty > 0:
-                            await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
-                            logger.info(f"[EARLY_CLOSE] Bybit closed {ticker} qty={bybit_qty}")
+                            hedge_result = await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
+                            if hedge_result:
+                                logger.info(f"[EARLY_CLOSE] Bybit closed {ticker} qty={bybit_qty}")
+                            else:
+                                logger.error(f"[EARLY_CLOSE] ❌ Failed to close on Bybit - skipping")
+                                continue  # Пропускаем - попробуем в следующем цикле
                     
                     # Возвращаем деньги пользователю
                     returned = pos['amount'] + pos['pnl']
@@ -2884,35 +3078,41 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                             flip_sl = flip_entry * 1.004
                             flip_tp = flip_entry * 0.992
                         
-                        # Открываем хедж на Bybit
+                        # СНАЧАЛА открываем хедж на Bybit
                         flip_bybit_qty = 0
-                        if await is_hedging_enabled():
+                        if hedging_enabled:
                             flip_result = await hedge_open(0, pos['symbol'], flip_direction, old_amount * LEVERAGE, sl=flip_sl, tp1=flip_tp, tp2=flip_tp, tp3=flip_tp)
                             if flip_result:
                                 flip_bybit_qty = flip_result.get('qty', 0)
+                                logger.info(f"[FLIP] Bybit opened {flip_direction} qty={flip_bybit_qty}")
+                            else:
+                                logger.error(f"[FLIP] ❌ Failed to open flip on Bybit - no flip")
+                                # Не создаём флип если Bybit не открыл
+                                flip_direction = None  # Отменяем флип
                         
-                        # Снимаем сумму с баланса
-                        user['balance'] -= old_amount
-                        save_user(user_id)
-                        
-                        # Создаём позицию в БД
-                        new_pos = {
-                            'symbol': pos['symbol'],
-                            'direction': flip_direction,
-                            'entry': flip_entry,
-                            'amount': old_amount,
-                            'sl': flip_sl,
-                            'tp': flip_tp,
-                            'tp1': flip_tp,
-                            'tp2': flip_tp * (1.01 if flip_direction == "LONG" else 0.99),
-                            'tp3': flip_tp * (1.015 if flip_direction == "LONG" else 0.985),
-                            'bybit_qty': flip_bybit_qty
-                        }
-                        new_pos_id = db_add_position(user_id, new_pos)
-                        new_pos['id'] = new_pos_id
-                        user_positions.append(new_pos)
-                        flip_opened = True
-                        logger.info(f"[FLIP] User {user_id}: {ticker} {old_direction} -> {flip_direction} (${old_amount})")
+                        if flip_direction:  # Только если Bybit открыл или хеджирование выключено
+                            # Снимаем сумму с баланса
+                            user['balance'] -= old_amount
+                            save_user(user_id)
+                            
+                            # Создаём позицию в БД
+                            new_pos = {
+                                'symbol': pos['symbol'],
+                                'direction': flip_direction,
+                                'entry': flip_entry,
+                                'amount': old_amount,
+                                'sl': flip_sl,
+                                'tp': flip_tp,
+                                'tp1': flip_tp,
+                                'tp2': flip_tp * (1.01 if flip_direction == "LONG" else 0.99),
+                                'tp3': flip_tp * (1.015 if flip_direction == "LONG" else 0.985),
+                                'bybit_qty': flip_bybit_qty
+                            }
+                            new_pos_id = db_add_position(user_id, new_pos)
+                            new_pos['id'] = new_pos_id
+                            user_positions.append(new_pos)
+                            flip_opened = True
+                            logger.info(f"[FLIP] User {user_id}: {ticker} {old_direction} -> {flip_direction} (${old_amount})")
                     
                     # Уведомление о факте закрытия (и флипа)
                     pnl_sign = "+" if pos['pnl'] >= 0 else ""
@@ -2961,6 +3161,21 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 close_amount = pos['amount'] * close_percent
                 remaining_amount = pos['amount'] - close_amount
                 
+                # СНАЧАЛА закрываем на Bybit
+                bybit_closed = False
+                if await is_hedging_enabled() and pos.get('bybit_qty', 0) > 0:
+                    close_qty = pos['bybit_qty'] * close_percent
+                    hedge_result = await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
+                    if hedge_result:
+                        pos['bybit_qty'] -= close_qty
+                        bybit_closed = True
+                        logger.info(f"[TP1] Bybit closed {close_qty} qty for {ticker}")
+                    else:
+                        logger.error(f"[TP1] ❌ Failed to close on Bybit - skipping TP1 update")
+                        continue  # Пропускаем - попробуем в следующем цикле
+                else:
+                    bybit_closed = True  # Хеджирование отключено или нет qty
+                
                 # PnL от частичного закрытия
                 if pos['direction'] == "LONG":
                     partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
@@ -2979,13 +3194,10 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 pos['sl'] = pos['entry'] * 1.001 if pos['direction'] == "LONG" else pos['entry'] * 0.999  # SL в безубыток
                 pos['tp'] = tp2  # Следующий TP
                 
-                db_update_position(pos['id'], amount=remaining_amount, sl=pos['sl'], tp=pos['tp'])
+                db_update_position(pos['id'], amount=remaining_amount, sl=pos['sl'], tp=pos['tp'], bybit_qty=pos['bybit_qty'])
                 
-                # Обновляем Bybit
-                if await is_hedging_enabled() and pos.get('bybit_qty', 0) > 0:
-                    close_qty = pos['bybit_qty'] * close_percent
-                    await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
-                    pos['bybit_qty'] -= close_qty
+                # Обновляем SL на Bybit
+                if bybit_closed and await is_hedging_enabled():
                     await hedger.set_trading_stop(pos['symbol'].replace("/", ""), pos['direction'], tp=tp2, sl=pos['sl'])
                 
                 try:
@@ -3007,6 +3219,21 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 close_amount = pos['amount'] * close_percent
                 remaining_amount = pos['amount'] - close_amount
                 
+                # СНАЧАЛА закрываем на Bybit
+                bybit_closed = False
+                if await is_hedging_enabled() and pos.get('bybit_qty', 0) > 0:
+                    close_qty = pos['bybit_qty'] * close_percent
+                    hedge_result = await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
+                    if hedge_result:
+                        pos['bybit_qty'] -= close_qty
+                        bybit_closed = True
+                        logger.info(f"[TP2] Bybit closed {close_qty} qty for {ticker}")
+                    else:
+                        logger.error(f"[TP2] ❌ Failed to close on Bybit - skipping TP2 update")
+                        continue  # Пропускаем - попробуем в следующем цикле
+                else:
+                    bybit_closed = True
+                
                 if pos['direction'] == "LONG":
                     partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
                 else:
@@ -3027,12 +3254,10 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 else:
                     pos['sl'] = tp1 * 1.002
                 
-                db_update_position(pos['id'], amount=remaining_amount, sl=pos['sl'], tp=pos['tp'])
+                db_update_position(pos['id'], amount=remaining_amount, sl=pos['sl'], tp=pos['tp'], bybit_qty=pos['bybit_qty'])
                 
-                if await is_hedging_enabled() and pos.get('bybit_qty', 0) > 0:
-                    close_qty = pos['bybit_qty'] * close_percent
-                    await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
-                    pos['bybit_qty'] -= close_qty
+                # Обновляем SL на Bybit
+                if bybit_closed and await is_hedging_enabled():
                     await hedger.set_trading_stop(pos['symbol'].replace("/", ""), pos['direction'], tp=tp3, sl=pos['sl'])
                 
                 try:
@@ -3050,11 +3275,16 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
             
             # === TP3 или SL: Полное закрытие ===
             if hit_tp3 or hit_sl:
+                # СНАЧАЛА закрываем на Bybit
                 if await is_hedging_enabled():
                     bybit_qty = pos.get('bybit_qty', 0)
                     if bybit_qty > 0:
-                        await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
-                        logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit (qty={bybit_qty})")
+                        hedge_result = await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
+                        if hedge_result:
+                            logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit (qty={bybit_qty})")
+                        else:
+                            logger.error(f"[HEDGE] ❌ Failed to auto-close on Bybit - skipping local close")
+                            continue  # Пропускаем - попробуем в следующем цикле
                 
                 returned = pos['amount'] + pos['pnl']
                 user['balance'] += returned
