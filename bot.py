@@ -2011,7 +2011,8 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     # === СНАЧАЛА пробуем открыть на Bybit ===
                     bybit_qty = 0
                     hedging_enabled = await is_hedging_enabled()
-                    bybit_open_success = True  # Флаг успешности открытия
+                    bybit_open_success = True  # Флаг успешности открытия (для локальной позиции)
+                    bybit_actually_opened = False  # Реально открылось на Bybit
                     
                     if hedging_enabled:
                         hedge_amount = float(auto_bet * auto_leverage)
@@ -2026,6 +2027,8 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                             if not bybit_pos or bybit_pos.get('size', 0) == 0:
                                 logger.error(f"[AUTO-TRADE] ❌ VERIFICATION FAILED: position not found on Bybit")
                                 bybit_open_success = False
+                            else:
+                                bybit_actually_opened = True  # Подтверждено что открылось на Bybit
                         else:
                             logger.error(f"[AUTO-TRADE] ❌ Failed to open on Bybit - skipping trade")
                             bybit_open_success = False
@@ -2033,8 +2036,9 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     if not bybit_open_success:
                         logger.info(f"[AUTO-TRADE] Skipped due to Bybit failure")
                     else:
-                        # Успешно открыто на Bybit - инкрементируем статистику
-                        increment_bybit_opened()
+                        # Инкрементируем статистику ТОЛЬКО если реально открылось на Bybit
+                        if bybit_actually_opened:
+                            increment_bybit_opened()
                         
                         # Комиссия (только после успешного открытия на Bybit)
                         commission = auto_bet * (COMMISSION_PERCENT / 100)
