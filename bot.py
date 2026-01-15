@@ -1692,7 +1692,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 💰 ${user['balance']:.0f}"""
         
         keyboard = [
-            [InlineKeyboardButton("🔄", callback_data="trades"), InlineKeyboardButton("🔙", callback_data="back")]
+            [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
         ]
         try:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -1964,13 +1964,17 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         # ATR для position sizing (волатильность)
         atr_percent = best_signal.get('atr_percent', 0)
         
-        logger.info(f"[SIGNAL] ✓ Готово к отправке: {symbol} {direction} entry={entry:.4f} WR={winrate}% ATR={atr_percent:.2f}%")
+        # Confidence анализатора (для авто-трейда) - это сила ТЕКУЩЕГО сигнала
+        signal_confidence = int(best_signal['confidence'] * 100)  # 0.82 -> 82%
+        
+        logger.info(f"[SIGNAL] ✓ Готово к отправке: {symbol} {direction} entry={entry:.4f} WR={winrate}% Conf={signal_confidence}% ATR={atr_percent:.2f}%")
         signal_data = {
             'symbol': symbol, 'direction': direction, 'entry': entry,
             'sl': sl, 'tp': tp, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
             'winrate': winrate, 'tp1_percent': tp1_percent, 'tp2_percent': tp2_percent,
             'tp3_percent': tp3_percent, 'sl_percent': sl_percent, 'potential_profit': potential_profit,
-            'atr_percent': atr_percent  # Для ATR-based position sizing
+            'atr_percent': atr_percent,  # Для ATR-based position sizing
+            'signal_confidence': signal_confidence  # Confidence анализатора для авто-трейда
         }
         
     except Exception as e:
@@ -2002,6 +2006,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     sl_percent = signal_data['sl_percent']
     potential_profit = signal_data['potential_profit']
     atr_percent = signal_data.get('atr_percent', 0)  # ATR для position sizing
+    signal_confidence = signal_data.get('signal_confidence', winrate)  # Confidence для авто-трейда
     
     # ==================== АВТО-ТОРГОВЛЯ ====================
     auto_trade_executed = False  # Флаг для предотвращения дублирования сигнала
@@ -2027,19 +2032,19 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 auto_user['auto_trade_last_reset'] = today
                 db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0, auto_trade_last_reset=today)
             
-            logger.info(f"[AUTO-TRADE] Проверка: enabled={user_auto_enabled}, WR={winrate}% (min={user_min_winrate}%), today={user_today_count}/{user_max_daily}, balance=${auto_balance}")
+            logger.info(f"[AUTO-TRADE] Проверка: enabled={user_auto_enabled}, Confidence={signal_confidence}% (min={user_min_winrate}%), today={user_today_count}/{user_max_daily}, balance=${auto_balance}")
             
             if not user_auto_enabled:
                 logger.info(f"[AUTO-TRADE] Skip: авто-трейд выключен в настройках")
-            elif winrate < user_min_winrate:
-                logger.info(f"[AUTO-TRADE] Skip: winrate {winrate}% < min {user_min_winrate}%")
+            elif signal_confidence < user_min_winrate:
+                logger.info(f"[AUTO-TRADE] Skip: confidence {signal_confidence}% < min {user_min_winrate}%")
             elif user_today_count >= user_max_daily:
                 logger.info(f"[AUTO-TRADE] Skip: лимит сделок {user_today_count}/{user_max_daily}")
             elif auto_balance < AUTO_TRADE_MIN_BET:
                 logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
             else:
-                # Рассчитываем ставку и плечо на основе уверенности и волатильности (ATR)
-                auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance, atr_percent)
+                # Рассчитываем ставку и плечо на основе confidence и волатильности (ATR)
+                auto_bet, auto_leverage = calculate_auto_bet(signal_confidence, auto_balance, atr_percent)
                 
                 if auto_bet <= auto_balance:
                     ticker = symbol.split("/")[0]
@@ -2755,9 +2760,12 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
 Баланс: ${user['balance']:.2f}
 
 Введи сумму:"""
-    
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="skip")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    keyboard = [
+        [InlineKeyboardButton("❌ Отмена", callback_data="skip")],
+        [InlineKeyboardButton("🏠 Домой", callback_data="back"), InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+    ]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка введённой суммы"""
@@ -3218,8 +3226,13 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                                f"{adjustment['reason']}\n\n"
                                f"💰 ${user['balance']:.0f}")
                     
+                    # Кнопки навигации
+                    nav_keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 Домой", callback_data="back"), InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                    ])
+                    
                     try:
-                        await context.bot.send_message(user_id, msg, parse_mode="HTML")
+                        await context.bot.send_message(user_id, msg, parse_mode="HTML", reply_markup=nav_keyboard)
                         logger.info(f"[EARLY_CLOSE] User {user_id} {ticker}: ${pos['pnl']:.2f}, flip={flip_opened}")
                     except Exception as e:
                         logger.error(f"[EARLY_CLOSE] Notify error: {e}")
@@ -4175,6 +4188,23 @@ def main() -> None:
         logger.info("[JOBS] JobQueue configured (positions, signals, alerts)")
     else:
         logger.warning("[JOBS] JobQueue NOT available!")
+    
+    # Устанавливаем меню команд
+    async def post_init(application):
+        from telegram import BotCommand
+        commands = [
+            BotCommand("start", "🏠 Главное меню"),
+            BotCommand("history", "📜 История сделок"),
+            BotCommand("ref", "👥 Реферальная программа"),
+            BotCommand("alert", "🔔 Создать алерт"),
+            BotCommand("delalert", "🔕 Удалить алерт"),
+            BotCommand("autotrade", "🤖 Авто-трейд настройки"),
+            BotCommand("signalstats", "📊 Статистика сигналов"),
+        ]
+        await application.bot.set_my_commands(commands)
+        logger.info("[BOT] Commands menu set")
+    
+    app.post_init = post_init
     
     logger.info("=" * 40)
     logger.info("BOT STARTED")
