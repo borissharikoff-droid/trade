@@ -14,6 +14,7 @@ signal_stats = {
     'analyzed': 0,
     'accepted': 0,
     'rejected': 0,
+    'bybit_opened': 0,  # Реально открыто на Bybit
     'reasons': {
         'low_liquidity': 0,
         'manipulation': 0,
@@ -41,8 +42,14 @@ def reset_signal_stats():
     signal_stats['analyzed'] = 0
     signal_stats['accepted'] = 0
     signal_stats['rejected'] = 0
+    signal_stats['bybit_opened'] = 0
     for key in signal_stats['reasons']:
         signal_stats['reasons'][key] = 0
+
+def increment_bybit_opened():
+    """Инкрементировать счётчик открытых на Bybit"""
+    global signal_stats
+    signal_stats['bybit_opened'] += 1
 
 # Оптимальные часы для торговли (UTC)
 # Лондон: 8-16, Нью-Йорк: 13-21

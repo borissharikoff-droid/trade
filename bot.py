@@ -13,7 +13,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.error import BadRequest
 
 from hedger import hedge_open, hedge_close, is_hedging_enabled, hedger
-from analyzer import MarketAnalyzer, get_signal_stats, reset_signal_stats
+from analyzer import MarketAnalyzer, get_signal_stats, reset_signal_stats, increment_bybit_opened
 
 load_dotenv()
 
@@ -2009,6 +2009,9 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     if not bybit_open_success:
                         logger.info(f"[AUTO-TRADE] Skipped due to Bybit failure")
                     else:
+                        # Успешно открыто на Bybit - инкрементируем статистику
+                        increment_bybit_opened()
+                        
                         # Комиссия (только после успешного открытия на Bybit)
                         commission = auto_bet * (COMMISSION_PERCENT / 100)
                         
@@ -2277,6 +2280,9 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     parse_mode="HTML"
                 )
                 return
+            
+            # Успешно открыто на Bybit - инкрементируем статистику
+            increment_bybit_opened()
         else:
             # Bybit не открыл позицию - НЕ создаём в боте
             logger.error(f"[HEDGE] ❌ Failed to open on Bybit - aborting trade")
@@ -2763,6 +2769,9 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
                     parse_mode="HTML"
                 )
                 return
+            
+            # Успешно открыто на Bybit - инкрементируем статистику
+            increment_bybit_opened()
         else:
             logger.error(f"[HEDGE] ❌ Failed to open on Bybit - aborting trade")
             await update.message.reply_text(
@@ -3559,12 +3568,17 @@ async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not reasons_text:
         reasons_text = "Нет отклонений\n"
     
+    bybit_opened = stats.get('bybit_opened', 0)
+    bybit_rate = (bybit_opened / accepted * 100) if accepted > 0 else 0
+    
     text = f"""<b>📊 Статистика сигналов</b>
 
 Проанализировано: {total}
 ✅ Принято: {accepted}
 ❌ Отклонено: {rejected}
 📈 Конверсия: {rate:.1f}%
+
+🔗 Было на Bybit: {bybit_opened} ({bybit_rate:.0f}%)
 
 <b>Причины отклонения:</b>
 {reasons_text}
