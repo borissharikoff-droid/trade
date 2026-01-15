@@ -1776,12 +1776,14 @@ AUTO_TRADE_MIN_BET = 10  # Минимальная ставка $
 AUTO_TRADE_MAX_BET = 500  # Максимальная ставка $
 AUTO_TRADE_START_BALANCE = 1500  # Стартовый баланс для авто-трейда
 
-def calculate_auto_bet(confidence: float, balance: float) -> tuple:
+def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0) -> tuple:
     """
-    Рассчитать размер ставки и плечо на основе уверенности
+    Рассчитать размер ставки и плечо на основе уверенности и волатильности (ATR)
     
-    Стратегия: консервативный размер для минимизации убытков,
-    но увеличиваем при высокой уверенности для максимизации профита.
+    Стратегия: 
+    - Базовый размер от уверенности
+    - Корректировка на волатильность (высокий ATR = меньше позиция)
+    - Профессиональный риск-менеджмент
     
     Returns:
         (bet_amount, leverage)
@@ -1794,7 +1796,7 @@ def calculate_auto_bet(confidence: float, balance: float) -> tuple:
     
     if confidence >= 85:
         # Очень высокая уверенность - максимальная ставка
-        bet_percent = 0.15  # 15% от баланса (было 25%)
+        bet_percent = 0.15  # 15% от баланса
     elif confidence >= 75:
         # Высокая уверенность
         bet_percent = 0.12  # 12% от баланса
@@ -1811,6 +1813,35 @@ def calculate_auto_bet(confidence: float, balance: float) -> tuple:
         # Низкая уверенность - минимальная ставка
         bet_percent = 0.03  # 3% от баланса
     
+    # === ATR-BASED ADJUSTMENT ===
+    # Корректируем размер на основе волатильности
+    # Высокая волатильность = уменьшаем позицию (больше риск)
+    # Низкая волатильность = можно брать больше
+    volatility_multiplier = 1.0
+    
+    if atr_percent > 0:
+        if atr_percent > 3.0:
+            # Очень высокая волатильность - уменьшаем на 40%
+            volatility_multiplier = 0.6
+            logger.info(f"[ATR] High volatility ({atr_percent:.2f}%) - reducing position by 40%")
+        elif atr_percent > 2.0:
+            # Высокая волатильность - уменьшаем на 25%
+            volatility_multiplier = 0.75
+            logger.info(f"[ATR] Elevated volatility ({atr_percent:.2f}%) - reducing position by 25%")
+        elif atr_percent > 1.5:
+            # Умеренная волатильность - уменьшаем на 15%
+            volatility_multiplier = 0.85
+        elif atr_percent < 0.5:
+            # Низкая волатильность - можно увеличить на 20%
+            volatility_multiplier = 1.2
+            logger.info(f"[ATR] Low volatility ({atr_percent:.2f}%) - increasing position by 20%")
+        elif atr_percent < 0.8:
+            # Низкая-нормальная волатильность - увеличить на 10%
+            volatility_multiplier = 1.1
+    
+    # Применяем корректировку
+    bet_percent = bet_percent * volatility_multiplier
+    
     bet = balance * bet_percent
     
     # Ограничения
@@ -1819,7 +1850,7 @@ def calculate_auto_bet(confidence: float, balance: float) -> tuple:
     # Не ставить больше 20% баланса за раз (защита от слива)
     bet = min(bet, balance * 0.20)
     
-    logger.info(f"[BET] Confidence={confidence}%, bet_percent={bet_percent*100}%, bet=${bet:.0f}")
+    logger.info(f"[BET] Confidence={confidence}%, ATR={atr_percent:.2f}%, vol_mult={volatility_multiplier}, bet=${bet:.0f}")
     
     return round(bet, 0), leverage
 
@@ -1930,12 +1961,16 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             potential_profit = ((entry - tp) / entry) * 100
         
-        logger.info(f"[SIGNAL] ✓ Готово к отправке: {symbol} {direction} entry={entry:.4f} WR={winrate}%")
+        # ATR для position sizing (волатильность)
+        atr_percent = best_signal.get('atr_percent', 0)
+        
+        logger.info(f"[SIGNAL] ✓ Готово к отправке: {symbol} {direction} entry={entry:.4f} WR={winrate}% ATR={atr_percent:.2f}%")
         signal_data = {
             'symbol': symbol, 'direction': direction, 'entry': entry,
             'sl': sl, 'tp': tp, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
             'winrate': winrate, 'tp1_percent': tp1_percent, 'tp2_percent': tp2_percent,
-            'tp3_percent': tp3_percent, 'sl_percent': sl_percent, 'potential_profit': potential_profit
+            'tp3_percent': tp3_percent, 'sl_percent': sl_percent, 'potential_profit': potential_profit,
+            'atr_percent': atr_percent  # Для ATR-based position sizing
         }
         
     except Exception as e:
@@ -1966,6 +2001,7 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     tp3_percent = signal_data['tp3_percent']
     sl_percent = signal_data['sl_percent']
     potential_profit = signal_data['potential_profit']
+    atr_percent = signal_data.get('atr_percent', 0)  # ATR для position sizing
     
     # ==================== АВТО-ТОРГОВЛЯ ====================
     auto_trade_executed = False  # Флаг для предотвращения дублирования сигнала
@@ -2002,8 +2038,8 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             elif auto_balance < AUTO_TRADE_MIN_BET:
                 logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
             else:
-                # Рассчитываем ставку и плечо на основе уверенности
-                auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance)
+                # Рассчитываем ставку и плечо на основе уверенности и волатильности (ATR)
+                auto_bet, auto_leverage = calculate_auto_bet(winrate, auto_balance, atr_percent)
                 
                 if auto_bet <= auto_balance:
                     ticker = symbol.split("/")[0]

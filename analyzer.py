@@ -150,6 +150,100 @@ class TechnicalIndicators:
         return np.mean(true_ranges[-period:])
     
     @staticmethod
+    def vwap(highs: List[float], lows: List[float], closes: List[float], volumes: List[float]) -> Tuple[float, float, float]:
+        """
+        VWAP (Volume Weighted Average Price) с bands
+        Институционалы торгуют от VWAP - цена выше = покупатели сильнее
+        Returns: (vwap, upper_band, lower_band)
+        """
+        if len(closes) < 10 or len(volumes) < 10:
+            return closes[-1] if closes else 0, 0, 0
+        
+        typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
+        
+        cumulative_tp_vol = 0
+        cumulative_vol = 0
+        vwap_values = []
+        
+        for tp, vol in zip(typical_prices, volumes):
+            cumulative_tp_vol += tp * vol
+            cumulative_vol += vol
+            if cumulative_vol > 0:
+                vwap_values.append(cumulative_tp_vol / cumulative_vol)
+        
+        if not vwap_values:
+            return closes[-1], 0, 0
+        
+        vwap = vwap_values[-1]
+        
+        # Standard deviation bands (1.5 std)
+        squared_diff = [(tp - vwap) ** 2 * vol for tp, vol in zip(typical_prices, volumes)]
+        variance = sum(squared_diff) / cumulative_vol if cumulative_vol > 0 else 0
+        std_dev = np.sqrt(variance)
+        
+        upper_band = vwap + std_dev * 1.5
+        lower_band = vwap - std_dev * 1.5
+        
+        return vwap, upper_band, lower_band
+    
+    @staticmethod
+    def find_fvg(highs: List[float], lows: List[float], closes: List[float], min_gap_percent: float = 0.15) -> List[Dict]:
+        """
+        Fair Value Gap (FVG) - Smart Money Concepts
+        Находит зоны imbalance куда цена стремится вернуться
+        
+        Bullish FVG: low[i] > high[i-2] (gap вверх)
+        Bearish FVG: high[i] < low[i-2] (gap вниз)
+        """
+        fvgs = []
+        
+        if len(highs) < 10:
+            return fvgs
+        
+        current_price = closes[-1]
+        
+        for i in range(2, len(highs)):
+            # Bullish FVG (gap up) - цена должна вернуться вниз заполнить
+            if lows[i] > highs[i-2]:
+                gap_size = lows[i] - highs[i-2]
+                gap_percent = gap_size / highs[i-2] * 100
+                
+                if gap_percent >= min_gap_percent:
+                    fvg = {
+                        'type': 'BULLISH',
+                        'top': lows[i],
+                        'bottom': highs[i-2],
+                        'midpoint': (lows[i] + highs[i-2]) / 2,
+                        'gap_percent': gap_percent,
+                        'filled': current_price <= lows[i],  # Заполнен если цена вернулась
+                        'distance_percent': (current_price - lows[i]) / current_price * 100 if current_price > lows[i] else 0
+                    }
+                    fvgs.append(fvg)
+            
+            # Bearish FVG (gap down) - цена должна вернуться вверх заполнить  
+            if highs[i] < lows[i-2]:
+                gap_size = lows[i-2] - highs[i]
+                gap_percent = gap_size / lows[i-2] * 100
+                
+                if gap_percent >= min_gap_percent:
+                    fvg = {
+                        'type': 'BEARISH',
+                        'top': lows[i-2],
+                        'bottom': highs[i],
+                        'midpoint': (lows[i-2] + highs[i]) / 2,
+                        'gap_percent': gap_percent,
+                        'filled': current_price >= highs[i],
+                        'distance_percent': (highs[i] - current_price) / current_price * 100 if current_price < highs[i] else 0
+                    }
+                    fvgs.append(fvg)
+        
+        # Сортируем по близости к текущей цене (незаполненные первыми)
+        unfilled = [f for f in fvgs if not f['filled']]
+        unfilled.sort(key=lambda x: abs(x['midpoint'] - current_price))
+        
+        return unfilled[-5:]  # Последние 5 незаполненных FVG
+    
+    @staticmethod
     def adx(highs: List[float], lows: List[float], closes: List[float], period: int = 14) -> float:
         """Average Directional Index - сила тренда"""
         if len(highs) < period + 1:
@@ -1330,6 +1424,171 @@ class MarketAnalyzer:
             'distance_to_resistance': ((nearest_resistance - current) / current * 100) if nearest_resistance else None
         }
     
+    async def get_vwap_analysis(self, symbol: str) -> Dict:
+        """
+        VWAP анализ - институциональный индикатор
+        Цена выше VWAP = покупатели контролируют, ниже = продавцы
+        """
+        klines = await self.get_klines(symbol, '1h', 24)  # Последние 24 часа
+        
+        if not klines or len(klines) < 10:
+            return {'vwap': 0, 'signal': 'NEUTRAL', 'strength': 0}
+        
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+        volumes = [float(k[5]) for k in klines]
+        
+        current = closes[-1]
+        vwap, upper_band, lower_band = TechnicalIndicators.vwap(highs, lows, closes, volumes)
+        
+        # Определяем сигнал
+        if current > upper_band:
+            signal = 'STRONG_BUY'
+            strength = min((current - upper_band) / upper_band * 100, 3)
+        elif current > vwap:
+            signal = 'BUY'
+            strength = (current - vwap) / vwap * 100
+        elif current < lower_band:
+            signal = 'STRONG_SELL'
+            strength = min((lower_band - current) / lower_band * 100, 3)
+        elif current < vwap:
+            signal = 'SELL'
+            strength = (vwap - current) / vwap * 100
+        else:
+            signal = 'NEUTRAL'
+            strength = 0
+        
+        distance_percent = (current - vwap) / vwap * 100
+        
+        logger.debug(f"[VWAP] {symbol}: VWAP=${vwap:.2f}, Current=${current:.2f}, Signal={signal}")
+        
+        return {
+            'vwap': vwap,
+            'upper_band': upper_band,
+            'lower_band': lower_band,
+            'current': current,
+            'signal': signal,
+            'strength': strength,
+            'distance_percent': distance_percent,
+            'above_vwap': current > vwap
+        }
+    
+    async def get_fvg_analysis(self, symbol: str) -> Dict:
+        """
+        Fair Value Gap (FVG) анализ - Smart Money Concepts
+        Находит imbalance зоны куда цена стремится вернуться
+        """
+        klines = await self.get_klines(symbol, '15m', 100)
+        
+        if not klines or len(klines) < 20:
+            return {'fvgs': [], 'nearest_fvg': None, 'signal': 'NEUTRAL'}
+        
+        highs = [float(k[2]) for k in klines]
+        lows = [float(k[3]) for k in klines]
+        closes = [float(k[4]) for k in klines]
+        current = closes[-1]
+        
+        fvgs = TechnicalIndicators.find_fvg(highs, lows, closes, min_gap_percent=0.1)
+        
+        if not fvgs:
+            return {'fvgs': [], 'nearest_fvg': None, 'signal': 'NEUTRAL'}
+        
+        # Находим ближайший незаполненный FVG
+        nearest = min(fvgs, key=lambda x: abs(x['midpoint'] - current))
+        
+        # Определяем сигнал на основе ближайшего FVG
+        signal = 'NEUTRAL'
+        if nearest['type'] == 'BULLISH' and current > nearest['top']:
+            # Цена выше bullish FVG - может вернуться вниз заполнить
+            if nearest['distance_percent'] < 1:  # Близко к FVG
+                signal = 'POTENTIAL_PULLBACK'
+        elif nearest['type'] == 'BEARISH' and current < nearest['bottom']:
+            # Цена ниже bearish FVG - может вернуться вверх заполнить
+            if nearest['distance_percent'] < 1:
+                signal = 'POTENTIAL_BOUNCE'
+        
+        # Если FVG близко и в направлении движения - усиливает сигнал
+        if nearest['type'] == 'BULLISH' and nearest['distance_percent'] < 0.5:
+            signal = 'BULLISH_FVG_NEARBY'  # Поддержка снизу
+        elif nearest['type'] == 'BEARISH' and nearest['distance_percent'] < 0.5:
+            signal = 'BEARISH_FVG_NEARBY'  # Сопротивление сверху
+        
+        logger.debug(f"[FVG] {symbol}: Found {len(fvgs)} FVGs, nearest: {nearest['type']} at ${nearest['midpoint']:.2f}")
+        
+        return {
+            'fvgs': fvgs,
+            'nearest_fvg': nearest,
+            'signal': signal,
+            'fvg_count': len(fvgs)
+        }
+    
+    def calculate_position_size_atr(self, balance: float, atr: float, entry: float, 
+                                     risk_percent: float = 1.0, leverage: int = 10) -> Dict:
+        """
+        ATR-based Position Sizing - профессиональный риск-менеджмент
+        
+        Логика: Размер позиции зависит от волатильности
+        Высокая волатильность (большой ATR) = меньшая позиция
+        Низкая волатильность = можно брать больше
+        
+        Args:
+            balance: Баланс пользователя
+            atr: Average True Range (в абсолютных единицах)
+            entry: Цена входа
+            risk_percent: Процент баланса который рискуем (default 1%)
+            leverage: Плечо
+        
+        Returns:
+            Dict с размером позиции и расчётами
+        """
+        if atr <= 0 or entry <= 0:
+            # Fallback на стандартный размер
+            return {
+                'position_size': balance * 0.1,
+                'risk_amount': balance * risk_percent / 100,
+                'sl_distance_percent': 0.5,
+                'method': 'FALLBACK'
+            }
+        
+        # Риск в долларах
+        risk_amount = balance * (risk_percent / 100)
+        
+        # ATR как процент от цены
+        atr_percent = (atr / entry) * 100
+        
+        # SL на расстоянии 1.5 ATR (стандарт)
+        sl_distance = atr * 1.5
+        sl_distance_percent = (sl_distance / entry) * 100
+        
+        # Размер позиции: Risk / (SL distance * Leverage)
+        # Формула: если SL сработает, потеряем ровно risk_amount
+        position_size = risk_amount / (sl_distance_percent / 100 * leverage)
+        
+        # Ограничения
+        min_size = 5  # Минимум $5
+        max_size = balance * 0.25  # Максимум 25% баланса
+        
+        position_size = max(min_size, min(position_size, max_size))
+        
+        # Рекомендуемый SL на основе ATR
+        recommended_sl_long = entry - sl_distance
+        recommended_sl_short = entry + sl_distance
+        
+        logger.debug(f"[ATR_SIZING] ATR={atr:.4f} ({atr_percent:.2f}%), Risk=${risk_amount:.2f}, Position=${position_size:.2f}")
+        
+        return {
+            'position_size': round(position_size, 2),
+            'risk_amount': risk_amount,
+            'atr': atr,
+            'atr_percent': atr_percent,
+            'sl_distance': sl_distance,
+            'sl_distance_percent': sl_distance_percent,
+            'recommended_sl_long': recommended_sl_long,
+            'recommended_sl_short': recommended_sl_short,
+            'method': 'ATR_BASED'
+        }
+    
     # ==================== ТЕХНИЧЕСКИЙ АНАЛИЗ ====================
     
     async def analyze_technical(self, symbol: str) -> Dict:
@@ -1701,16 +1960,19 @@ class MarketAnalyzer:
         btc_corr_task = self.get_btc_correlation(symbol)
         news_task = self.get_crypto_news_sentiment(symbol)
         manipulation_task = self.detect_manipulation(symbol)
+        vwap_task = self.get_vwap_analysis(symbol)  # Институциональный индикатор
+        fvg_task = self.get_fvg_analysis(symbol)    # Smart Money Concepts
         
         results = await asyncio.gather(
             tech_task, sentiment_task, price_task, mtf_task, div_task, sr_task,
             orderbook_task, oi_task, cvd_task, whale_task, liq_task, btc_corr_task,
-            news_task, manipulation_task
+            news_task, manipulation_task, vwap_task, fvg_task
         )
         
         tech, sentiment, current_price, mtf, divergence, sr_levels = results[:6]
         orderbook, oi_change, cvd, whale, liquidations, btc_corr = results[6:12]
         news_sentiment, manipulation = results[12:14]
+        vwap_data, fvg_data = results[14:16]
         
         # === ПРОВЕРКА МАНИПУЛЯЦИЙ (включена - блокируем только HIGH severity) ===
         if manipulation['severity'] == 'HIGH' and manipulation['recommendation'] == 'AVOID':
@@ -1817,6 +2079,38 @@ class MarketAnalyzer:
         elif btc_corr['impact'] == 'POSITIVE':
             market_context['insights'].append(f"📈 BTC растёт, альт коррелирует ({btc_corr['correlation']:.0%}) — попутный ветер")
             market_context['bullish_factors'] += 1
+        
+        # === VWAP (Институциональный индикатор) ===
+        if vwap_data.get('signal') == 'STRONG_BUY':
+            market_context['insights'].append(f"📊 VWAP: цена сильно выше ({vwap_data['distance_percent']:.1f}%) — быки доминируют")
+            market_context['bullish_factors'] += 2
+        elif vwap_data.get('signal') == 'BUY':
+            market_context['insights'].append(f"📊 VWAP: цена выше — покупатели контролируют")
+            market_context['bullish_factors'] += 1
+        elif vwap_data.get('signal') == 'STRONG_SELL':
+            market_context['warnings'].append(f"📊 VWAP: цена сильно ниже ({vwap_data['distance_percent']:.1f}%) — медведи доминируют")
+            market_context['bearish_factors'] += 2
+        elif vwap_data.get('signal') == 'SELL':
+            market_context['warnings'].append(f"📊 VWAP: цена ниже — продавцы контролируют")
+            market_context['bearish_factors'] += 1
+        
+        # === FVG (Fair Value Gap - Smart Money) ===
+        if fvg_data.get('nearest_fvg'):
+            nearest_fvg = fvg_data['nearest_fvg']
+            if fvg_data['signal'] == 'BULLISH_FVG_NEARBY':
+                market_context['insights'].append(f"🎯 FVG: бычья зона поддержки близко (${nearest_fvg['midpoint']:.2f})")
+                market_context['bullish_factors'] += 1
+            elif fvg_data['signal'] == 'BEARISH_FVG_NEARBY':
+                market_context['warnings'].append(f"🎯 FVG: медвежья зона сопротивления близко (${nearest_fvg['midpoint']:.2f})")
+                market_context['bearish_factors'] += 1
+            elif fvg_data['signal'] == 'POTENTIAL_PULLBACK':
+                market_context['warnings'].append(f"⚡ FVG: возможен откат к ${nearest_fvg['midpoint']:.2f}")
+            elif fvg_data['signal'] == 'POTENTIAL_BOUNCE':
+                market_context['insights'].append(f"⚡ FVG: возможен отскок от ${nearest_fvg['midpoint']:.2f}")
+        
+        # Сохраняем для использования в TP/SL
+        market_context['vwap'] = vwap_data
+        market_context['fvg'] = fvg_data
         
         # === NEWS SENTIMENT (ОСЛАБЛЕНО - общие новости не должны сильно влиять на конкретные монеты) ===
         news_bullish = news_sentiment.get('bullish_count', 0)
@@ -2099,10 +2393,14 @@ class MarketAnalyzer:
                 'liquidations': liquidations,
                 'btc_correlation': btc_corr,
                 'time': time_check,
-                'news': news_sentiment
+                'news': news_sentiment,
+                'vwap': vwap_data,
+                'fvg': fvg_data
             },
             'market_context': market_context,
             'reasoning': reasoning,
+            'atr': tech['indicators'].get('atr', 0),  # ATR для position sizing
+            'atr_percent': tech['indicators'].get('atr', 0) / current_price * 100 if current_price else 0,
             'timestamp': datetime.now()
         }
         

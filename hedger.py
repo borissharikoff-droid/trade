@@ -24,6 +24,93 @@ class BybitHedger:
     TESTNET_URL = "https://api-testnet.bybit.com"
     DEMO_URL = "https://api-demo.bybit.com"  # Отдельный домен для Demo Trading
     
+    # Bybit контракты: точность и минимумы для каждой монеты
+    # https://bybit-exchange.github.io/docs/v5/enum#symbol
+    BYBIT_SPECS = {
+        # Major
+        "BTC": {"precision": 3, "min_qty": 0.001},
+        "ETH": {"precision": 2, "min_qty": 0.01},
+        "SOL": {"precision": 1, "min_qty": 0.1},
+        "BNB": {"precision": 2, "min_qty": 0.01},
+        "XRP": {"precision": 0, "min_qty": 1},
+        "DOGE": {"precision": 0, "min_qty": 1},
+        "AVAX": {"precision": 1, "min_qty": 0.1},
+        "LINK": {"precision": 1, "min_qty": 0.1},
+        "MATIC": {"precision": 0, "min_qty": 1},
+        "POL": {"precision": 0, "min_qty": 1},
+        "ARB": {"precision": 0, "min_qty": 1},
+        "OP": {"precision": 1, "min_qty": 0.1},
+        "APT": {"precision": 1, "min_qty": 0.1},
+        "SUI": {"precision": 0, "min_qty": 1},
+        "SEI": {"precision": 0, "min_qty": 1},
+        "TIA": {"precision": 1, "min_qty": 0.1},
+        "INJ": {"precision": 1, "min_qty": 0.1},
+        "FTM": {"precision": 0, "min_qty": 1},
+        "NEAR": {"precision": 0, "min_qty": 1},
+        "ATOM": {"precision": 1, "min_qty": 0.1},
+        "DOT": {"precision": 1, "min_qty": 0.1},
+        "ADA": {"precision": 0, "min_qty": 1},
+        "LTC": {"precision": 2, "min_qty": 0.01},
+        # Memecoins
+        "PEPE": {"precision": 0, "min_qty": 1000},
+        "SHIB": {"precision": 0, "min_qty": 1000},
+        "FLOKI": {"precision": 0, "min_qty": 1},
+        "BONK": {"precision": 0, "min_qty": 1000},
+        "WIF": {"precision": 0, "min_qty": 1},
+        "MEME": {"precision": 0, "min_qty": 1},
+        "DEGEN": {"precision": 0, "min_qty": 1},
+        "FARTCOIN": {"precision": 0, "min_qty": 1},
+        "AI16Z": {"precision": 1, "min_qty": 0.1},
+        # NFT/Gaming
+        "BLUR": {"precision": 0, "min_qty": 1},
+        "IMX": {"precision": 0, "min_qty": 1},
+        "GALA": {"precision": 0, "min_qty": 1},
+        "AXS": {"precision": 1, "min_qty": 0.1},
+        "SAND": {"precision": 0, "min_qty": 1},
+        "MANA": {"precision": 0, "min_qty": 1},
+        # DeFi
+        "UNI": {"precision": 1, "min_qty": 0.1},
+        "AAVE": {"precision": 2, "min_qty": 0.01},
+        "MKR": {"precision": 3, "min_qty": 0.001},
+        "SNX": {"precision": 0, "min_qty": 1},
+        "CRV": {"precision": 0, "min_qty": 1},
+        "LDO": {"precision": 0, "min_qty": 1},
+        "PENDLE": {"precision": 0, "min_qty": 1},
+        "JUP": {"precision": 0, "min_qty": 1},
+        "JTO": {"precision": 1, "min_qty": 0.1},
+        # AI
+        "FET": {"precision": 0, "min_qty": 1},
+        "AGIX": {"precision": 0, "min_qty": 1},
+        "RNDR": {"precision": 1, "min_qty": 0.1},
+        "TAO": {"precision": 3, "min_qty": 0.001},
+        "FHE": {"precision": 0, "min_qty": 1},
+        "VIRTUAL": {"precision": 0, "min_qty": 1},
+        # L2/Infra
+        "STRK": {"precision": 0, "min_qty": 1},
+        "ZK": {"precision": 0, "min_qty": 1},
+        "MANTA": {"precision": 0, "min_qty": 1},
+        "TRX": {"precision": 0, "min_qty": 1},
+        "TON": {"precision": 1, "min_qty": 0.1},
+        "STX": {"precision": 0, "min_qty": 1},
+        # Others
+        "WLD": {"precision": 0, "min_qty": 1},
+        "PYTH": {"precision": 0, "min_qty": 1},
+        "ORDI": {"precision": 1, "min_qty": 0.1},
+        "SATS": {"precision": 0, "min_qty": 1000},
+        "1000SATS": {"precision": 0, "min_qty": 1},
+        "BOME": {"precision": 0, "min_qty": 1},
+        "ENA": {"precision": 0, "min_qty": 1},
+        "W": {"precision": 0, "min_qty": 1},
+        "AEVO": {"precision": 1, "min_qty": 0.1},
+        "ETHFI": {"precision": 1, "min_qty": 0.1},
+        "JELLYJELLY": {"precision": 0, "min_qty": 1},
+        "BARD": {"precision": 0, "min_qty": 1},
+        "XPL": {"precision": 0, "min_qty": 1},
+    }
+    
+    # Дефолтные спецификации для неизвестных монет
+    DEFAULT_SPEC = {"precision": 1, "min_qty": 1}
+    
     def __init__(self):
         self.api_key = os.getenv("BYBIT_API_KEY", "")
         self.api_secret = os.getenv("BYBIT_API_SECRET", "")
@@ -279,26 +366,10 @@ class BybitHedger:
         # Количество в базовой валюте
         qty = amount_usd / price
         
-        # Bybit контракты: точность и минимумы для каждой монеты
-        # https://bybit-exchange.github.io/docs/v5/enum#symbol
-        BYBIT_SPECS = {
-            "BTC": {"precision": 3, "min_qty": 0.001},
-            "ETH": {"precision": 2, "min_qty": 0.01},
-            "SOL": {"precision": 1, "min_qty": 0.1},
-            "BNB": {"precision": 2, "min_qty": 0.01},
-            "XRP": {"precision": 0, "min_qty": 1},
-            "DOGE": {"precision": 0, "min_qty": 1},
-            "AVAX": {"precision": 1, "min_qty": 0.1},
-            "LINK": {"precision": 1, "min_qty": 0.1},
-            "MATIC": {"precision": 0, "min_qty": 1},  # POL на Bybit
-            "ARB": {"precision": 0, "min_qty": 1},
-            "OP": {"precision": 1, "min_qty": 0.1},
-            "APT": {"precision": 1, "min_qty": 0.1},
-        }
-        
-        # Определяем спецификации для монеты
+        # Определяем спецификации для монеты из класса
         coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
-        spec = BYBIT_SPECS.get(coin, {"precision": 1, "min_qty": 0.1})
+        spec = self.BYBIT_SPECS.get(coin, self.DEFAULT_SPEC)
+        logger.info(f"[HEDGE] Coin {coin}: precision={spec['precision']}, min_qty={spec['min_qty']}")
         
         qty = round(qty, spec["precision"])
         min_qty = spec["min_qty"]
@@ -415,22 +486,9 @@ class BybitHedger:
         # Сторона для закрытия (противоположная)
         close_side = "Sell" if direction == "LONG" else "Buy"
         
-        # Определяем precision для монеты
+        # Определяем precision для монеты из класса
         coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
-        BYBIT_SPECS = {
-            "BTC": {"precision": 3, "min_qty": 0.001},
-            "ETH": {"precision": 2, "min_qty": 0.01},
-            "SOL": {"precision": 1, "min_qty": 0.1},
-            "BNB": {"precision": 2, "min_qty": 0.01},
-            "XRP": {"precision": 0, "min_qty": 1},
-            "DOGE": {"precision": 0, "min_qty": 1},
-            "AVAX": {"precision": 1, "min_qty": 0.1},
-            "LINK": {"precision": 1, "min_qty": 0.1},
-            "ARB": {"precision": 0, "min_qty": 1},
-            "OP": {"precision": 1, "min_qty": 0.1},
-            "APT": {"precision": 1, "min_qty": 0.1},
-        }
-        spec = BYBIT_SPECS.get(coin, {"precision": 2, "min_qty": 0.01})
+        spec = self.BYBIT_SPECS.get(coin, self.DEFAULT_SPEC)
         precision = spec["precision"]
         min_qty = spec["min_qty"]
         
