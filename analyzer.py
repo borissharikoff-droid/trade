@@ -2332,17 +2332,23 @@ class MarketAnalyzer:
             return None
         
         # Confidence с учётом силы контекста и MTF
-        # Новая формула: базовая уверенность зависит от силы score и факторов
-        score_strength = abs(total_score - 0.5) * 4  # 0.55 -> 0.20, 0.60 -> 0.40, 0.70 -> 0.80
+        # Формула: реалистичные значения 50-90%
+        # score 0.55 -> +10%, 0.60 -> +20%, 0.65 -> +30%, 0.70 -> +40%
+        score_strength = abs(total_score - 0.5) * 2  # Уменьшил множитель с 4 до 2
         factors_diff = abs(bf - bef)
-        factors_bonus = min(0.3, factors_diff * 0.05)  # До 30% за перевес факторов
+        factors_bonus = min(0.15, factors_diff * 0.02)  # До 15% за перевес факторов
         
-        base_confidence = 0.30 + score_strength + factors_bonus  # Базовая 30% + score + факторы
-        context_bonus = 0.15 if "STRONG" in market_context['bias'] else 0.05
-        mtf_bonus = 0.20 if mtf['aligned'] else (0.10 if mtf['confluence'] != "NONE" else 0)
-        div_bonus = 0.10 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
+        # База 40% + score (до 40%) + факторы (до 15%) = макс 95% без бонусов
+        base_confidence = 0.40 + score_strength + factors_bonus
         
-        confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
+        # Бонусы за подтверждения (уменьшены)
+        context_bonus = 0.10 if "STRONG" in market_context['bias'] else 0.03
+        mtf_bonus = 0.10 if mtf['aligned'] else (0.05 if mtf['confluence'] != "NONE" else 0)
+        div_bonus = 0.05 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
+        
+        confidence = min(0.92, base_confidence + context_bonus + mtf_bonus + div_bonus)
+        
+        logger.info(f"[ANALYZER] Confidence: base={base_confidence:.0%} (score={score_strength:.0%}, factors={factors_bonus:.0%}) + ctx={context_bonus:.0%} + mtf={mtf_bonus:.0%} + div={div_bonus:.0%} = {confidence:.0%}")
         
         # === ПОРОГ УВЕРЕННОСТИ: минимум 50% для качественных сигналов ===
         if confidence < 0.50:
