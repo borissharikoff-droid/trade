@@ -1078,14 +1078,14 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 Статус: {status}
 Сделок сегодня: {today_count}/{max_daily}
-Мин. успешность: {min_wr}%
+Успешность: {min_wr}%
 
 <i>Бот автоматически входит в сделки по сигналам.</i>"""
     
     keyboard = [
         [InlineKeyboardButton(f"{'🔴 Выключить' if auto_enabled else '🟢 Включить'}", callback_data="auto_trade_toggle")],
         [InlineKeyboardButton(f"📊 Сделок/день: {max_daily}", callback_data="auto_trade_daily_menu")],
-        [InlineKeyboardButton(f"📈 Мин. успешность: {min_wr}%", callback_data="auto_trade_winrate_menu")],
+        [InlineKeyboardButton(f"📈 Успешность: {min_wr}%", callback_data="auto_trade_winrate_menu")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
@@ -1157,11 +1157,11 @@ async def auto_trade_winrate_menu(update: Update, context: ContextTypes.DEFAULT_
     user = get_user(update.effective_user.id)
     current = user.get('auto_trade_min_winrate', 70)
     
-    text = f"""<b>📈 Минимальная успешность</b>
+    text = f"""<b>📈 Успешность</b>
 
 Текущее: {current}%
 
-Брать сделки с успешностью от:"""
+Торговать сигналы от:"""
     
     keyboard = [
         [InlineKeyboardButton("60%", callback_data="auto_wr_60"),
@@ -1178,7 +1178,7 @@ async def auto_trade_winrate_menu(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def auto_trade_set_winrate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Установить минимальную успешность"""
+    """Установить успешность для авто-трейда"""
     query = update.callback_query
     await query.answer()
     
@@ -2150,10 +2150,9 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                             positions_cache[AUTO_TRADE_USER_ID].append(position)
                         
                         # Уведомление с тремя TP
-                        auto_msg = f"""<b>🤖 Авто-сделка</b>
+                        auto_msg = f"""<b>🤖 {signal_confidence}% | Авто-сделка открыта</b>
 
 {ticker} | {direction} | ${auto_bet:.0f} | x{auto_leverage}
-Уверенность: {winrate}%
 
 <b>Вход:</b> {format_price(entry)}
 
