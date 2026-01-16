@@ -3943,6 +3943,63 @@ async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except (ValueError, IndexError) as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
+async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Полный сброс ВСЕХ данных: пользователи, позиции, история, кэши"""
+    user_id = update.effective_user.id
+
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ закрыт")
+        return
+
+    # Требуем подтверждение
+    if not context.args or context.args[0].lower() != "confirm":
+        await update.message.reply_text(
+            "⚠️ <b>ВНИМАНИЕ!</b>\n\n"
+            "Эта команда удалит ВСЁ:\n"
+            "• Всех пользователей\n"
+            "• Все позиции\n"
+            "• Всю историю сделок\n"
+            "• Все алерты\n"
+            "• Все кэши\n\n"
+            "Для подтверждения напишите:\n"
+            "<code>/resetall confirm</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        # Очищаем все таблицы
+        run_sql("DELETE FROM positions")
+        run_sql("DELETE FROM history")
+        run_sql("DELETE FROM users")
+        run_sql("DELETE FROM alerts")
+        
+        # Очищаем кэши
+        positions_cache.clear()
+        users_cache.clear()
+        
+        # Сбрасываем статистику сигналов
+        from analyzer import reset_signal_stats
+        reset_signal_stats()
+        
+        await update.message.reply_text(
+            "✅ <b>Полный сброс выполнен!</b>\n\n"
+            "🗑 Удалено:\n"
+            "• Все пользователи\n"
+            "• Все позиции\n"
+            "• Вся история сделок\n"
+            "• Все алерты\n"
+            "• Все кэши\n"
+            "• Статистика сигналов\n\n"
+            "Бот готов к работе с нуля.",
+            parse_mode="HTML"
+        )
+        logger.info(f"[ADMIN] Full reset executed by user {user_id}")
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        logger.error(f"[ADMIN] Reset error: {e}")
+
 # ==================== РЕФЕРАЛЬНАЯ КОМАНДА ====================
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Реферальная ссылка"""
@@ -4125,6 +4182,7 @@ def main() -> None:
     app.add_handler(CommandHandler("autotrade", autotrade_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("reset", reset_all))
+    app.add_handler(CommandHandler("resetall", reset_everything))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("ref", referral_cmd))
     app.add_handler(CommandHandler("alert", alert_cmd))
