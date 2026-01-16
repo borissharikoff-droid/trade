@@ -465,18 +465,53 @@ class MarketAnalyzer:
         return []
     
     async def get_price(self, symbol: str) -> float:
-        """Текущая цена"""
+        """Текущая цена - пробуем несколько источников"""
+        binance_symbol = symbol.replace('/', '')
+        
+        # 1. Binance Spot
         try:
-            binance_symbol = symbol.replace('/', '')
             if self.client:
                 ticker = self.client.get_symbol_ticker(symbol=binance_symbol)
-                return float(ticker['price'])
+                price = float(ticker['price'])
+                if price > 0:
+                    return price
         except Exception as e:
-            logger.warning(f"[PRICE] Ошибка: {e}")
+            logger.warning(f"[PRICE] Binance Spot error for {symbol}: {e}")
         
-            # Fallback
+        # 2. Binance Futures
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={binance_symbol}"
+            data = await self._fetch_json(url, f"price_futures_{binance_symbol}")
+            if data and 'price' in data:
+                price = float(data['price'])
+                if price > 0:
+                    return price
+        except Exception as e:
+            logger.warning(f"[PRICE] Binance Futures error for {symbol}: {e}")
+        
+        # 3. Bybit (через hedger если доступен)
+        try:
+            from hedger import hedger
+            if hedger and hedger.enabled:
+                bybit_symbol = binance_symbol
+                result = await hedger._request("GET", "/v5/market/tickers", {"category": "linear", "symbol": bybit_symbol})
+                if result and result.get('list'):
+                    price = float(result['list'][0].get('lastPrice', 0))
+                    if price > 0:
+                        logger.info(f"[PRICE] Got {symbol} from Bybit: ${price}")
+                        return price
+        except Exception as e:
+            logger.warning(f"[PRICE] Bybit error for {symbol}: {e}")
+        
+        # 4. Fallback только для основных монет (НЕ возвращаем дефолт для неизвестных!)
         defaults = {'BTC/USDT': 95000, 'ETH/USDT': 3300, 'BNB/USDT': 700, 'SOL/USDT': 200}
-        return defaults.get(symbol, 1000)
+        if symbol in defaults:
+            logger.warning(f"[PRICE] Using fallback for {symbol}: ${defaults[symbol]}")
+            return defaults[symbol]
+        
+        # Для неизвестных монет возвращаем 0 - сигнал не будет создан
+        logger.error(f"[PRICE] ❌ Cannot get price for {symbol}! Returning 0")
+        return 0
     
     async def get_funding_rate(self, symbol: str) -> float:
         """Funding Rate с Binance Futures"""
@@ -1974,6 +2009,13 @@ class MarketAnalyzer:
         news_sentiment, manipulation = results[12:14]
         vwap_data, fvg_data = results[14:16]
         
+        # === ПРОВЕРКА ЦЕНЫ (критически важно!) ===
+        if not current_price or current_price <= 0:
+            logger.error(f"[ANALYZER] ❌ Не удалось получить цену для {symbol}! Пропуск сигнала.")
+            signal_stats['rejected'] += 1
+            signal_stats['reasons']['no_price'] = signal_stats['reasons'].get('no_price', 0) + 1
+            return None
+        
         # === ПРОВЕРКА МАНИПУЛЯЦИЙ (включена - блокируем только HIGH severity) ===
         if manipulation['severity'] == 'HIGH' and manipulation['recommendation'] == 'AVOID':
             logger.warning(f"[ANALYZER] ❌ Высокий риск манипуляций - пропуск сигнала")
@@ -2427,6 +2469,12 @@ class MarketAnalyzer:
         """
         
         current_price = analysis.get('current_price', await self.get_price(symbol))
+        
+        # Критическая проверка цены!
+        if not current_price or current_price <= 0:
+            logger.error(f"[ENTRY_CALC] ❌ Invalid price for {symbol}: {current_price}")
+            return None
+        
         confidence = analysis.get('confidence', 0.5)
         sr_levels = analysis.get('market_context', {}).get('sr_levels', {})
         advanced_data = analysis.get('advanced_data', {})

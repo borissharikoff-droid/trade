@@ -3011,21 +3011,33 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                         
                         # Получаем реальный PnL с Bybit
+                        real_pnl = pos['pnl']
+                        exit_price = pos['current']
+                        reason = "CLOSED"
+                        
                         try:
                             closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
                             if closed_trades:
-                                real_pnl = closed_trades[0]['closed_pnl']
-                                exit_price = closed_trades[0]['exit_price']
-                                reason = "TP" if real_pnl > 0 else "SL"
-                            else:
-                                real_pnl = pos['pnl']
-                                exit_price = pos['current']
-                                reason = "CLOSED"
+                                bybit_pnl = closed_trades[0]['closed_pnl']
+                                bybit_exit = closed_trades[0]['exit_price']
+                                bybit_time = closed_trades[0].get('updated_time', 0)
+                                
+                                # Валидация: PnL должен быть реалистичным
+                                max_reasonable_pnl = pos['amount'] * LEVERAGE * 0.5
+                                current_time_ms = int(asyncio.get_event_loop().time() * 1000)
+                                time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
+                                
+                                logger.info(f"[BYBIT_SYNC] Bybit data: pnl=${bybit_pnl:.2f}, time_diff={time_diff:.0f}s, max=${max_reasonable_pnl:.2f}")
+                                
+                                if abs(bybit_pnl) <= max_reasonable_pnl and time_diff < 120:  # 2 мин для sync
+                                    real_pnl = bybit_pnl
+                                    exit_price = bybit_exit
+                                    reason = "TP" if real_pnl > 0 else "SL"
+                                    logger.info(f"[BYBIT_SYNC] Using Bybit PnL: ${real_pnl:.2f}")
+                                else:
+                                    logger.warning(f"[BYBIT_SYNC] Bybit PnL ${bybit_pnl:.2f} seems wrong, using local ${pos['pnl']:.2f}")
                         except Exception as e:
                             logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
-                            real_pnl = pos['pnl']
-                            exit_price = pos['current']
-                            reason = "CLOSED"
                         
                         # Возвращаем деньги пользователю
                         returned = pos['amount'] + real_pnl
@@ -3154,9 +3166,26 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 try:
                                     closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
                                     if closed_trades:
-                                        real_pnl = closed_trades[0]['closed_pnl']
-                                        exit_price = closed_trades[0]['exit_price']
-                                        logger.info(f"[EARLY_CLOSE] Real Bybit PnL: ${real_pnl:.2f} (local was ${pos['pnl']:.2f})")
+                                        bybit_pnl = closed_trades[0]['closed_pnl']
+                                        bybit_exit = closed_trades[0]['exit_price']
+                                        bybit_qty = closed_trades[0].get('qty', 0)
+                                        bybit_time = closed_trades[0].get('updated_time', 0)
+                                        
+                                        # Валидация: PnL должен быть реалистичным для размера позиции
+                                        # Макс PnL = amount * leverage (при 100% движении цены)
+                                        max_reasonable_pnl = pos['amount'] * LEVERAGE * 0.5  # 50% от макс
+                                        current_time_ms = int(asyncio.get_event_loop().time() * 1000)
+                                        time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
+                                        
+                                        logger.info(f"[EARLY_CLOSE] Bybit data: pnl=${bybit_pnl:.2f}, qty={bybit_qty}, time_diff={time_diff:.0f}s, max_reasonable=${max_reasonable_pnl:.2f}")
+                                        
+                                        # Используем Bybit PnL только если он разумный и свежий
+                                        if abs(bybit_pnl) <= max_reasonable_pnl and time_diff < 60:
+                                            real_pnl = bybit_pnl
+                                            exit_price = bybit_exit
+                                            logger.info(f"[EARLY_CLOSE] Using Bybit PnL: ${real_pnl:.2f}")
+                                        else:
+                                            logger.warning(f"[EARLY_CLOSE] Bybit PnL ${bybit_pnl:.2f} seems wrong (max=${max_reasonable_pnl:.2f}, time={time_diff:.0f}s), using local ${pos['pnl']:.2f}")
                                 except Exception as e:
                                     logger.warning(f"[EARLY_CLOSE] Failed to get real PnL: {e}")
                             else:
@@ -3408,9 +3437,24 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                             try:
                                 closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
                                 if closed_trades:
-                                    real_pnl = closed_trades[0]['closed_pnl']
-                                    exit_price = closed_trades[0]['exit_price']
-                                    logger.info(f"[TP3/SL] Real Bybit PnL: ${real_pnl:.2f} (local was ${pos['pnl']:.2f})")
+                                    bybit_pnl = closed_trades[0]['closed_pnl']
+                                    bybit_exit = closed_trades[0]['exit_price']
+                                    bybit_qty = closed_trades[0].get('qty', 0)
+                                    bybit_time = closed_trades[0].get('updated_time', 0)
+                                    
+                                    # Валидация: PnL должен быть реалистичным
+                                    max_reasonable_pnl = pos['amount'] * LEVERAGE * 0.5
+                                    current_time_ms = int(asyncio.get_event_loop().time() * 1000)
+                                    time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
+                                    
+                                    logger.info(f"[TP3/SL] Bybit data: pnl=${bybit_pnl:.2f}, qty={bybit_qty}, time_diff={time_diff:.0f}s")
+                                    
+                                    if abs(bybit_pnl) <= max_reasonable_pnl and time_diff < 60:
+                                        real_pnl = bybit_pnl
+                                        exit_price = bybit_exit
+                                        logger.info(f"[TP3/SL] Using Bybit PnL: ${real_pnl:.2f}")
+                                    else:
+                                        logger.warning(f"[TP3/SL] Bybit PnL ${bybit_pnl:.2f} seems wrong, using local ${pos['pnl']:.2f}")
                             except Exception as e:
                                 logger.warning(f"[TP3/SL] Failed to get real PnL: {e}")
                         else:
