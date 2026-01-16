@@ -3139,24 +3139,38 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     # СНАЧАЛА закрываем на Bybit
                     hedging_enabled = await is_hedging_enabled()
+                    real_pnl = pos['pnl']  # Default - локальный PnL
+                    exit_price = pos['current']
+                    
                     if hedging_enabled:
                         bybit_qty = pos.get('bybit_qty', 0)
                         if bybit_qty > 0:
                             hedge_result = await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
                             if hedge_result:
                                 logger.info(f"[EARLY_CLOSE] Bybit closed {ticker} qty={bybit_qty}")
+                                
+                                # Получаем РЕАЛЬНЫЙ PnL с Bybit
+                                await asyncio.sleep(0.5)  # Даём Bybit время обновить данные
+                                try:
+                                    closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
+                                    if closed_trades:
+                                        real_pnl = closed_trades[0]['closed_pnl']
+                                        exit_price = closed_trades[0]['exit_price']
+                                        logger.info(f"[EARLY_CLOSE] Real Bybit PnL: ${real_pnl:.2f} (local was ${pos['pnl']:.2f})")
+                                except Exception as e:
+                                    logger.warning(f"[EARLY_CLOSE] Failed to get real PnL: {e}")
                             else:
                                 logger.error(f"[EARLY_CLOSE] ❌ Failed to close on Bybit - skipping")
                                 continue  # Пропускаем - попробуем в следующем цикле
                     
-                    # Возвращаем деньги пользователю
-                    returned = pos['amount'] + pos['pnl']
+                    # Возвращаем деньги пользователю (с РЕАЛЬНЫМ PnL)
+                    returned = pos['amount'] + real_pnl
                     user['balance'] += returned
-                    user['total_profit'] += pos['pnl']
+                    user['total_profit'] += real_pnl
                     save_user(user_id)
                     
-                    # Закрываем в БД
-                    db_close_position(pos['id'], pos['current'], pos['pnl'], 'EARLY_CLOSE')
+                    # Закрываем в БД с реальными данными
+                    db_close_position(pos['id'], exit_price, real_pnl, 'EARLY_CLOSE')
                     # Явно удаляем из кэша по ID
                     pos_id_to_remove = pos['id']
                     if user_id in positions_cache:
@@ -3211,17 +3225,18 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                             flip_opened = True
                             logger.info(f"[FLIP] User {user_id}: {ticker} {old_direction} -> {flip_direction} (${old_amount})")
                     
-                    # Уведомление о факте закрытия (и флипа)
-                    pnl_sign = "+" if pos['pnl'] >= 0 else ""
+                    # Уведомление о факте закрытия (и флипа) - используем РЕАЛЬНЫЙ PnL
+                    pnl_sign = "+" if real_pnl >= 0 else ""
+                    pnl_emoji = "✅" if real_pnl >= 0 else "📉"
                     if flip_opened:
                         msg = (f"<b>🔄 Переворот позиции</b>\n\n"
-                               f"{ticker} | {old_direction} закрыт {pnl_sign}${pos['pnl']:.0f}\n"
+                               f"{ticker} | {old_direction} закрыт {pnl_sign}${real_pnl:.2f}\n"
                                f"Открыт {flip_direction} @ {flip_entry:.2f}\n"
                                f"{adjustment['reason']}\n\n"
                                f"💰 ${user['balance']:.0f}")
                     else:
                         msg = (f"<b>🔒 Авто-закрытие</b>\n\n"
-                               f"{ticker} | {pnl_sign}${pos['pnl']:.0f}\n"
+                               f"{pnl_emoji} {ticker} | {pnl_sign}${real_pnl:.2f}\n"
                                f"{adjustment['reason']}\n\n"
                                f"💰 ${user['balance']:.0f}")
                     
@@ -3232,7 +3247,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     
                     try:
                         await context.bot.send_message(user_id, msg, parse_mode="HTML", reply_markup=nav_keyboard)
-                        logger.info(f"[EARLY_CLOSE] User {user_id} {ticker}: ${pos['pnl']:.2f}, flip={flip_opened}")
+                        logger.info(f"[EARLY_CLOSE] User {user_id} {ticker}: Real PnL=${real_pnl:.2f} (local was ${pos['pnl']:.2f}), flip={flip_opened}")
                     except Exception as e:
                         logger.error(f"[EARLY_CLOSE] Notify error: {e}")
                     continue  # Переходим к следующей позиции
@@ -3377,6 +3392,9 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
             
             # === TP3 или SL: Полное закрытие ===
             if hit_tp3 or hit_sl:
+                real_pnl = pos['pnl']  # Default - локальный PnL
+                exit_price = pos['current']
+                
                 # СНАЧАЛА закрываем на Bybit
                 if await is_hedging_enabled():
                     bybit_qty = pos.get('bybit_qty', 0)
@@ -3384,43 +3402,54 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                         hedge_result = await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
                         if hedge_result:
                             logger.info(f"[HEDGE] Auto-closed position {pos['id']} on Bybit (qty={bybit_qty})")
+                            
+                            # Получаем РЕАЛЬНЫЙ PnL с Bybit
+                            await asyncio.sleep(0.5)
+                            try:
+                                closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
+                                if closed_trades:
+                                    real_pnl = closed_trades[0]['closed_pnl']
+                                    exit_price = closed_trades[0]['exit_price']
+                                    logger.info(f"[TP3/SL] Real Bybit PnL: ${real_pnl:.2f} (local was ${pos['pnl']:.2f})")
+                            except Exception as e:
+                                logger.warning(f"[TP3/SL] Failed to get real PnL: {e}")
                         else:
                             logger.error(f"[HEDGE] ❌ Failed to auto-close on Bybit - skipping local close")
                             continue  # Пропускаем - попробуем в следующем цикле
                 
-                returned = pos['amount'] + pos['pnl']
+                returned = pos['amount'] + real_pnl
                 user['balance'] += returned
-                user['total_profit'] += pos['pnl']
+                user['total_profit'] += real_pnl
                 save_user(user_id)
                 
                 reason = 'TP3' if hit_tp3 else 'SL'
-                db_close_position(pos['id'], pos['current'], pos['pnl'], reason)
+                db_close_position(pos['id'], exit_price, real_pnl, reason)
                 # Явно удаляем из кэша по ID
                 pos_id_to_remove = pos['id']
                 if user_id in positions_cache:
                     positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
                 
-                pnl_abs = abs(pos['pnl'])
+                pnl_abs = abs(real_pnl)
                 
                 if hit_tp3:
                     text = f"""<b>🎯 TP3 Runner</b>
 
-{ticker} | +${pnl_abs:.0f}
-{format_price(pos['entry'])} → {format_price(pos['current'])}
+{ticker} | +${pnl_abs:.2f}
+{format_price(pos['entry'])} → {format_price(exit_price)}
 Все цели достигнуты!
 
 💰 ${user['balance']:.0f}"""
-                elif pos['pnl'] >= 0:
+                elif real_pnl >= 0:
                     text = f"""<b>➖ Безубыток</b>
 
-{ticker} | ${pos['pnl']:.0f}
+{ticker} | ${real_pnl:.2f}
 Защитный стоп сработал.
 
 💰 ${user['balance']:.0f}"""
                 else:
                     text = f"""<b>📉 Stop Loss</b>
 
-{ticker} | -${pnl_abs:.0f}
+{ticker} | -${pnl_abs:.2f}
 Стоп отработал.
 
 💰 ${user['balance']:.0f}"""
@@ -3431,7 +3460,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
                     )
-                    logger.info(f"[AUTO-CLOSE] User {user_id} {reason} {ticker}: ${pos['pnl']:.2f}, Balance: ${user['balance']:.2f}")
+                    logger.info(f"[AUTO-CLOSE] User {user_id} {reason} {ticker}: Real PnL=${real_pnl:.2f}, Balance: ${user['balance']:.2f}")
                 except Exception as e:
                     logger.error(f"[AUTO-CLOSE] Failed to notify user {user_id}: {e}")
 
