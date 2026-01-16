@@ -2238,69 +2238,73 @@ class MarketAnalyzer:
                       context_score * context_weight +
                       mtf['score'] * mtf_weight)
         
-        # === СБАЛАНСИРОВАННЫЕ ПОРОГИ: качество + достаточное количество ===
-        if total_score > 0.51:
+        # === СТРОГИЕ ПОРОГИ: только качественные сигналы ===
+        if total_score > 0.55:
             direction = "LONG"
-        elif total_score < 0.49:
+        elif total_score < 0.45:
             direction = "SHORT"
         else:
-            logger.info(f"[ANALYZER] ❌ Недостаточно сильный сигнал (score={total_score:.2f}, требуется >0.51 или <0.49)")
+            logger.info(f"[ANALYZER] ❌ Недостаточно сильный сигнал (score={total_score:.2f}, требуется >0.55 или <0.45)")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['weak_score'] += 1
             return None
         
-        # === ПРОВЕРКА СОГЛАСОВАННОСТИ (отключена - слишком много блокировок) ===
-        # Контекст теперь только влияет на confidence через context_score
-        # if direction == "LONG" and market_context['bias'] == "STRONG_SHORT":
-        #     logger.info(f"[ANALYZER] ❌ Конфликт: сигнал LONG, но контекст сильно медвежий ({market_context['bias']})")
-        #     signal_stats['rejected'] += 1
-        #     signal_stats['reasons']['context_conflict'] += 1
-        #     return None
-        # if direction == "SHORT" and market_context['bias'] == "STRONG_LONG":
-        #     logger.info(f"[ANALYZER] ❌ Конфликт: сигнал SHORT, но контекст сильно бычий ({market_context['bias']})")
-        #     signal_stats['rejected'] += 1
-        #     signal_stats['reasons']['context_conflict'] += 1
-        #     return None
+        # === ПРОВЕРКА СОГЛАСОВАННОСТИ: сигнал должен совпадать с контекстом ===
+        if direction == "LONG" and market_context['bias'] == "STRONG_SHORT":
+            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал LONG, но контекст сильно медвежий ({market_context['bias']})")
+            signal_stats['rejected'] += 1
+            signal_stats['reasons']['context_conflict'] += 1
+            return None
+        if direction == "SHORT" and market_context['bias'] == "STRONG_LONG":
+            logger.info(f"[ANALYZER] ❌ Конфликт: сигнал SHORT, но контекст сильно бычий ({market_context['bias']})")
+            signal_stats['rejected'] += 1
+            signal_stats['reasons']['context_conflict'] += 1
+            return None
         
-        # === MTF ПОДТВЕРЖДЕНИЕ (отключено - слишком много блокировок) ===
-        # MTF теперь только влияет на confidence, не блокирует
-        # if mtf['confluence'] != "NONE":
-        #     if direction == "LONG" and mtf['confluence'] == "BEARISH":
-        #         logger.info(f"[ANALYZER] ❌ MTF не подтверждает LONG (confluence={mtf['confluence']})")
-        #         signal_stats['rejected'] += 1
-        #         signal_stats['reasons']['mtf_conflict'] += 1
-        #         return None
-        #     if direction == "SHORT" and mtf['confluence'] == "BULLISH":
-        #         logger.info(f"[ANALYZER] ❌ MTF не подтверждает SHORT (confluence={mtf['confluence']})")
-        #         signal_stats['rejected'] += 1
-        #         signal_stats['reasons']['mtf_conflict'] += 1
-        #         return None
+        # === MTF ПОДТВЕРЖДЕНИЕ: таймфреймы должны совпадать ===
+        if mtf['confluence'] != "NONE":
+            if direction == "LONG" and mtf['confluence'] == "BEARISH":
+                logger.info(f"[ANALYZER] ❌ MTF не подтверждает LONG (confluence={mtf['confluence']})")
+                signal_stats['rejected'] += 1
+                signal_stats['reasons']['mtf_conflict'] += 1
+                return None
+            if direction == "SHORT" and mtf['confluence'] == "BULLISH":
+                logger.info(f"[ANALYZER] ❌ MTF не подтверждает SHORT (confluence={mtf['confluence']})")
+                signal_stats['rejected'] += 1
+                signal_stats['reasons']['mtf_conflict'] += 1
+                return None
         
-        # === МИНИМУМ ФАКТОРОВ (сильно смягчено - допускаем небольшой дисбаланс) ===
+        # === МИНИМУМ ФАКТОРОВ: нужен перевес в сторону сигнала ===
         bf = market_context['bullish_factors']
         bef = market_context['bearish_factors']
-        # Блокируем только при СИЛЬНОМ дисбалансе (разница > 3)
-        if direction == "LONG" and bf < bef - 3:
-            logger.info(f"[ANALYZER] ❌ Сильный дисбаланс против LONG (bull={bf}, bear={bef})")
+        # Блокируем при дисбалансе против сигнала (разница > 2)
+        if direction == "LONG" and bf < bef - 2:
+            logger.info(f"[ANALYZER] ❌ Дисбаланс против LONG (bull={bf}, bear={bef})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_factors'] += 1
             return None
-        if direction == "SHORT" and bef < bf - 3:
-            logger.info(f"[ANALYZER] ❌ Сильный дисбаланс против SHORT (bull={bf}, bear={bef})")
+        if direction == "SHORT" and bef < bf - 2:
+            logger.info(f"[ANALYZER] ❌ Дисбаланс против SHORT (bull={bf}, bear={bef})")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_factors'] += 1
             return None
         
-        # Confidence с учётом силы контекста и MTF (увеличен базовый бонус)
-        base_confidence = abs(total_score - 0.5) * 2 + 0.15  # Добавлен базовый бонус 15%
-        context_bonus = 0.2 if "STRONG" in market_context['bias'] else 0.1
-        mtf_bonus = 0.15 if mtf['aligned'] else (0.05 if mtf['confluence'] != "NONE" else 0)
-        div_bonus = 0.15 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
+        # Confidence с учётом силы контекста и MTF
+        # Новая формула: базовая уверенность зависит от силы score и факторов
+        score_strength = abs(total_score - 0.5) * 4  # 0.55 -> 0.20, 0.60 -> 0.40, 0.70 -> 0.80
+        factors_diff = abs(bf - bef)
+        factors_bonus = min(0.3, factors_diff * 0.05)  # До 30% за перевес факторов
+        
+        base_confidence = 0.30 + score_strength + factors_bonus  # Базовая 30% + score + факторы
+        context_bonus = 0.15 if "STRONG" in market_context['bias'] else 0.05
+        mtf_bonus = 0.20 if mtf['aligned'] else (0.10 if mtf['confluence'] != "NONE" else 0)
+        div_bonus = 0.10 if divergence.get('divergence') and divergence['divergence']['type'] == ("BULLISH" if direction == "LONG" else "BEARISH") else 0
+        
         confidence = min(0.95, base_confidence + context_bonus + mtf_bonus + div_bonus)
         
-        # === ПОРОГ УВЕРЕННОСТИ (сильно смягчён) ===
-        if confidence < 0.15:
-            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >15%)")
+        # === ПОРОГ УВЕРЕННОСТИ: минимум 50% для качественных сигналов ===
+        if confidence < 0.50:
+            logger.info(f"[ANALYZER] ❌ Низкая уверенность ({confidence:.2%}, требуется >50%)")
             signal_stats['rejected'] += 1
             signal_stats['reasons']['low_confidence'] += 1
             return None
@@ -2412,13 +2416,13 @@ class MarketAnalyzer:
     
     async def calculate_entry_price(self, symbol: str, direction: str, analysis: Dict) -> Dict:
         """
-        АГРЕССИВНЫЙ расчёт Entry, SL, TP с частичными тейками:
-        
-        Философия:
-        - SL близко (0.3-0.5%) - быстро режем убытки
-        - TP1 (40% позиции) - быстрый профит 0.4-0.6%
-        - TP2 (40% позиции) - средний профит 0.8-1.2%
-        - TP3 (20% позиции) - runner с трейлингом
+        СБАЛАНСИРОВАННЫЙ расчёт Entry, SL, TP с частичными тейками:
+
+        Философия (R/R минимум 1:1.5):
+        - SL оптимальный (0.4-0.6%) - не выбивает шумом
+        - TP1 (50% позиции) - профит 0.6-0.8% 
+        - TP2 (30% позиции) - профит 1.2-1.5%
+        - TP3 (20% позиции) - moonbag 2.0-3.0%
         - После TP1 двигаем SL в безубыток
         """
         
@@ -2453,38 +2457,39 @@ class MarketAnalyzer:
         
         entry = current_price
         
-        # === АГРЕССИВНЫЕ БАЗОВЫЕ УРОВНИ (ближе к цене!) ===
-        # SL: 1-1.5 ATR (0.2-0.5%)
-        # TP1: 1.5 ATR (быстрый профит)
-        # TP2: 3 ATR (средний)
-        # TP3: 5+ ATR (runner)
-        
-        # === MOMENTUM SCALP STRATEGY ===
-        # Фиксированные близкие тейки для быстрого выхода
-        # После TP1 - SL в безубыток, позиция бесплатная
-        
-        # Минимальные проценты (агрессивный скальпинг)
-        min_sl_percent = 0.0025   # 0.25%
-        min_tp1_percent = 0.003   # 0.3% - быстро забрать
-        min_tp2_percent = 0.006   # 0.6% - хороший профит
-        min_tp3_percent = 0.012   # 1.2% - moonbag
-        
-        # Множители для волатильности (влияют только если ATR > минимума)
+        # === УЛУЧШЕННЫЙ RISK/REWARD: больше TP, оптимальный SL ===
+        # Философия: R/R минимум 1:1.5
+        # SL достаточно широкий чтобы не выбивало шумом
+        # TP достаточно далеко для хорошей прибыли
+
+        # Минимальные проценты (сбалансированный подход)
+        min_sl_percent = 0.004    # 0.4% - не слишком узкий SL
+        min_tp1_percent = 0.006   # 0.6% - первый тейк с прибылью (R/R 1:1.5)
+        min_tp2_percent = 0.012   # 1.2% - хороший профит
+        min_tp3_percent = 0.025   # 2.5% - moonbag для трендов
+
+        # Максимальные проценты (защита от слишком далёких уровней)
+        max_sl_percent = 0.008    # 0.8% максимум SL
+        max_tp1_percent = 0.012   # 1.2%
+        max_tp2_percent = 0.020   # 2.0%
+        max_tp3_percent = 0.040   # 4.0%
+
+        # Множители для волатильности
         if volatility == 'HIGH':
-            sl_mult = 1.3   # Чуть шире при высокой волатильности
-            tp_mult = 1.2   # Тейки тоже чуть дальше
+            sl_mult = 1.4   # Шире при высокой волатильности
+            tp_mult = 1.3   # Тейки тоже дальше
         elif volatility == 'MEDIUM':
             sl_mult = 1.0
             tp_mult = 1.0
         else:  # LOW
-            sl_mult = 0.9   # Узкие стопы при низкой волатильности
+            sl_mult = 0.8   # Уже при низкой волатильности
             tp_mult = 0.9
-        
-        # Расчёт уровней (берём максимум из ATR и минимума)
-        sl_distance = max(atr_percent * sl_mult, min_sl_percent)
-        tp1_distance = max(atr_percent * 1.2 * tp_mult, min_tp1_percent)
-        tp2_distance = max(atr_percent * 2.4 * tp_mult, min_tp2_percent)
-        tp3_distance = max(atr_percent * 4.8 * tp_mult, min_tp3_percent)
+
+        # Расчёт уровней с ограничениями min/max
+        sl_distance = min(max_sl_percent, max(atr_percent * 1.2 * sl_mult, min_sl_percent))
+        tp1_distance = min(max_tp1_percent, max(atr_percent * 1.8 * tp_mult, min_tp1_percent))
+        tp2_distance = min(max_tp2_percent, max(atr_percent * 3.5 * tp_mult, min_tp2_percent))
+        tp3_distance = min(max_tp3_percent, max(atr_percent * 6.0 * tp_mult, min_tp3_percent))
         
         # === КОРРЕКТИРОВКА ПО S/R УРОВНЯМ ===
         if direction == "LONG":
