@@ -13,12 +13,16 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from telegram.error import BadRequest
 
 from hedger import hedge_open, hedge_close, is_hedging_enabled, hedger
-from analyzer import MarketAnalyzer, get_signal_stats, reset_signal_stats, increment_bybit_opened
+from smart_analyzer import (
+    SmartAnalyzer, find_best_setup, record_trade_result, get_trading_state,
+    TradeSetup, SetupQuality, MarketRegime, get_signal_stats, reset_signal_stats,
+    increment_bybit_opened
+)
 
 load_dotenv()
 
-# Глобальный analyzer для переиспользования
-analyzer = MarketAnalyzer()
+# Умный анализатор v2.0 - единственный режим
+smart = SmartAnalyzer()
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -329,6 +333,9 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     
     # Удаляем из активных
     run_sql("DELETE FROM positions WHERE id = ?", (pos_id,))
+    
+    # Записываем результат для статистики smart analyzer
+    record_trade_result(pnl)
     
     logger.info(f"[DB] Position {pos_id} closed: {reason}, PnL: ${pnl:.2f}")
 
@@ -1854,79 +1861,71 @@ def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0
     
     return round(bet, 0), leverage
 
-async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Отправка сигнала с реальной аналитикой"""
-    global analyzer
-    
-    logger.info("[SIGNAL] ========== Начало цикла send_signal ==========")
 
-    # Получаем активных юзеров из БД (не из кэша!)
+# ==================== SMART SIGNAL (единственный режим) ====================
+async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Умная отправка сигналов v2.0
+    
+    ПРИНЦИПЫ:
+    1. Только КАЧЕСТВЕННЫЕ сетапы (A+ и A) - без мусора
+    2. Торговля ТОЛЬКО по тренду  
+    3. Динамические TP/SL на основе структуры рынка
+    4. Защита капитала: cooldown, max drawdown, pause после убытков
+    5. Минимум R/R 1:2.5
+    6. Интервал 5 минут между анализами
+    
+    ЦЕЛЬ: 1-3 качественные сделки в день, а не спам
+    """
+    global smart
+    
+    logger.info("[SMART] ========== Smart Signal v2.0 ==========")
+    
+    # Получаем активных юзеров
     rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
     active_users = [row['user_id'] for row in rows] if rows else []
     
-    # Проверяем есть ли авто-трейд пользователь
+    # Проверяем авто-трейд
     has_auto_trade = False
+    auto_balance = 0
     if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
         auto_user_check = get_user(AUTO_TRADE_USER_ID)
         has_auto_trade = auto_user_check.get('auto_trade', False)
+        auto_balance = auto_user_check.get('balance', 0)
     
     if not active_users and not has_auto_trade:
-        logger.info("[SIGNAL] Нет активных юзеров и авто-трейд выключен")
+        logger.info("[SMART] Нет активных юзеров")
         return
     
-    logger.info(f"[SIGNAL] Активных юзеров: {len(active_users)}, Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
+    # Проверяем состояние торговли
+    trading_state = get_trading_state()
+    if trading_state['is_paused']:
+        logger.info(f"[SMART] Торговля на паузе до {trading_state['pause_until']}")
+        return
     
-    # === MOMENTUM SCANNER: ищем монеты с импульсом ===
-    try:
-        symbols = await analyzer.scan_momentum_coins(top_n=10)  # Уменьшено с 15 для скорости
-        logger.info(f"[SIGNAL] Momentum coins: {len(symbols)}")
-    except Exception as e:
-        logger.warning(f"[SIGNAL] Scanner error, using defaults: {e}")
-        symbols = analyzer._get_default_coins()
-    
-    best_signal = None
-    signal_data = None  # Данные для отправки
+    logger.info(f"[SMART] Активных: {len(active_users)}, Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
+    logger.info(f"[SMART] Сделок сегодня: {trading_state['daily_trades']}, Убытков подряд: {trading_state['consecutive_losses']}")
     
     try:
-        # Ищем лучший сигнал среди momentum монет
-        for symbol in symbols:
-            analysis = await analyzer.analyze_signal(symbol)
-            if analysis:
-                if best_signal is None or analysis['confidence'] > best_signal['confidence']:
-                    best_signal = analysis
+        # === ИЩЕМ ЛУЧШИЙ СЕТАП ===
+        setup = await find_best_setup(balance=auto_balance)
         
-        if not best_signal:
-            logger.info("[SIGNAL] Нет качественных сигналов")
+        if setup is None:
+            logger.info("[SMART] Нет качественных сетапов")
             return
         
-        logger.info(f"[SIGNAL] ✓ Лучший сигнал: {best_signal['symbol']} {best_signal['direction']} (conf={best_signal['confidence']:.2%})")
+        logger.info(f"[SMART] ✓ Найден сетап: {setup.symbol} {setup.direction}")
+        logger.info(f"[SMART] Качество: {setup.quality.name}, R/R: {setup.risk_reward:.2f}, Уверенность: {setup.confidence:.0%}")
+        logger.info(f"[SMART] Режим рынка: {setup.market_regime.name}")
         
-        # Получаем Entry, SL, TP
-        price_data = await analyzer.calculate_entry_price(
-            best_signal['symbol'], 
-            best_signal['direction'],
-            best_signal
-        )
-        
-        symbol = best_signal['symbol']
-        direction = best_signal['direction']
-        entry = price_data['entry_price']
-        sl = price_data['stop_loss']
-        tp = price_data['take_profit']  # TP1 для совместимости
-        tp1 = price_data.get('tp1', tp)
-        tp2 = price_data.get('tp2', tp * 1.5 if direction == "LONG" else tp * 0.5)
-        tp3 = price_data.get('tp3', tp * 2 if direction == "LONG" else tp * 0.3)
-        
-        # === ЧЕСТНЫЙ WIN RATE ИЗ РЕАЛЬНОЙ СТАТИСТИКИ ===
-        real_stats = db_get_real_winrate(min_trades=20)
-        if real_stats['reliable']:
-            # Используем реальный winrate из истории сделок
-            winrate = int(real_stats['winrate'])
-            logger.info(f"[SIGNAL] Реальный WinRate: {winrate}% ({real_stats['trades']} сделок)")
-        else:
-            # Недостаточно данных - используем оценку анализатора
-            winrate = int(price_data['success_rate'])
-            logger.info(f"[SIGNAL] Оценочный WinRate: {winrate}% (мало данных: {real_stats['trades']} сделок)")
+        # Данные для сигнала
+        symbol = setup.symbol
+        direction = setup.direction
+        entry = setup.entry
+        sl = setup.stop_loss
+        tp1 = setup.take_profit_1
+        tp2 = setup.take_profit_2
+        tp3 = setup.take_profit_3
         
         # Процентные уровни
         tp1_percent = abs(tp1 - entry) / entry * 100
@@ -1934,95 +1933,50 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         tp3_percent = abs(tp3 - entry) / entry * 100
         sl_percent = abs(sl - entry) / entry * 100
         
-        # === ПРОВЕРКА НА ДУБЛИКАТ СИГНАЛА ===
+        # Confidence = качество сетапа
+        confidence_percent = int(setup.confidence * 100)
+        
+        # Качество как текст (только A+ и A принимаются)
+        quality_emoji = {
+            SetupQuality.A_PLUS: "🌟 A+",
+            SetupQuality.A: "⭐ A",
+        }.get(setup.quality, "⭐")
+        
+        # Режим рынка как текст
+        regime_text = {
+            MarketRegime.STRONG_UPTREND: "📈 Сильный тренд ↑",
+            MarketRegime.UPTREND: "📈 Тренд ↑",
+            MarketRegime.STRONG_DOWNTREND: "📉 Сильный тренд ↓",
+            MarketRegime.DOWNTREND: "📉 Тренд ↓",
+            MarketRegime.RANGING: "⚖️ Боковик"
+        }.get(setup.market_regime, "")
+        
+        # === ПРОВЕРКА ДУБЛИКАТА ===
         now = datetime.now()
         if symbol in last_signals:
             last = last_signals[symbol]
             time_diff = (now - last['time']).total_seconds()
-            price_diff = abs(entry - last['price']) / last['price']
             
-            # Пропускаем если: тот же символ + направление + <5 мин + цена не изменилась на 0.5%+
-            if (last['direction'] == direction and 
-                time_diff < SIGNAL_COOLDOWN and 
-                price_diff < PRICE_CHANGE_THRESHOLD):
-                logger.info(f"[SIGNAL] Пропуск дубликата: {symbol} {direction} (прошло {time_diff:.0f}с, изменение {price_diff*100:.2f}%)")
+            if time_diff < SIGNAL_COOLDOWN * 2:  # Удвоенный cooldown для smart режима
+                logger.info(f"[SMART] Пропуск: недавний сигнал по {symbol}")
                 return
         
-        # Сохраняем этот сигнал
-        last_signals[symbol] = {
-            'direction': direction,
-            'price': entry,
-            'time': now
-        }
+        last_signals[symbol] = {'direction': direction, 'price': entry, 'time': now}
         
-        # Потенциальный профит
-        if direction == "LONG":
-            potential_profit = ((tp - entry) / entry) * 100
-        else:
-            potential_profit = ((entry - tp) / entry) * 100
+        # === АВТО-ТОРГОВЛЯ ===
+        auto_trade_executed = False
         
-        # ATR для position sizing (волатильность)
-        atr_percent = best_signal.get('atr_percent', 0)
-        
-        # Confidence анализатора (для авто-трейда) - это сила ТЕКУЩЕГО сигнала
-        signal_confidence = int(best_signal['confidence'] * 100)  # 0.82 -> 82%
-        
-        logger.info(f"[SIGNAL] ✓ Готово к отправке: {symbol} {direction} entry={entry:.4f} WR={winrate}% Conf={signal_confidence}% ATR={atr_percent:.2f}%")
-        signal_data = {
-            'symbol': symbol, 'direction': direction, 'entry': entry,
-            'sl': sl, 'tp': tp, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
-            'winrate': winrate, 'tp1_percent': tp1_percent, 'tp2_percent': tp2_percent,
-            'tp3_percent': tp3_percent, 'sl_percent': sl_percent, 'potential_profit': potential_profit,
-            'atr_percent': atr_percent,  # Для ATR-based position sizing
-            'signal_confidence': signal_confidence  # Confidence анализатора для авто-трейда
-        }
-        
-    except Exception as e:
-        logger.error(f"[SIGNAL] ❌ Ошибка при подготовке сигнала: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        await analyzer.close()
-        return
-    finally:
-        await analyzer.close()
-    
-    if not signal_data:
-        logger.info("[SIGNAL] Нет данных для отправки")
-        return
-    
-    # Распаковываем данные
-    symbol = signal_data['symbol']
-    direction = signal_data['direction']
-    entry = signal_data['entry']
-    sl = signal_data['sl']
-    tp = signal_data['tp']
-    tp1 = signal_data['tp1']
-    tp2 = signal_data['tp2']
-    tp3 = signal_data['tp3']
-    winrate = signal_data['winrate']
-    tp1_percent = signal_data['tp1_percent']
-    tp2_percent = signal_data['tp2_percent']
-    tp3_percent = signal_data['tp3_percent']
-    sl_percent = signal_data['sl_percent']
-    potential_profit = signal_data['potential_profit']
-    atr_percent = signal_data.get('atr_percent', 0)  # ATR для position sizing
-    signal_confidence = signal_data.get('signal_confidence', winrate)  # Confidence для авто-трейда
-    
-    # ==================== АВТО-ТОРГОВЛЯ ====================
-    auto_trade_executed = False  # Флаг для предотвращения дублирования сигнала
-    try:
-        if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
+        if has_auto_trade and AUTO_TRADE_USER_ID:
             auto_user = get_user(AUTO_TRADE_USER_ID)
-            auto_positions = get_positions(AUTO_TRADE_USER_ID)
             auto_balance = auto_user.get('balance', 0)
             
-            # === ПРОВЕРЯЕМ ПОЛЬЗОВАТЕЛЬСКИЕ НАСТРОЙКИ АВТО-ТРЕЙДА ===
+            # Проверяем настройки пользователя
             user_auto_enabled = auto_user.get('auto_trade', False)
             user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
             user_max_daily = auto_user.get('auto_trade_max_daily', 10)
             user_today_count = auto_user.get('auto_trade_today', 0)
             
-            # Сброс счётчика если новый день
+            # Сброс счётчика
             from datetime import date as dt_date
             today = dt_date.today().isoformat()
             last_reset = auto_user.get('auto_trade_last_reset')
@@ -2032,225 +1986,202 @@ async def send_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 auto_user['auto_trade_last_reset'] = today
                 db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0, auto_trade_last_reset=today)
             
-            logger.info(f"[AUTO-TRADE] Проверка: enabled={user_auto_enabled}, Confidence={signal_confidence}% (min={user_min_winrate}%), today={user_today_count}/{user_max_daily}, balance=${auto_balance}")
-            
+            # Проверки
+            skip_reason = None
             if not user_auto_enabled:
-                logger.info(f"[AUTO-TRADE] Skip: авто-трейд выключен в настройках")
-            elif signal_confidence < user_min_winrate:
-                logger.info(f"[AUTO-TRADE] Skip: confidence {signal_confidence}% < min {user_min_winrate}%")
+                skip_reason = "выключен"
+            elif confidence_percent < user_min_winrate:
+                skip_reason = f"confidence {confidence_percent}% < {user_min_winrate}%"
             elif user_today_count >= user_max_daily:
-                logger.info(f"[AUTO-TRADE] Skip: лимит сделок {user_today_count}/{user_max_daily}")
+                skip_reason = f"лимит {user_today_count}/{user_max_daily}"
             elif auto_balance < AUTO_TRADE_MIN_BET:
-                logger.info(f"[AUTO-TRADE] Skip: balance ${auto_balance} < min ${AUTO_TRADE_MIN_BET}")
+                skip_reason = f"баланс ${auto_balance:.0f}"
+            
+            if skip_reason:
+                logger.info(f"[SMART] Авто-трейд пропущен: {skip_reason}")
             else:
-                # Рассчитываем ставку и плечо на основе confidence и волатильности (ATR)
-                auto_bet, auto_leverage = calculate_auto_bet(signal_confidence, auto_balance, atr_percent)
+                # Расчёт ставки на основе качества сетапа (только A+ и A)
+                quality_mult = {
+                    SetupQuality.A_PLUS: 0.12,  # 12% баланса для идеального сетапа
+                    SetupQuality.A: 0.10,        # 10% для отличного сетапа
+                }.get(setup.quality, 0.08)
                 
-                if auto_bet <= auto_balance:
-                    ticker = symbol.split("/")[0]
+                auto_bet = min(AUTO_TRADE_MAX_BET, max(AUTO_TRADE_MIN_BET, auto_balance * quality_mult))
+                auto_bet = min(auto_bet, auto_balance * 0.15)  # Не более 15% баланса
+                
+                ticker = symbol.split("/")[0]
+                
+                # === ОТКРЫТИЕ НА BYBIT ===
+                bybit_qty = 0
+                hedging_enabled = await is_hedging_enabled()
+                bybit_success = True
+                
+                if hedging_enabled:
+                    hedge_amount = float(auto_bet * LEVERAGE)
+                    hedge_result = await hedge_open(0, symbol, direction, hedge_amount, 
+                                                   sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
                     
-                    # === СНАЧАЛА пробуем открыть на Bybit ===
-                    bybit_qty = 0
-                    hedging_enabled = await is_hedging_enabled()
-                    bybit_open_success = True  # Флаг успешности открытия (для локальной позиции)
-                    bybit_actually_opened = False  # Реально открылось на Bybit
-                    
-                    if hedging_enabled:
-                        hedge_amount = float(auto_bet * auto_leverage)
-                        hedge_result = await hedge_open(0, symbol, direction, hedge_amount, sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
-                        if hedge_result:
-                            bybit_qty = hedge_result.get('qty', 0)
-                            logger.info(f"[AUTO-TRADE] ✓ Hedge opened: qty={bybit_qty}")
-                            
-                            # Верификация что позиция реально открылась
-                            await asyncio.sleep(0.5)
-                            bybit_pos = await hedger.get_position_data(symbol)
-                            if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                                logger.error(f"[AUTO-TRADE] ❌ VERIFICATION FAILED: position not found on Bybit")
-                                bybit_open_success = False
-                            else:
-                                bybit_actually_opened = True  # Подтверждено что открылось на Bybit
+                    if hedge_result:
+                        bybit_qty = hedge_result.get('qty', 0)
+                        logger.info(f"[SMART] ✓ Bybit открыт: qty={bybit_qty}")
+                        
+                        # Верификация
+                        await asyncio.sleep(0.5)
+                        bybit_pos = await hedger.get_position_data(symbol)
+                        if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                            logger.error("[SMART] ❌ Bybit не подтвердил позицию")
+                            bybit_success = False
                         else:
-                            logger.error(f"[AUTO-TRADE] ❌ Failed to open on Bybit - skipping trade")
-                            bybit_open_success = False
-                    
-                    if not bybit_open_success:
-                        logger.info(f"[AUTO-TRADE] Skipped due to Bybit failure")
-                    else:
-                        # Инкрементируем статистику ТОЛЬКО если реально открылось на Bybit
-                        if bybit_actually_opened:
                             increment_bybit_opened()
-                        
-                        # Комиссия (только после успешного открытия на Bybit)
-                        commission = auto_bet * (COMMISSION_PERCENT / 100)
-                        
-                        # Обновляем баланс юзера
-                        auto_user['balance'] -= auto_bet
-                        new_balance = auto_user['balance']
-                        save_user(AUTO_TRADE_USER_ID)
-                        
-                        # Добавляем комиссию в накопитель
-                        await add_commission(commission)
-                        
-                        # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
-                        existing = None
-                        for p in auto_positions:
-                            if p['symbol'] == symbol and p['direction'] == direction:
-                                existing = p
-                                break
-                        
-                        if existing:
-                            # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
-                            old_amount = existing['amount']
-                            new_amount = old_amount + float(auto_bet)
-                            new_entry_price = (existing['entry'] * old_amount + float(entry) * float(auto_bet)) / new_amount
-                            new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
-                            
-                            existing['amount'] = new_amount
-                            existing['entry'] = new_entry_price
-                            existing['commission'] = existing.get('commission', 0) + float(commission)
-                            existing['bybit_qty'] = new_bybit_qty
-                            existing['pnl'] = -existing['commission']
-                            
-                            db_update_position(existing['id'], 
-                                amount=new_amount, 
-                                entry=new_entry_price, 
-                                commission=existing['commission'],
-                                bybit_qty=new_bybit_qty,
-                                pnl=existing['pnl']
-                            )
-                            pos_id = existing['id']
-                            logger.info(f"[AUTO-TRADE] Added to existing position {pos_id}")
-                        else:
-                            # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
-                            position = {
-                                'symbol': symbol,
-                                'direction': direction,
-                                'entry': float(entry),
-                                'current': float(entry),
-                                'amount': float(auto_bet),
-                                'tp': float(tp1),
-                                'tp1': float(tp1),
-                                'tp2': float(tp2),
-                                'tp3': float(tp3),
-                                'tp1_hit': False,
-                                'tp2_hit': False,
-                                'sl': float(sl),
-                                'commission': float(commission),
-                                'pnl': float(-commission),
-                                'bybit_qty': bybit_qty,
-                                'original_amount': float(auto_bet)
-                            }
-                            
-                            pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
-                            position['id'] = pos_id
-                            
-                            if AUTO_TRADE_USER_ID not in positions_cache:
-                                positions_cache[AUTO_TRADE_USER_ID] = []
-                            positions_cache[AUTO_TRADE_USER_ID].append(position)
-                        
-                        # Уведомление с тремя TP
-                        auto_msg = f"""<b>🤖 {signal_confidence}% | Авто-сделка открыта</b>
+                    else:
+                        logger.error("[SMART] ❌ Bybit ошибка")
+                        bybit_success = False
+                
+                if bybit_success:
+                    # Комиссия
+                    commission = auto_bet * (COMMISSION_PERCENT / 100)
+                    auto_user['balance'] -= auto_bet
+                    new_balance = auto_user['balance']
+                    save_user(AUTO_TRADE_USER_ID)
+                    await add_commission(commission)
+                    
+                    # Создаём позицию
+                    position = {
+                        'symbol': symbol,
+                        'direction': direction,
+                        'entry': float(entry),
+                        'current': float(entry),
+                        'amount': float(auto_bet),
+                        'tp': float(tp1),
+                        'tp1': float(tp1),
+                        'tp2': float(tp2),
+                        'tp3': float(tp3),
+                        'tp1_hit': False,
+                        'tp2_hit': False,
+                        'sl': float(sl),
+                        'commission': float(commission),
+                        'pnl': float(-commission),
+                        'bybit_qty': bybit_qty,
+                        'original_amount': float(auto_bet)
+                    }
+                    
+                    pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
+                    position['id'] = pos_id
+                    
+                    if AUTO_TRADE_USER_ID not in positions_cache:
+                        positions_cache[AUTO_TRADE_USER_ID] = []
+                    positions_cache[AUTO_TRADE_USER_ID].append(position)
+                    
+                    # Уведомление
+                    reasoning_text = "\n".join([f"• {r}" for r in setup.reasoning[:4]])
+                    warnings_text = "\n".join([f"• {w}" for w in setup.warnings[:2]]) if setup.warnings else ""
+                    
+                    auto_msg = f"""<b>🤖 {quality_emoji} | Smart Trade</b>
 
-{ticker} | {direction} | ${auto_bet:.0f} | x{auto_leverage}
+<b>{ticker}</b> | {direction} | ${auto_bet:.0f} | x{LEVERAGE}
+{regime_text}
+
+<b>Анализ:</b>
+{reasoning_text}
 
 <b>Вход:</b> {format_price(entry)}
-
 <b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
 <b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
 <b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
-
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
+<b>R/R:</b> 1:{setup.risk_reward:.1f}"""
+                    
+                    if warnings_text:
+                        auto_msg += f"\n\n⚠️ <b>Риски:</b>\n{warnings_text}"
+                    
+                    auto_msg += f"\n\n💰 ${new_balance:.0f}"
+                    
+                    auto_keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
+                         InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                    ])
+                    
+                    await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
+                    logger.info(f"[SMART] ✓ Авто-сделка: {direction} {ticker} ${auto_bet:.0f}")
+                    auto_trade_executed = True
+                    
+                    # Обновляем счётчики
+                    auto_user['auto_trade_today'] = user_today_count + 1
+                    db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
+        
+        # === ОТПРАВКА АКТИВНЫМ ЮЗЕРАМ ===
+        for user_id in active_users:
+            if user_id == AUTO_TRADE_USER_ID and auto_trade_executed:
+                continue
+            
+            user = get_user(user_id)
+            balance = user['balance']
+            
+            if balance < 1:
+                continue
+            
+            ticker = symbol.split("/")[0]
+            d = 'L' if direction == "LONG" else 'S'
+            
+            # Форматируем анализ
+            reasoning_text = "\n".join([f"• {r}" for r in setup.reasoning[:3]])
+            
+            text = f"""<b>📡 Smart Signal</b>
 
-💰 ${new_balance:.0f}"""
-                        
-                        # Кнопки под авто-сделкой
-                        auto_keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
-                             InlineKeyboardButton("📊 Сделки", callback_data="trades")]
-                        ])
-                        
-                        await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
-                        logger.info(f"[AUTO-TRADE] ✓ Opened {direction} {ticker} ${auto_bet} (WR={winrate}%, leverage=x{auto_leverage})")
-                        auto_trade_executed = True  # Авто-сделка открыта, не дублировать сигнал
-                        
-                        # Инкрементируем счётчик сделок за день
-                        auto_user['auto_trade_today'] = user_today_count + 1
-                        db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
-                        logger.info(f"[AUTO-TRADE] Сделок сегодня: {user_today_count + 1}/{user_max_daily}")
-                else:
-                    logger.info(f"[AUTO-TRADE] Skip: bet ${auto_bet} > balance ${auto_balance}")
-    except Exception as e:
-        logger.error(f"[AUTO-TRADE] Error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-    
-    # Отправляем активным юзерам
-    for user_id in active_users:
-        # Пропускаем если авто-трейд уже отправил сообщение этому юзеру
-        if user_id == AUTO_TRADE_USER_ID and auto_trade_executed:
-            continue
-        
-        user = get_user(user_id)
-        balance = user['balance']
-        
-        if balance < 1:
-            continue
-        
-        ticker = symbol.split("/")[0]
-        d = 'L' if direction == "LONG" else 'S'
-        dir_emoji = "🟢" if direction == "LONG" else "🔴"
-        dir_text = "LONG" if direction == "LONG" else "SHORT"
-        
-        # Формат сигнала с тремя TP
-        text = f"""<b>📡 Сигнал</b>
+<b>{ticker}</b> | {direction} | x{LEVERAGE}
+{quality_emoji} | {regime_text}
 
-{ticker} | {dir_text} | x{LEVERAGE}
-Winrate: {winrate}%
+<b>Анализ:</b>
+{reasoning_text}
 
 <b>Вход:</b> {format_price(entry)}
-
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
-<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
-
+<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%)
+<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%)
+<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%)
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
+<b>R/R:</b> 1:{setup.risk_reward:.1f}
 
 💰 ${balance:.0f}"""
-        
-        # Кнопки с суммами - включая малые для низких балансов
-        if balance >= 100:
-            amounts = [10, 25, 50, 100]
-        elif balance >= 25:
-            amounts = [5, 10, 25]
-        elif balance >= 10:
-            amounts = [3, 5, 10]
-        else:
-            amounts = [1, 2, 3]
-        
-        amounts = [a for a in amounts if a <= balance]
-        
-        # Форматируем цены с нужной точностью (не int для дешёвых монет!)
-        entry_str = f"{entry:.4f}" if entry < 100 else f"{entry:.0f}"
-        sl_str = f"{sl:.4f}" if sl < 100 else f"{sl:.0f}"
-        tp1_str = f"{tp1:.4f}" if tp1 < 100 else f"{tp1:.0f}"
-        tp2_str = f"{tp2:.4f}" if tp2 < 100 else f"{tp2:.0f}"
-        tp3_str = f"{tp3:.4f}" if tp3 < 100 else f"{tp3:.0f}"
-        
-        # Callback: e|SYM|D|ENTRY|SL|TP1|TP2|TP3|AMT|WINRATE
-        keyboard = []
-        if amounts:
-            row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{entry_str}|{sl_str}|{tp1_str}|{tp2_str}|{tp3_str}|{amt}|{winrate}") for amt in amounts[:4]]
-            keyboard.append(row)
-        
-        keyboard.append([InlineKeyboardButton("💵 Своя сумма", callback_data=f"custom|{symbol}|{d}|{entry_str}|{sl_str}|{tp1_str}|{tp2_str}|{tp3_str}|{winrate}")])
-        keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
-        
-        try:
-            await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-            logger.info(f"[SIGNAL] Sent {direction} {ticker} @ ${entry:.2f} (WR={winrate}%) to {user_id}")
-        except Exception as e:
-            logger.error(f"[SIGNAL] Error sending to {user_id}: {e}")
+            
+            # Кнопки
+            if balance >= 100:
+                amounts = [10, 25, 50, 100]
+            elif balance >= 25:
+                amounts = [5, 10, 25]
+            elif balance >= 10:
+                amounts = [3, 5, 10]
+            else:
+                amounts = [1, 2, 3]
+            
+            amounts = [a for a in amounts if a <= balance]
+            
+            entry_str = f"{entry:.4f}" if entry < 100 else f"{entry:.0f}"
+            sl_str = f"{sl:.4f}" if sl < 100 else f"{sl:.0f}"
+            tp1_str = f"{tp1:.4f}" if tp1 < 100 else f"{tp1:.0f}"
+            tp2_str = f"{tp2:.4f}" if tp2 < 100 else f"{tp2:.0f}"
+            tp3_str = f"{tp3:.4f}" if tp3 < 100 else f"{tp3:.0f}"
+            
+            keyboard = []
+            if amounts:
+                row = [InlineKeyboardButton(f"${amt}", callback_data=f"e|{symbol}|{d}|{entry_str}|{sl_str}|{tp1_str}|{tp2_str}|{tp3_str}|{amt}|{confidence_percent}") for amt in amounts[:4]]
+                keyboard.append(row)
+            
+            keyboard.append([InlineKeyboardButton("💵 Своя сумма", callback_data=f"custom|{symbol}|{d}|{entry_str}|{sl_str}|{tp1_str}|{tp2_str}|{tp3_str}|{confidence_percent}")])
+            keyboard.append([InlineKeyboardButton("❌ Пропустить", callback_data="skip")])
+            
+            try:
+                await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+                logger.info(f"[SMART] Sent to {user_id}")
+            except Exception as e:
+                logger.error(f"[SMART] Error sending to {user_id}: {e}")
+    
+    except Exception as e:
+        logger.error(f"[SMART] ❌ Error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+    finally:
+        await smart.close()
+
 
 async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -3102,188 +3033,6 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Обновляем в БД
             db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
             
-            # === АДАПТИВНОЕ УПРАВЛЕНИЕ ПОЗИЦИЕЙ ===
-            # Проверяем нужно ли сдвинуть SL/TP
-            try:
-                adjustment = await analyzer.analyze_position_adjustment(
-                    pos['symbol'], pos['direction'], pos['entry'], pos['sl'], pos['tp']
-                )
-                
-                # Применяем trailing stop / расширение SL при манипуляциях
-                if adjustment['should_adjust_sl'] and adjustment['new_sl'] != pos['sl']:
-                    old_sl = pos['sl']
-                    pos['sl'] = adjustment['new_sl']
-                    db_update_position(pos['id'], sl=pos['sl'])
-                    
-                    # Обновляем на Bybit если хеджирование включено
-                    if await is_hedging_enabled():
-                        await hedger.set_trading_stop(
-                            pos['symbol'].replace("/", ""), 
-                            pos['direction'], 
-                            tp=pos['tp'], 
-                            sl=pos['sl']
-                        )
-                    
-                    logger.info(f"[ADAPTIVE] Position {pos['id']}: SL {old_sl:.4f} -> {pos['sl']:.4f} ({adjustment['reason']})")
-                
-                if adjustment['should_adjust_tp'] and adjustment['new_tp'] != pos['tp']:
-                    old_tp = pos['tp']
-                    pos['tp'] = adjustment['new_tp']
-                    db_update_position(pos['id'], tp=pos['tp'])
-                    
-                    if await is_hedging_enabled():
-                        await hedger.set_trading_stop(
-                            pos['symbol'].replace("/", ""), 
-                            pos['direction'], 
-                            tp=pos['tp'], 
-                            sl=pos['sl']
-                        )
-                    
-                    logger.info(f"[ADAPTIVE] Position {pos['id']}: TP {old_tp:.4f} -> {pos['tp']:.4f} ({adjustment['reason']})")
-                
-                # Критическая рекомендация - АВТОМАТИЧЕСКИ закрываем позицию
-                if adjustment['action'] == 'CLOSE_EARLY' and adjustment['urgency'] == 'CRITICAL':
-                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                    old_direction = pos['direction']
-                    old_amount = pos['amount']
-                    should_flip = adjustment.get('should_flip', False)
-                    flip_direction = adjustment.get('flip_direction')
-                    
-                    # СНАЧАЛА закрываем на Bybit
-                    hedging_enabled = await is_hedging_enabled()
-                    real_pnl = pos['pnl']  # Default - локальный PnL
-                    exit_price = pos['current']
-                    
-                    if hedging_enabled:
-                        bybit_qty = pos.get('bybit_qty', 0)
-                        if bybit_qty > 0:
-                            hedge_result = await hedge_close(pos['id'], pos['symbol'], pos['direction'], bybit_qty)
-                            if hedge_result:
-                                logger.info(f"[EARLY_CLOSE] Bybit closed {ticker} qty={bybit_qty}")
-                                
-                                # Получаем РЕАЛЬНЫЙ PnL с Bybit
-                                await asyncio.sleep(0.5)  # Даём Bybit время обновить данные
-                                try:
-                                    closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
-                                    if closed_trades:
-                                        bybit_pnl = closed_trades[0]['closed_pnl']
-                                        bybit_exit = closed_trades[0]['exit_price']
-                                        bybit_qty = closed_trades[0].get('qty', 0)
-                                        bybit_time = closed_trades[0].get('updated_time', 0)
-                                        
-                                        # Валидация: PnL должен быть реалистичным для размера позиции
-                                        # Макс PnL = amount * leverage (при 100% движении цены)
-                                        max_reasonable_pnl = pos['amount'] * LEVERAGE * 0.5  # 50% от макс
-                                        current_time_ms = int(asyncio.get_event_loop().time() * 1000)
-                                        time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
-                                        
-                                        logger.info(f"[EARLY_CLOSE] Bybit data: pnl=${bybit_pnl:.2f}, qty={bybit_qty}, time_diff={time_diff:.0f}s, max_reasonable=${max_reasonable_pnl:.2f}")
-                                        
-                                        # Используем Bybit PnL только если он разумный и свежий
-                                        if abs(bybit_pnl) <= max_reasonable_pnl and time_diff < 60:
-                                            real_pnl = bybit_pnl
-                                            exit_price = bybit_exit
-                                            logger.info(f"[EARLY_CLOSE] Using Bybit PnL: ${real_pnl:.2f}")
-                                        else:
-                                            logger.warning(f"[EARLY_CLOSE] Bybit PnL ${bybit_pnl:.2f} seems wrong (max=${max_reasonable_pnl:.2f}, time={time_diff:.0f}s), using local ${pos['pnl']:.2f}")
-                                except Exception as e:
-                                    logger.warning(f"[EARLY_CLOSE] Failed to get real PnL: {e}")
-                            else:
-                                logger.error(f"[EARLY_CLOSE] ❌ Failed to close on Bybit - skipping")
-                                continue  # Пропускаем - попробуем в следующем цикле
-                    
-                    # Возвращаем деньги пользователю (с РЕАЛЬНЫМ PnL)
-                    returned = pos['amount'] + real_pnl
-                    user['balance'] += returned
-                    user['total_profit'] += real_pnl
-                    save_user(user_id)
-                    
-                    # Закрываем в БД с реальными данными
-                    db_close_position(pos['id'], exit_price, real_pnl, 'EARLY_CLOSE')
-                    # Явно удаляем из кэша по ID
-                    pos_id_to_remove = pos['id']
-                    if user_id in positions_cache:
-                        positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
-                    
-                    # === FLIP: Переворот позиции ===
-                    flip_opened = False
-                    if should_flip and flip_direction and user['balance'] >= old_amount:
-                        # Открываем позицию в противоположном направлении
-                        flip_entry = pos['current']
-                        # Базовые TP/SL для флипа (0.8% TP, 0.4% SL)
-                        if flip_direction == "LONG":
-                            flip_sl = flip_entry * 0.996
-                            flip_tp = flip_entry * 1.008
-                        else:
-                            flip_sl = flip_entry * 1.004
-                            flip_tp = flip_entry * 0.992
-                        
-                        # СНАЧАЛА открываем хедж на Bybit
-                        flip_bybit_qty = 0
-                        if hedging_enabled:
-                            flip_result = await hedge_open(0, pos['symbol'], flip_direction, old_amount * LEVERAGE, sl=flip_sl, tp1=flip_tp, tp2=flip_tp, tp3=flip_tp)
-                            if flip_result:
-                                flip_bybit_qty = flip_result.get('qty', 0)
-                                logger.info(f"[FLIP] Bybit opened {flip_direction} qty={flip_bybit_qty}")
-                            else:
-                                logger.error(f"[FLIP] ❌ Failed to open flip on Bybit - no flip")
-                                # Не создаём флип если Bybit не открыл
-                                flip_direction = None  # Отменяем флип
-                        
-                        if flip_direction:  # Только если Bybit открыл или хеджирование выключено
-                            # Снимаем сумму с баланса
-                            user['balance'] -= old_amount
-                            save_user(user_id)
-                            
-                            # Создаём позицию в БД
-                            new_pos = {
-                                'symbol': pos['symbol'],
-                                'direction': flip_direction,
-                                'entry': flip_entry,
-                                'amount': old_amount,
-                                'sl': flip_sl,
-                                'tp': flip_tp,
-                                'tp1': flip_tp,
-                                'tp2': flip_tp * (1.01 if flip_direction == "LONG" else 0.99),
-                                'tp3': flip_tp * (1.015 if flip_direction == "LONG" else 0.985),
-                                'bybit_qty': flip_bybit_qty
-                            }
-                            new_pos_id = db_add_position(user_id, new_pos)
-                            new_pos['id'] = new_pos_id
-                            user_positions.append(new_pos)
-                            flip_opened = True
-                            logger.info(f"[FLIP] User {user_id}: {ticker} {old_direction} -> {flip_direction} (${old_amount})")
-                    
-                    # Уведомление о факте закрытия (и флипа) - используем РЕАЛЬНЫЙ PnL
-                    pnl_sign = "+" if real_pnl >= 0 else ""
-                    pnl_emoji = "✅" if real_pnl >= 0 else "📉"
-                    if flip_opened:
-                        msg = (f"<b>🔄 Переворот позиции</b>\n\n"
-                               f"{ticker} | {old_direction} закрыт {pnl_sign}${real_pnl:.2f}\n"
-                               f"Открыт {flip_direction} @ {flip_entry:.2f}\n"
-                               f"{adjustment['reason']}\n\n"
-                               f"💰 ${user['balance']:.0f}")
-                    else:
-                        msg = (f"<b>🔒 Авто-закрытие</b>\n\n"
-                               f"{pnl_emoji} {ticker} | {pnl_sign}${real_pnl:.2f}\n"
-                               f"{adjustment['reason']}\n\n"
-                               f"💰 ${user['balance']:.0f}")
-                    
-                    # Кнопки навигации
-                    nav_keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🏠 Домой", callback_data="back"), InlineKeyboardButton("📊 Сделки", callback_data="trades")]
-                    ])
-                    
-                    try:
-                        await context.bot.send_message(user_id, msg, parse_mode="HTML", reply_markup=nav_keyboard)
-                        logger.info(f"[EARLY_CLOSE] User {user_id} {ticker}: Real PnL=${real_pnl:.2f} (local was ${pos['pnl']:.2f}), flip={flip_opened}")
-                    except Exception as e:
-                        logger.error(f"[EARLY_CLOSE] Notify error: {e}")
-                    continue  # Переходим к следующей позиции
-                        
-            except Exception as e:
-                logger.warning(f"[ADAPTIVE] Ошибка: {e}")
-            
             # === ЧАСТИЧНЫЕ ТЕЙКИ TP1, TP2, TP3 ===
             ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
             tp1 = pos.get('tp1', pos['tp'])
@@ -3645,47 +3394,74 @@ async def withdraw_commission_callback(update: Update, context: ContextTypes.DEF
         await query.edit_message_text("❌ Ошибка вывода. Проверь настройки CRYPTO_BOT_TOKEN и ADMIN_CRYPTO_ID")
 
 async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Тест генерации сигнала"""
+    """Тест генерации SMART сигнала"""
     user_id = update.effective_user.id
     
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("⛔ Доступ закрыт")
         return
     
-    await update.message.reply_text("🔄 Генерирую тестовый сигнал...")
-    
-    global analyzer
+    await update.message.reply_text("🔄 Ищу качественный SMART сетап...")
     
     try:
-        symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
-        results = []
+        # Получаем баланс для расчёта
+        auto_user = get_user(AUTO_TRADE_USER_ID) if AUTO_TRADE_USER_ID else {}
+        balance = auto_user.get('balance', 0)
         
-        for symbol in symbols:
-            analysis = await analyzer.analyze_signal(symbol)
-            if analysis:
-                results.append(f"✅ {symbol}: {analysis['direction']} (conf: {analysis['confidence']:.2%})")
-            else:
-                results.append(f"❌ {symbol}: Нет сигнала")
+        # Ищем лучший сетап через SmartAnalyzer
+        setup = await find_best_setup(balance=balance)
         
-        # Проверяем активных юзеров
-        rows = run_sql("SELECT COUNT(*) as cnt FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="one")
-        active_count = rows['cnt'] if rows else 0
-        
-        text = f"""🧪 ТЕСТ СИГНАЛОВ
+        if setup:
+            quality_name = setup.quality.name
+            regime_name = setup.market_regime.name
+            reasoning = "\n".join([f"• {r}" for r in setup.reasoning[:3]])
+            warnings = "\n".join([f"• {w}" for w in setup.warnings[:2]]) if setup.warnings else "Нет"
+            
+            text = f"""🧪 <b>SMART TEST: Сетап найден!</b>
 
-{chr(10).join(results)}
+<b>{setup.symbol}</b> | {setup.direction}
+Качество: {quality_name}
+Confidence: {setup.confidence:.0%}
+R/R: 1:{setup.risk_reward:.1f}
+Режим: {regime_name}
 
-👥 Активных юзеров: {active_count}
-💰 Мин. депозит: ${MIN_DEPOSIT}
+<b>Вход:</b> {format_price(setup.entry)}
+<b>TP1:</b> {format_price(setup.take_profit_1)}
+<b>TP2:</b> {format_price(setup.take_profit_2)}
+<b>TP3:</b> {format_price(setup.take_profit_3)}
+<b>SL:</b> {format_price(setup.stop_loss)}
 
-Интервал сигналов: 60 сек"""
+<b>Анализ:</b>
+{reasoning}
+
+<b>⚠️ Риски:</b>
+{warnings}"""
+        else:
+            # Получаем статистику отклонений
+            stats = get_signal_stats()
+            state = get_trading_state()
+            
+            text = f"""🧪 <b>SMART TEST: Нет качественных сетапов</b>
+
+<b>Причина:</b> Не найдено A+ или A сетапов
+
+<b>Статистика:</b>
+Проанализировано: {stats['analyzed']}
+Отклонено: {stats['rejected']}
+
+<b>Состояние:</b>
+Сделок сегодня: {state['daily_trades']}
+Убытков подряд: {state['consecutive_losses']}
+На паузе: {'Да' if state['is_paused'] else 'Нет'}
+
+Интервал: 300 сек (5 мин)"""
         
-        await update.message.reply_text(text)
+        await update.message.reply_text(text, parse_mode="HTML")
     
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
     finally:
-        await analyzer.close()
+        await smart.close()
 
 async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Статистика генерации сигналов: /signalstats [reset]"""
@@ -3718,19 +3494,13 @@ async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     for reason, count in sorted_reasons:
         if count > 0:
             reason_name = {
-                'low_liquidity': '⏰ Низкая ликвидность',
-                'manipulation': '🎭 Манипуляции',
-                'weak_score': '📉 Слабый скор',
-                'context_conflict': '⚔️ Конфликт контекста',
-                'mtf_conflict': '📊 MTF конфликт',
-                'low_factors': '📋 Мало факторов',
                 'low_confidence': '🎯 Низкая уверенность',
-                'weak_trend': '📈 Слабый тренд (ADX)',
-                'low_volume': '📊 Низкий объём',
-                'whale_against': '🐋 Киты против',
-                'cvd_against': '💹 CVD против',
-                'orderbook_against': '📕 Orderbook против',
-                'btc_against': '₿ BTC против'
+                'low_quality': '⭐ Низкое качество',
+                'bad_rr': '📊 Плохой R/R',
+                'bad_regime': '🌊 Плохой режим рынка',
+                'no_setup': '❌ Нет сетапа',
+                'state_blocked': '⏸️ Пауза/лимит',
+                'outside_hours': '🕐 Вне торговых часов',
             }.get(reason, reason)
             reasons_text += f"• {reason_name}: {count}\n"
     
@@ -3740,7 +3510,18 @@ async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     bybit_opened = stats.get('bybit_opened', 0)
     bybit_rate = (bybit_opened / accepted * 100) if accepted > 0 else 0
     
-    text = f"""<b>📊 Статистика сигналов</b>
+    # Новые метрики дисбаланса
+    extreme_moves = stats.get('extreme_moves_detected', 0)
+    imbalance_trades = stats.get('imbalance_trades', 0)
+    
+    # Smart Analyzer State
+    smart_state = get_trading_state()
+    
+    pause_info = ""
+    if smart_state['is_paused']:
+        pause_info = f"⏸️ Пауза до: {smart_state['pause_until']}\n"
+    
+    text = f"""<b>📊 Статистика SMART сигналов</b>
 
 Проанализировано: {total}
 ✅ Принято: {accepted}
@@ -3749,11 +3530,22 @@ async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 🔗 Было на Bybit: {bybit_opened} ({bybit_rate:.0f}%)
 
+<b>🔥 Дисбаланс/Экстремумы:</b>
+Экстрем. движения: {extreme_moves}
+Дисбаланс-сделки: {imbalance_trades}
+
 <b>Причины отклонения:</b>
 {reasons_text}
+
+<b>🤖 Smart Trading State:</b>
+Сделок сегодня: {smart_state['daily_trades']}
+PnL сегодня: ${smart_state['daily_pnl']:.2f}
+Убытков подряд: {smart_state['consecutive_losses']}
+{pause_info}
 Сброс: /signalstats reset"""
     
     await update.message.reply_text(text, parse_mode="HTML")
+
 
 async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Управление авто-торговлей: /autotrade [on|off|status|balance AMOUNT]"""
@@ -4051,8 +3843,7 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         positions_cache.clear()
         users_cache.clear()
         
-        # Сбрасываем статистику сигналов
-        from analyzer import reset_signal_stats
+        # Сбрасываем статистику сигналов (уже импортировано из smart_analyzer)
         reset_signal_stats()
         
         await update.message.reply_text(
@@ -4313,9 +4104,10 @@ def main() -> None:
     
     if app.job_queue:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
-        app.job_queue.run_repeating(send_signal, interval=60, first=10)  # 60 сек - даём время на анализ
+        # Интервал 300 сек (5 минут) - качество важнее количества
+        app.job_queue.run_repeating(send_smart_signal, interval=300, first=15)
         app.job_queue.run_repeating(check_alerts, interval=30, first=15)
-        logger.info("[JOBS] JobQueue configured (positions, signals, alerts)")
+        logger.info("[JOBS] JobQueue configured (SMART only, interval=300s)")
     else:
         logger.warning("[JOBS] JobQueue NOT available!")
     
