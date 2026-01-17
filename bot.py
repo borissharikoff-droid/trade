@@ -4105,7 +4105,7 @@ def main() -> None:
     if app.job_queue:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
         # Интервал 300 сек (5 минут) - качество важнее количества
-        app.job_queue.run_repeating(send_smart_signal, interval=300, first=15)
+        app.job_queue.run_repeating(send_smart_signal, interval=120, first=10)  # 2 минуты
         app.job_queue.run_repeating(check_alerts, interval=30, first=15)
         logger.info("[JOBS] JobQueue configured (SMART only, interval=300s)")
     else:

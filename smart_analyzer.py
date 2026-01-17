@@ -115,11 +115,11 @@ class TradingState:
         self.pause_until: Optional[datetime] = None
         
         # Настройки защиты
-        self.MAX_CONSECUTIVE_LOSSES = 3  # После 3 убытков подряд - пауза
-        self.MAX_DAILY_TRADES = 5        # Максимум сделок в день
-        self.MAX_DAILY_LOSS_PERCENT = 5  # Макс убыток в день 5%
-        self.MIN_TIME_BETWEEN_TRADES = 30  # Минут между сделками
-        self.PAUSE_AFTER_LOSSES_HOURS = 4  # Часов паузы после серии убытков
+        self.MAX_CONSECUTIVE_LOSSES = 4  # После 4 убытков подряд - пауза
+        self.MAX_DAILY_TRADES = 10       # Максимум сделок в день
+        self.MAX_DAILY_LOSS_PERCENT = 10 # Макс убыток в день 10%
+        self.MIN_TIME_BETWEEN_TRADES = 10 # Минут между сделками
+        self.PAUSE_AFTER_LOSSES_HOURS = 2 # Часов паузы после серии убытков
     
     def reset_daily(self):
         """Сброс дневных счётчиков"""
@@ -202,10 +202,10 @@ class SmartAnalyzer:
         self.cache_ttl = 30  # секунд
         self.state = TradingState()
         
-        # Настройки качества - ТОЛЬКО КАЧЕСТВЕННЫЕ СЕТАПЫ
-        self.MIN_QUALITY = SetupQuality.A  # Минимум A-сетап (A+ или A)
-        self.MIN_RISK_REWARD = 2.5         # Минимальное соотношение R/R 1:2.5
-        self.MIN_CONFIDENCE = 0.70         # Минимальная уверенность 70%
+        # Настройки качества - баланс между качеством и количеством
+        self.MIN_QUALITY = SetupQuality.B  # Минимум B-сетап (A+, A, B)
+        self.MIN_RISK_REWARD = 2.0         # Минимальное соотношение R/R 1:2
+        self.MIN_CONFIDENCE = 0.55         # Минимальная уверенность 55%
         
         # Торговые сессии (UTC)
         self.LONDON_OPEN = 7
@@ -667,63 +667,63 @@ class SmartAnalyzer:
         }
         
         # === ЭКСТРЕМАЛЬНОЕ ПАДЕНИЕ (перепроданность) ===
-        if change_15m < -2.5 or change_10m < -2.0 or change_5m < -1.5:
+        if change_15m < -1.5 or change_10m < -1.2 or change_5m < -0.8:
             result['extreme'] = True
             result['type'] = 'OVERSOLD'
             result['signal'] = 'LONG'  # Покупаем на перепроданности
             
             # Сила сигнала
             strength = 0
-            if change_15m < -4:
+            if change_15m < -3:
                 strength += 3
                 result['reasoning'].append(f"🔥 Обвал -{abs(change_15m):.1f}% за 15 мин")
-            elif change_15m < -3:
+            elif change_15m < -2:
                 strength += 2
                 result['reasoning'].append(f"📉 Сильное падение -{abs(change_15m):.1f}% за 15 мин")
-            elif change_15m < -2.5:
+            elif change_15m < -1.5:
                 strength += 1
                 result['reasoning'].append(f"📉 Падение -{abs(change_15m):.1f}% за 15 мин")
             
-            if change_5m < -1.5:
+            if change_5m < -0.8:
                 strength += 1
                 result['reasoning'].append(f"⚡ Резкое движение -{abs(change_5m):.1f}% за 5 мин")
             
             # Объём подтверждает
-            if volume_spike > 2:
+            if volume_spike > 1.5:
                 strength += 2
                 result['reasoning'].append(f"📊 Всплеск объёма x{volume_spike:.1f}")
-            elif volume_spike > 1.5:
+            elif volume_spike > 1.2:
                 strength += 1
             
             result['strength'] = min(5, strength)
             
         # === ЭКСТРЕМАЛЬНЫЙ РОСТ (перекупленность) ===
-        elif change_15m > 2.5 or change_10m > 2.0 or change_5m > 1.5:
+        elif change_15m > 1.5 or change_10m > 1.2 or change_5m > 0.8:
             result['extreme'] = True
             result['type'] = 'OVERBOUGHT'
             result['signal'] = 'SHORT'  # Продаём на перекупленности
             
             # Сила сигнала
             strength = 0
-            if change_15m > 4:
+            if change_15m > 3:
                 strength += 3
                 result['reasoning'].append(f"🚀 Памп +{change_15m:.1f}% за 15 мин")
-            elif change_15m > 3:
+            elif change_15m > 2:
                 strength += 2
                 result['reasoning'].append(f"📈 Сильный рост +{change_15m:.1f}% за 15 мин")
-            elif change_15m > 2.5:
+            elif change_15m > 1.5:
                 strength += 1
                 result['reasoning'].append(f"📈 Рост +{change_15m:.1f}% за 15 мин")
             
-            if change_5m > 1.5:
+            if change_5m > 0.8:
                 strength += 1
                 result['reasoning'].append(f"⚡ Резкое движение +{change_5m:.1f}% за 5 мин")
             
             # Объём подтверждает
-            if volume_spike > 2:
+            if volume_spike > 1.5:
                 strength += 2
                 result['reasoning'].append(f"📊 Всплеск объёма x{volume_spike:.1f}")
-            elif volume_spike > 1.5:
+            elif volume_spike > 1.2:
                 strength += 1
             
             result['strength'] = min(5, strength)
@@ -1568,14 +1568,14 @@ class SmartAnalyzer:
                     bearish_signals += 2
         
         # === ДИСБАЛАНС-ЛОГИКА: Если нет сигнала по тренду, но есть сильный дисбаланс ===
-        if direction is None and (bullish_signals >= 5 or bearish_signals >= 5):
+        if direction is None and (bullish_signals >= 4 or bearish_signals >= 4):
             # Сильный дисбаланс может создать сигнал даже без тренда
-            if bullish_signals >= 5 and bullish_signals > bearish_signals * 1.5:
+            if bullish_signals >= 4 and bullish_signals > bearish_signals * 1.3:
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
                 reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перепроданность")
                 logger.info(f"[SMART] IMBALANCE LONG: {bullish_signals} vs {bearish_signals}")
-            elif bearish_signals >= 5 and bearish_signals > bullish_signals * 1.5:
+            elif bearish_signals >= 4 and bearish_signals > bullish_signals * 1.3:
                 direction = "SHORT"
                 signal_type = SignalType.TREND_REVERSAL
                 reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перекупленность")
@@ -1672,30 +1672,23 @@ class SmartAnalyzer:
         # Отслеживаем дисбаланс-сделки
         if extreme_move['extreme']:
             _signal_stats['extreme_moves_detected'] += 1
-        if signal_type == SignalType.TREND_REVERSAL and (bullish_signals >= 5 or bearish_signals >= 5):
+        if signal_type == SignalType.TREND_REVERSAL and (bullish_signals >= 4 or bearish_signals >= 4):
             _signal_stats['imbalance_trades'] += 1
         
         return setup
     
     def _is_good_trading_time(self) -> bool:
-        """Проверка торгового времени"""
+        """Проверка торгового времени - крипта 24/7, всегда разрешено"""
+        # Крипта торгуется 24/7, убираем ограничение по часам
+        # Но избегаем только очень низколиквидных часов (3-5 UTC)
         hour = datetime.now(timezone.utc).hour
         
-        # Лондон или Нью-Йорк сессия
-        london_active = self.LONDON_OPEN <= hour < self.LONDON_CLOSE
-        ny_active = self.NY_OPEN <= hour < self.NY_CLOSE
+        # Очень низкая ликвидность только 3-5 UTC (азиатская ночь)
+        if 3 <= hour < 5:
+            logger.debug(f"[TIME] Low liquidity hours ({hour} UTC) - but still allowed")
+            # Всё равно разрешаем, но логируем
         
-        # Лучшее время - overlap
-        is_overlap = self.NY_OPEN <= hour < self.LONDON_CLOSE
-        
-        if is_overlap:
-            logger.debug(f"[TIME] London/NY overlap - best time")
-            return True
-        elif london_active or ny_active:
-            return True
-        else:
-            logger.debug(f"[TIME] Outside main sessions (hour={hour} UTC)")
-            return False
+        return True  # Крипта 24/7
     
     # ==================== COIN SELECTION ====================
     
@@ -1797,7 +1790,7 @@ async def find_best_setup(balance: float = 0) -> Optional[TradeSetup]:
     Возвращает только качественные сетапы (A+, A, B)
     """
     # Выбираем монеты
-    coins = await smart_analyzer.select_best_coins(top_n=5)
+    coins = await smart_analyzer.select_best_coins(top_n=10)
     
     best_setup: Optional[TradeSetup] = None
     
