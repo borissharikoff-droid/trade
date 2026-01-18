@@ -19,7 +19,15 @@ from smart_analyzer import (
     increment_bybit_opened
 )
 
-# Продвинутые модули
+load_dotenv()
+
+# Умный анализатор v2.0 - единственный режим
+smart = SmartAnalyzer()
+
+logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Продвинутые модули (после создания logger)
 try:
     from whale_tracker import get_whale_signal, get_combined_whale_analysis, WhaleSignal
     from advanced_signals import (
@@ -31,14 +39,6 @@ try:
 except ImportError as e:
     ADVANCED_FEATURES = False
     logger.warning(f"[INIT] Advanced features disabled: {e}")
-
-load_dotenv()
-
-# Умный анализатор v2.0 - единственный режим
-smart = SmartAnalyzer()
-
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # ==================== DATABASE ====================
 DATABASE_URL = os.environ.get("DATABASE_URL")
