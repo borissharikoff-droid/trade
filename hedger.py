@@ -17,6 +17,20 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+# #region agent log - Debug instrumentation
+DEBUG_LOG_PATH = r"c:\random bot\.cursor\debug.log"
+def debug_log(hypothesis_id: str, location: str, message: str, data: dict = None):
+    """Write NDJSON debug log entry"""
+    try:
+        import os as _os
+        _os.makedirs(_os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
+        entry = {"timestamp": datetime.now().isoformat(), "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "sessionId": "debug-session"}
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        pass  # Silent fail for debug logging
+# #endregion
+
 class BybitHedger:
     """Хеджирование сделок через Bybit"""
     
@@ -213,26 +227,45 @@ class BybitHedger:
             ret_msg = data.get('retMsg')
             logger.info(f"[BYBIT] Response: retCode={ret_code}, retMsg={ret_msg}")
             
+            # #region agent log
+            debug_log("D", "bybit_request:response", "Bybit API response", {"endpoint": endpoint, "ret_code": ret_code, "ret_msg": ret_msg, "method": method})
+            # #endregion
+            
             if ret_code == 0:
                 return data.get("result")
             elif ret_code == 10003:
                 logger.error(f"[BYBIT] ❌ API KEY INVALID!")
+                # #region agent log
+                debug_log("D", "bybit_request:error", "API KEY INVALID", {"ret_code": ret_code})
+                # #endregion
                 return None
             elif ret_code == 10004:
                 logger.error(f"[BYBIT] ❌ Неверная подпись!")
+                # #region agent log
+                debug_log("D", "bybit_request:error", "Invalid signature", {"ret_code": ret_code})
+                # #endregion
                 return None
             elif ret_code == 110007:
                 logger.error(f"[BYBIT] ❌ Недостаточно баланса!")
+                # #region agent log
+                debug_log("D", "bybit_request:error", "Insufficient balance", {"ret_code": ret_code})
+                # #endregion
                 return None
             elif ret_code == 110073:
                 logger.error(f"[BYBIT] ❌ TP/SL слишком близко к цене! Пробуем без TP/SL...")
                 return None
             elif ret_code == 110017:
                 logger.error(f"[BYBIT] ❌ Слишком маленький размер ордера!")
+                # #region agent log
+                debug_log("D", "bybit_request:error", "Order size too small", {"ret_code": ret_code})
+                # #endregion
                 return None
             else:
                 logger.error(f"[BYBIT] API Error: {ret_msg} (code: {ret_code})")
                 logger.error(f"[BYBIT] Full response: {data}")
+                # #region agent log
+                debug_log("D", "bybit_request:error", "Unknown API error", {"ret_code": ret_code, "ret_msg": ret_msg})
+                # #endregion
                 return None
                 
         except Exception as e:
@@ -338,6 +371,10 @@ class BybitHedger:
         Returns:
             {'order_id': str, 'qty': float} если успешно, None если ошибка
         """
+        # #region agent log
+        debug_log("D", "open_hedge:entry", "Opening hedge position", {"position_id": position_id, "symbol": symbol, "direction": direction, "amount_usd": amount_usd, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl, "enabled": self.enabled, "demo": self.demo, "testnet": self.testnet})
+        # #endregion
+        
         # Если tp1 не указан, используем tp как tp1
         if tp1 is None and tp is not None:
             tp1 = tp
@@ -417,6 +454,10 @@ class BybitHedger:
             self.hedge_positions[position_id] = order_id
             logger.info(f"[HEDGE] ✓ Открыто: {order_id}, qty={qty}")
             
+            # #region agent log
+            debug_log("D", "open_hedge:success", "Hedge opened successfully", {"order_id": order_id, "qty": qty, "symbol": bybit_symbol})
+            # #endregion
+            
             # Устанавливаем SL через trading-stop
             if sl is not None:
                 await self.set_trading_stop(bybit_symbol, direction, sl=sl)
@@ -442,6 +483,9 @@ class BybitHedger:
             # Возвращаем Dict с order_id и реальным qty
             return {'order_id': order_id, 'qty': qty}
         else:
+            # #region agent log
+            debug_log("D", "open_hedge:failed", "Failed to open hedge", {"symbol": bybit_symbol, "side": side, "qty": qty})
+            # #endregion
             logger.error(f"[HEDGE] ✗ Ошибка открытия позиции")
             return None
     

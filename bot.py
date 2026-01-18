@@ -8,6 +8,20 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
+# #region agent log - Debug instrumentation
+DEBUG_LOG_PATH = r"c:\random bot\.cursor\debug.log"
+def debug_log(hypothesis_id: str, location: str, message: str, data: dict = None):
+    """Write NDJSON debug log entry"""
+    try:
+        import os as _os
+        _os.makedirs(_os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
+        entry = {"timestamp": datetime.now().isoformat(), "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "sessionId": "debug-session"}
+        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        pass  # Silent fail for debug logging
+# #endregion
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 from telegram.error import BadRequest
@@ -1081,8 +1095,12 @@ def save_user(user_id: int):
 
 def get_positions(user_id: int) -> List[Dict]:
     """Получить позиции (с кэшированием)"""
+    cache_hit = user_id in positions_cache
     if user_id not in positions_cache:
         positions_cache[user_id] = db_get_positions(user_id)
+    # #region agent log
+    debug_log("E", "get_positions", "Getting positions", {"user_id": user_id, "cache_hit": cache_hit, "count": len(positions_cache[user_id]), "position_ids": [p.get('id') for p in positions_cache[user_id]]})
+    # #endregion
     return positions_cache[user_id]
 
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
@@ -1597,7 +1615,14 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
     Returns:
         Количество синхронизированных (закрытых) позиций
     """
+    # #region agent log
+    debug_log("A", "sync_bybit_positions:entry", "Sync started", {"user_id": user_id})
+    # #endregion
+    
     if not await is_hedging_enabled():
+        # #region agent log
+        debug_log("A", "sync_bybit_positions:skip", "Hedging disabled", {})
+        # #endregion
         return 0
 
     user_positions = get_positions(user_id)
@@ -1611,6 +1636,10 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
     bybit_positions = await hedger.get_all_positions()
     # Словарь: symbol -> size (размер позиции)
     bybit_sizes = {pos['symbol']: float(pos.get('size', 0)) for pos in bybit_positions}
+    
+    # #region agent log
+    debug_log("A", "sync_bybit_positions:bybit_data", "Bybit positions fetched", {"bybit_count": len(bybit_positions), "bybit_sizes": bybit_sizes, "bot_positions_count": len(user_positions)})
+    # #endregion
 
     # Получаем закрытые позиции за последние 7 дней
     closed_pnl = await hedger.get_closed_pnl(limit=100)
@@ -2268,6 +2297,10 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     global smart
     
+    # #region agent log
+    debug_log("B", "send_smart_signal:entry", "Smart signal job started", {"time": datetime.now().isoformat()})
+    # #endregion
+    
     logger.info("[SMART] ========== Smart Signal v2.0 ==========")
     
     # Получаем активных юзеров
@@ -2355,6 +2388,10 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         # === АВТО-ТОРГОВЛЯ ===
         auto_trade_executed = False
         
+        # #region agent log
+        debug_log("B", "send_smart_signal:auto_trade_check", "Checking auto-trade conditions", {"has_auto_trade": has_auto_trade, "AUTO_TRADE_USER_ID": AUTO_TRADE_USER_ID})
+        # #endregion
+        
         if has_auto_trade and AUTO_TRADE_USER_ID:
             auto_user = get_user(AUTO_TRADE_USER_ID)
             auto_balance = auto_user.get('balance', 0)
@@ -2364,6 +2401,10 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
             user_max_daily = auto_user.get('auto_trade_max_daily', 10)
             user_today_count = auto_user.get('auto_trade_today', 0)
+            
+            # #region agent log
+            debug_log("B", "send_smart_signal:auto_trade_settings", "Auto-trade settings", {"user_auto_enabled": user_auto_enabled, "auto_balance": auto_balance, "user_min_winrate": user_min_winrate, "user_max_daily": user_max_daily, "user_today_count": user_today_count, "confidence_percent": confidence_percent})
+            # #endregion
             
             # Сброс счётчика
             from datetime import date as dt_date
@@ -2605,6 +2646,10 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     user = get_user(user_id)
     user_positions = get_positions(user_id)
+    
+    # #region agent log
+    debug_log("E", "enter_trade:entry", "User entering trade", {"user_id": user_id, "balance": user.get('balance'), "positions_count": len(user_positions), "callback_data": query.data[:100]})
+    # #endregion
 
     # e|SYM|D|ENTRY|SL|TP1|TP2|TP3|AMT|WINRATE
     data = query.data.split("|")
@@ -3355,6 +3400,10 @@ async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обновление цен и PnL с реальными данными Bybit (если хеджирование) или Binance"""
     
+    # #region agent log
+    debug_log("C", "update_positions:entry", "Update positions job started", {"positions_cache_users": list(positions_cache.keys()), "total_positions": sum(len(p) for p in positions_cache.values())})
+    # #endregion
+    
     # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
     bybit_open_symbols = set()
     bybit_sync_available = False  # Флаг что данные с Bybit получены успешно
@@ -3491,6 +3540,11 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 hit_tp2 = pos['current'] <= tp2 and not pos.get('tp2_hit', False)
                 hit_tp3 = pos['current'] <= tp3
                 hit_sl = pos['current'] >= pos['sl']
+            
+            # #region agent log
+            if hit_tp1 or hit_tp2 or hit_tp3 or hit_sl:
+                debug_log("C", "update_positions:tp_sl_check", "TP/SL condition detected", {"pos_id": pos['id'], "symbol": pos['symbol'], "direction": pos['direction'], "current": pos['current'], "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": pos['sl'], "hit_tp1": hit_tp1, "hit_tp2": hit_tp2, "hit_tp3": hit_tp3, "hit_sl": hit_sl, "tp1_hit_flag": pos.get('tp1_hit', False), "tp2_hit_flag": pos.get('tp2_hit', False), "pnl": pos['pnl']})
+            # #endregion
             
             # === TP1: Закрываем 50%, двигаем SL в безубыток ===
             if hit_tp1 and not hit_sl:
@@ -4720,6 +4774,10 @@ def main() -> None:
     if not token:
         logger.error("BOT_TOKEN not set")
         return
+    
+    # #region agent log
+    debug_log("INIT", "main:startup", "Bot starting", {"bybit_enabled": bool(os.getenv("BYBIT_API_KEY")), "demo_mode": os.getenv("BYBIT_DEMO", ""), "admin_ids": os.getenv("ADMIN_IDS", "")})
+    # #endregion
     
     # Load persistent data from DB
     load_pending_commission()
