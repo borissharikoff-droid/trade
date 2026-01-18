@@ -18,17 +18,9 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # #region agent log - Debug instrumentation
-import os as _debug_os
-DEBUG_LOG_PATH = _debug_os.path.join(_debug_os.path.dirname(_debug_os.path.abspath(__file__)), ".cursor", "debug.log")
 def debug_log(hypothesis_id: str, location: str, message: str, data: dict = None):
-    """Write NDJSON debug log entry"""
-    try:
-        _debug_os.makedirs(_debug_os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
-        entry = {"timestamp": datetime.now().isoformat(), "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "sessionId": "debug-session"}
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[DEBUG_LOG_ERROR] {e}")
+    """Write debug log via print"""
+    print(f"[DBG:{hypothesis_id}] {location} | {message} | {data}")
 # #endregion
 
 class BybitHedger:

@@ -9,16 +9,9 @@ from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
 # #region agent log - Debug instrumentation
-DEBUG_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug.log")
 def debug_log(hypothesis_id: str, location: str, message: str, data: dict = None):
-    """Write NDJSON debug log entry"""
-    try:
-        os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
-        entry = {"timestamp": datetime.now().isoformat(), "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "sessionId": "debug-session"}
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception as e:
-        print(f"[DEBUG_LOG_ERROR] {e}")  # Временно выводим ошибки
+    """Write debug log via logger"""
+    print(f"[DBG:{hypothesis_id}] {location} | {message} | {data}")
 # #endregion
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
@@ -3974,6 +3967,78 @@ R/R: 1:{setup.risk_reward:.1f}
         await smart.close()
 
 
+async def force_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Принудительная генерация тестового сигнала (игнорирует фильтры качества)"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ закрыт")
+        return
+    
+    await update.message.reply_text("🔧 Генерирую принудительный тестовый сигнал BTC...")
+    
+    try:
+        # Получаем текущую цену BTC
+        symbol = "BTC/USDT"
+        price = await get_real_price(symbol)
+        
+        if not price:
+            await update.message.reply_text("❌ Не удалось получить цену BTC")
+            return
+        
+        # Генерируем простой сигнал для тестирования
+        direction = "LONG"  # Всегда LONG для теста
+        atr_percent = 0.5  # 0.5% ATR
+        atr = price * (atr_percent / 100)
+        
+        entry = price
+        sl = entry - (atr * 1.5)  # SL 1.5 ATR
+        tp1 = entry + (atr * 2.0)  # TP1 2 ATR
+        tp2 = entry + (atr * 3.0)  # TP2 3 ATR  
+        tp3 = entry + (atr * 4.0)  # TP3 4 ATR
+        
+        confidence = 75
+        risk_reward = 2.0 / 1.5  # ~1.33
+        
+        text = f"""🔧 <b>FORCE TEST SIGNAL</b>
+
+<b>{symbol}</b> | {direction}
+Качество: TEST (игнорирует фильтры)
+Confidence: {confidence}%
+R/R: 1:{risk_reward:.1f}
+
+<b>Вход:</b> {format_price(entry)}
+<b>TP1:</b> {format_price(tp1)} (+{((tp1/entry)-1)*100:.2f}%)
+<b>TP2:</b> {format_price(tp2)} (+{((tp2/entry)-1)*100:.2f}%)
+<b>TP3:</b> {format_price(tp3)} (+{((tp3/entry)-1)*100:.2f}%)
+<b>SL:</b> {format_price(sl)} ({((sl/entry)-1)*100:.2f}%)
+
+⚠️ Это тестовый сигнал для проверки механики бота."""
+        
+        # Создаём кнопки для входа
+        keyboard = [
+            [InlineKeyboardButton(f"✅ LONG $10", callback_data=f"e|{symbol}|{direction}|{entry}|{sl}|{tp1}|{tp2}|{tp3}|10|{confidence}")],
+            [InlineKeyboardButton(f"✅ LONG $25", callback_data=f"e|{symbol}|{direction}|{entry}|{sl}|{tp1}|{tp2}|{tp3}|25|{confidence}")],
+            [InlineKeyboardButton(f"✅ LONG $50", callback_data=f"e|{symbol}|{direction}|{entry}|{sl}|{tp1}|{tp2}|{tp3}|50|{confidence}")],
+            [InlineKeyboardButton("❌ Пропустить", callback_data="skip")]
+        ]
+        
+        await update.message.reply_text(
+            text, 
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        # #region agent log
+        debug_log("TEST", "force_signal:created", "Force signal created", {"symbol": symbol, "direction": direction, "entry": entry, "sl": sl, "tp1": tp1})
+        # #endregion
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 async def whale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Анализ китов на Hyperliquid: /whale [COIN]"""
     user_id = update.effective_user.id
@@ -4802,6 +4867,7 @@ def main() -> None:
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
+    app.add_handler(CommandHandler("forcesignal", force_signal))
     app.add_handler(CommandHandler("signalstats", signal_stats_cmd))
     app.add_handler(CommandHandler("whale", whale_cmd))
     app.add_handler(CommandHandler("memes", memes_cmd))
