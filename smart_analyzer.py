@@ -101,6 +101,37 @@ class TradeSetup:
     timestamp: datetime
 
 
+@dataclass
+class OrderBlock:
+    """Order Block - зона институционального интереса"""
+    price_high: float
+    price_low: float
+    type: str  # 'bullish', 'bearish'
+    strength: float  # 0-1
+    index: int
+    mitigated: bool = False  # Был ли блок уже протестирован
+
+
+@dataclass
+class FairValueGap:
+    """Fair Value Gap - гэп справедливой стоимости"""
+    high: float
+    low: float
+    type: str  # 'bullish', 'bearish'
+    index: int
+    filled: bool = False  # Был ли гэп заполнен
+
+
+@dataclass
+class MTFAnalysis:
+    """Multi-Timeframe Analysis результат"""
+    trend_4h: str  # 'BULLISH', 'BEARISH', 'NEUTRAL'
+    trend_1h: str
+    trend_15m: str
+    aligned: bool
+    strength: int  # 0-3, сколько TF согласны
+
+
 # ==================== TRADING STATE ====================
 class TradingState:
     """Состояние торговли для защиты капитала"""
@@ -254,6 +285,748 @@ class SmartAnalyzer:
         except Exception as e:
             logger.warning(f"[PRICE] Error {symbol}: {e}")
         return 0
+    
+    # ==================== MULTI-TIMEFRAME ANALYSIS ====================
+    
+    async def analyze_mtf(self, symbol: str) -> MTFAnalysis:
+        """
+        Multi-Timeframe Analysis - анализ на нескольких таймфреймах
+        
+        4H - основной тренд (доминирующий)
+        1H - подтверждение тренда
+        15M - точка входа
+        
+        Сигнал только когда все TF согласны
+        """
+        # Получаем данные для каждого таймфрейма
+        klines_4h = await self.get_klines(symbol, '4h', 50)
+        klines_1h = await self.get_klines(symbol, '1h', 50)
+        klines_15m = await self.get_klines(symbol, '15m', 50)
+        
+        def get_trend(klines) -> str:
+            """Определить тренд по EMA и структуре"""
+            if not klines or len(klines) < 20:
+                return 'NEUTRAL'
+            
+            closes = [float(k[4]) for k in klines]
+            
+            # EMA 8 и EMA 21
+            ema_8 = self.calculate_ema(closes, 8)
+            ema_21 = self.calculate_ema(closes, 21)
+            
+            if not ema_8 or not ema_21:
+                return 'NEUTRAL'
+            
+            current_price = closes[-1]
+            ema_8_val = ema_8[-1]
+            ema_21_val = ema_21[-1]
+            
+            # Bullish: цена > EMA8 > EMA21
+            if current_price > ema_8_val > ema_21_val:
+                # Проверяем силу тренда
+                trend_strength = (current_price - ema_21_val) / ema_21_val * 100
+                if trend_strength > 0.5:
+                    return 'BULLISH'
+            
+            # Bearish: цена < EMA8 < EMA21
+            if current_price < ema_8_val < ema_21_val:
+                trend_strength = (ema_21_val - current_price) / ema_21_val * 100
+                if trend_strength > 0.5:
+                    return 'BEARISH'
+            
+            return 'NEUTRAL'
+        
+        trend_4h = get_trend(klines_4h)
+        trend_1h = get_trend(klines_1h)
+        trend_15m = get_trend(klines_15m)
+        
+        # Считаем согласованность
+        trends = [trend_4h, trend_1h, trend_15m]
+        bullish_count = trends.count('BULLISH')
+        bearish_count = trends.count('BEARISH')
+        
+        # Все согласны?
+        aligned = (bullish_count == 3) or (bearish_count == 3)
+        
+        # Сила - сколько TF в одном направлении
+        strength = max(bullish_count, bearish_count)
+        
+        result = MTFAnalysis(
+            trend_4h=trend_4h,
+            trend_1h=trend_1h,
+            trend_15m=trend_15m,
+            aligned=aligned,
+            strength=strength
+        )
+        
+        if aligned:
+            direction = 'BULLISH' if bullish_count == 3 else 'BEARISH'
+            logger.info(f"[MTF] {symbol}: All timeframes aligned {direction}")
+        else:
+            logger.info(f"[MTF] {symbol}: 4H={trend_4h}, 1H={trend_1h}, 15M={trend_15m} (not aligned)")
+        
+        return result
+    
+    # ==================== SMART MONEY CONCEPTS ====================
+    
+    def find_order_blocks(self, opens: List[float], highs: List[float], 
+                          lows: List[float], closes: List[float],
+                          min_impulse_percent: float = 0.5) -> List[OrderBlock]:
+        """
+        Найти Order Blocks - зоны институционального интереса
+        
+        Bullish OB: последняя медвежья свеча перед сильным импульсом вверх
+        Bearish OB: последняя бычья свеча перед сильным импульсом вниз
+        
+        Args:
+            min_impulse_percent: минимальный размер импульса в % для подтверждения OB
+        """
+        order_blocks = []
+        n = len(closes)
+        
+        if n < 10:
+            return order_blocks
+        
+        for i in range(3, n - 2):
+            # Проверяем импульс после свечи i
+            # Импульс = движение за следующие 2-3 свечи
+            impulse_high = max(highs[i+1:min(i+4, n)])
+            impulse_low = min(lows[i+1:min(i+4, n)])
+            
+            current_close = closes[i]
+            current_open = opens[i]
+            is_bearish_candle = current_close < current_open
+            is_bullish_candle = current_close > current_open
+            
+            # BULLISH ORDER BLOCK
+            # Медвежья свеча, после которой цена сильно выросла
+            if is_bearish_candle:
+                impulse_up = (impulse_high - highs[i]) / highs[i] * 100
+                if impulse_up >= min_impulse_percent:
+                    # Это Bullish OB
+                    ob = OrderBlock(
+                        price_high=highs[i],
+                        price_low=lows[i],
+                        type='bullish',
+                        strength=min(1.0, impulse_up / 2),  # Нормализуем силу
+                        index=i,
+                        mitigated=False
+                    )
+                    # Проверяем, был ли OB уже протестирован
+                    for j in range(i + 4, n):
+                        if lows[j] <= ob.price_high:
+                            ob.mitigated = True
+                            break
+                    order_blocks.append(ob)
+            
+            # BEARISH ORDER BLOCK
+            # Бычья свеча, после которой цена сильно упала
+            if is_bullish_candle:
+                impulse_down = (lows[i] - impulse_low) / lows[i] * 100
+                if impulse_down >= min_impulse_percent:
+                    # Это Bearish OB
+                    ob = OrderBlock(
+                        price_high=highs[i],
+                        price_low=lows[i],
+                        type='bearish',
+                        strength=min(1.0, impulse_down / 2),
+                        index=i,
+                        mitigated=False
+                    )
+                    # Проверяем, был ли OB уже протестирован
+                    for j in range(i + 4, n):
+                        if highs[j] >= ob.price_low:
+                            ob.mitigated = True
+                            break
+                    order_blocks.append(ob)
+        
+        # Возвращаем только непротестированные OB (свежие)
+        fresh_obs = [ob for ob in order_blocks if not ob.mitigated]
+        logger.info(f"[SMC] Found {len(fresh_obs)} fresh Order Blocks (total: {len(order_blocks)})")
+        
+        return fresh_obs[-5:]  # Последние 5 свежих OB
+    
+    def find_fair_value_gaps(self, highs: List[float], lows: List[float],
+                             min_gap_percent: float = 0.1) -> List[FairValueGap]:
+        """
+        Найти Fair Value Gaps (FVG) - гэпы справедливой стоимости
+        
+        Bullish FVG: low[i] > high[i-2] (гэп вверх)
+        Bearish FVG: high[i] < low[i-2] (гэп вниз)
+        
+        Цена стремится заполнить эти гэпы
+        """
+        fvgs = []
+        n = len(highs)
+        
+        if n < 5:
+            return fvgs
+        
+        for i in range(2, n):
+            # BULLISH FVG (гэп вверх)
+            # Между high свечи i-2 и low свечи i есть пробел
+            gap_up = lows[i] - highs[i-2]
+            if gap_up > 0:
+                gap_percent = gap_up / highs[i-2] * 100
+                if gap_percent >= min_gap_percent:
+                    fvg = FairValueGap(
+                        high=lows[i],      # Верх гэпа = low текущей свечи
+                        low=highs[i-2],    # Низ гэпа = high свечи i-2
+                        type='bullish',
+                        index=i,
+                        filled=False
+                    )
+                    # Проверяем, был ли гэп заполнен
+                    for j in range(i + 1, n):
+                        if lows[j] <= fvg.low:
+                            fvg.filled = True
+                            break
+                    fvgs.append(fvg)
+            
+            # BEARISH FVG (гэп вниз)
+            gap_down = lows[i-2] - highs[i]
+            if gap_down > 0:
+                gap_percent = gap_down / lows[i-2] * 100
+                if gap_percent >= min_gap_percent:
+                    fvg = FairValueGap(
+                        high=lows[i-2],    # Верх гэпа = low свечи i-2
+                        low=highs[i],      # Низ гэпа = high текущей свечи
+                        type='bearish',
+                        index=i,
+                        filled=False
+                    )
+                    # Проверяем, был ли гэп заполнен
+                    for j in range(i + 1, n):
+                        if highs[j] >= fvg.high:
+                            fvg.filled = True
+                            break
+                    fvgs.append(fvg)
+        
+        # Возвращаем только незаполненные гэпы
+        unfilled = [fvg for fvg in fvgs if not fvg.filled]
+        logger.info(f"[SMC] Found {len(unfilled)} unfilled FVGs (total: {len(fvgs)})")
+        
+        return unfilled[-5:]  # Последние 5 незаполненных
+    
+    def detect_liquidity_sweep(self, highs: List[float], lows: List[float],
+                               swings: List[SwingPoint], 
+                               current_price: float) -> Optional[Dict]:
+        """
+        Обнаружить Liquidity Sweep - сбор ликвидности
+        
+        Sweep = пробой предыдущего swing high/low с быстрым возвратом
+        Это сигнал разворота - "умные деньги" собрали стопы и развернули рынок
+        
+        Returns:
+            {'type': 'bullish'/'bearish', 'swept_level': float, 'strength': float}
+        """
+        if len(swings) < 3 or len(highs) < 5:
+            return None
+        
+        n = len(highs)
+        
+        # Ищем sweep за последние 5 свечей
+        for i in range(max(0, n - 5), n):
+            # BULLISH SWEEP (sweep low + возврат вверх)
+            # Свеча пробила swing low, но закрылась выше
+            for swing in swings:
+                if swing.type in ['LL', 'HL', 'LOW']:
+                    # Проверяем, был ли sweep этого уровня
+                    if lows[i] < swing.price < current_price:
+                        # Low свечи ниже swing, но текущая цена выше
+                        # Это потенциальный bullish sweep
+                        sweep_depth = (swing.price - lows[i]) / swing.price * 100
+                        if sweep_depth > 0.1:  # Минимум 0.1% sweep
+                            logger.info(f"[SMC] Bullish liquidity sweep detected at {swing.price:.2f}")
+                            return {
+                                'type': 'bullish',
+                                'swept_level': swing.price,
+                                'strength': min(1.0, sweep_depth * 2),
+                                'reasoning': f"🎯 Sweep ликвидности на {swing.price:.2f}"
+                            }
+            
+            # BEARISH SWEEP (sweep high + возврат вниз)
+            for swing in swings:
+                if swing.type in ['HH', 'LH', 'HIGH']:
+                    if highs[i] > swing.price > current_price:
+                        sweep_depth = (highs[i] - swing.price) / swing.price * 100
+                        if sweep_depth > 0.1:
+                            logger.info(f"[SMC] Bearish liquidity sweep detected at {swing.price:.2f}")
+                            return {
+                                'type': 'bearish',
+                                'swept_level': swing.price,
+                                'strength': min(1.0, sweep_depth * 2),
+                                'reasoning': f"🎯 Sweep ликвидности на {swing.price:.2f}"
+                            }
+        
+        return None
+    
+    def check_price_at_ob(self, current_price: float, 
+                          order_blocks: List[OrderBlock],
+                          tolerance: float = 0.003) -> Optional[OrderBlock]:
+        """Проверить, находится ли цена у Order Block"""
+        for ob in order_blocks:
+            if ob.type == 'bullish':
+                # Для bullish OB проверяем, что цена около зоны
+                if ob.price_low * (1 - tolerance) <= current_price <= ob.price_high * (1 + tolerance):
+                    return ob
+            else:  # bearish
+                if ob.price_low * (1 - tolerance) <= current_price <= ob.price_high * (1 + tolerance):
+                    return ob
+        return None
+    
+    def check_price_in_fvg(self, current_price: float,
+                           fvgs: List[FairValueGap],
+                           tolerance: float = 0.002) -> Optional[FairValueGap]:
+        """Проверить, находится ли цена в Fair Value Gap"""
+        for fvg in fvgs:
+            if fvg.low * (1 - tolerance) <= current_price <= fvg.high * (1 + tolerance):
+                return fvg
+        return None
+    
+    # ==================== DIVERGENCE DETECTION ====================
+    
+    def detect_divergence(self, closes: List[float], 
+                          highs: List[float], 
+                          lows: List[float],
+                          lookback: int = 14) -> Dict:
+        """
+        Обнаружить RSI дивергенции - сильный сигнал разворота
+        
+        Regular Bullish Divergence: цена делает LL, RSI делает HL
+        Regular Bearish Divergence: цена делает HH, RSI делает LH
+        
+        Hidden Bullish Divergence: цена делает HL, RSI делает LL (продолжение тренда)
+        Hidden Bearish Divergence: цена делает LH, RSI делает HH (продолжение тренда)
+        """
+        result = {
+            'found': False,
+            'type': None,  # 'regular_bullish', 'regular_bearish', 'hidden_bullish', 'hidden_bearish'
+            'strength': 0,
+            'reasoning': None
+        }
+        
+        if len(closes) < lookback + 10:
+            return result
+        
+        # Рассчитываем RSI
+        rsi_values = []
+        for i in range(lookback, len(closes)):
+            rsi = self._calculate_rsi_at(closes[:i+1], lookback)
+            rsi_values.append(rsi)
+        
+        if len(rsi_values) < 10:
+            return result
+        
+        # Находим локальные минимумы и максимумы цены и RSI за последние 20 свечей
+        price_window = closes[-20:]
+        rsi_window = rsi_values[-20:]
+        low_window = lows[-20:]
+        high_window = highs[-20:]
+        
+        # Ищем два последних минимума цены
+        price_lows = []
+        rsi_at_lows = []
+        for i in range(2, len(price_window) - 2):
+            if low_window[i] < low_window[i-1] and low_window[i] < low_window[i-2] and \
+               low_window[i] < low_window[i+1] and low_window[i] < low_window[i+2]:
+                price_lows.append((i, low_window[i]))
+                rsi_at_lows.append((i, rsi_window[i] if i < len(rsi_window) else 50))
+        
+        # Ищем два последних максимума цены
+        price_highs = []
+        rsi_at_highs = []
+        for i in range(2, len(price_window) - 2):
+            if high_window[i] > high_window[i-1] and high_window[i] > high_window[i-2] and \
+               high_window[i] > high_window[i+1] and high_window[i] > high_window[i+2]:
+                price_highs.append((i, high_window[i]))
+                rsi_at_highs.append((i, rsi_window[i] if i < len(rsi_window) else 50))
+        
+        # REGULAR BULLISH DIVERGENCE
+        # Цена: Lower Low, RSI: Higher Low
+        if len(price_lows) >= 2 and len(rsi_at_lows) >= 2:
+            prev_price_low = price_lows[-2][1]
+            curr_price_low = price_lows[-1][1]
+            prev_rsi_low = rsi_at_lows[-2][1]
+            curr_rsi_low = rsi_at_lows[-1][1]
+            
+            if curr_price_low < prev_price_low and curr_rsi_low > prev_rsi_low:
+                # Bullish divergence!
+                strength = (curr_rsi_low - prev_rsi_low) / 10  # Нормализуем
+                result = {
+                    'found': True,
+                    'type': 'regular_bullish',
+                    'strength': min(1.0, strength),
+                    'reasoning': f"📊 Bullish дивергенция RSI (цена LL, RSI HL)"
+                }
+                logger.info(f"[DIVERGENCE] Regular Bullish: price LL, RSI HL")
+                return result
+        
+        # REGULAR BEARISH DIVERGENCE
+        # Цена: Higher High, RSI: Lower High
+        if len(price_highs) >= 2 and len(rsi_at_highs) >= 2:
+            prev_price_high = price_highs[-2][1]
+            curr_price_high = price_highs[-1][1]
+            prev_rsi_high = rsi_at_highs[-2][1]
+            curr_rsi_high = rsi_at_highs[-1][1]
+            
+            if curr_price_high > prev_price_high and curr_rsi_high < prev_rsi_high:
+                # Bearish divergence!
+                strength = (prev_rsi_high - curr_rsi_high) / 10
+                result = {
+                    'found': True,
+                    'type': 'regular_bearish',
+                    'strength': min(1.0, strength),
+                    'reasoning': f"📊 Bearish дивергенция RSI (цена HH, RSI LH)"
+                }
+                logger.info(f"[DIVERGENCE] Regular Bearish: price HH, RSI LH")
+                return result
+        
+        # HIDDEN BULLISH DIVERGENCE (продолжение тренда)
+        # Цена: Higher Low, RSI: Lower Low
+        if len(price_lows) >= 2 and len(rsi_at_lows) >= 2:
+            prev_price_low = price_lows[-2][1]
+            curr_price_low = price_lows[-1][1]
+            prev_rsi_low = rsi_at_lows[-2][1]
+            curr_rsi_low = rsi_at_lows[-1][1]
+            
+            if curr_price_low > prev_price_low and curr_rsi_low < prev_rsi_low:
+                strength = (prev_rsi_low - curr_rsi_low) / 15
+                result = {
+                    'found': True,
+                    'type': 'hidden_bullish',
+                    'strength': min(0.8, strength),  # Скрытая дивергенция слабее
+                    'reasoning': f"📊 Hidden Bullish дивергенция (продолжение тренда)"
+                }
+                logger.info(f"[DIVERGENCE] Hidden Bullish: price HL, RSI LL")
+                return result
+        
+        # HIDDEN BEARISH DIVERGENCE
+        # Цена: Lower High, RSI: Higher High
+        if len(price_highs) >= 2 and len(rsi_at_highs) >= 2:
+            prev_price_high = price_highs[-2][1]
+            curr_price_high = price_highs[-1][1]
+            prev_rsi_high = rsi_at_highs[-2][1]
+            curr_rsi_high = rsi_at_highs[-1][1]
+            
+            if curr_price_high < prev_price_high and curr_rsi_high > prev_rsi_high:
+                strength = (curr_rsi_high - prev_rsi_high) / 15
+                result = {
+                    'found': True,
+                    'type': 'hidden_bearish',
+                    'strength': min(0.8, strength),
+                    'reasoning': f"📊 Hidden Bearish дивергенция (продолжение тренда)"
+                }
+                logger.info(f"[DIVERGENCE] Hidden Bearish: price LH, RSI HH")
+                return result
+        
+        return result
+    
+    def _calculate_rsi_at(self, closes: List[float], period: int = 14) -> float:
+        """Рассчитать RSI для заданного периода"""
+        if len(closes) < period + 1:
+            return 50
+        
+        gains = []
+        losses = []
+        
+        for i in range(1, len(closes)):
+            change = closes[i] - closes[i-1]
+            if change > 0:
+                gains.append(change)
+                losses.append(0)
+            else:
+                gains.append(0)
+                losses.append(abs(change))
+        
+        if len(gains) < period:
+            return 50
+        
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        
+        if avg_loss == 0:
+            return 100
+        
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
+    
+    # ==================== VOLUME SPREAD ANALYSIS ====================
+    
+    def analyze_vsa(self, opens: List[float], highs: List[float], 
+                    lows: List[float], closes: List[float], 
+                    volumes: List[float]) -> Dict:
+        """
+        Volume Spread Analysis - анализ объёма по свечам
+        
+        Ключевые паттерны:
+        - No Demand: узкий спред, низкий объём на росте (медвежий)
+        - No Supply: узкий спред, низкий объём на падении (бычий)
+        - Stopping Volume: высокий объём с длинной нижней тенью (бычий)
+        - Climax: экстремальный объём на экстремуме - разворот
+        - Effort vs Result: большой объём, малое движение = разворот
+        """
+        result = {
+            'signal': 'NEUTRAL',
+            'pattern': None,
+            'strength': 0,
+            'reasoning': None
+        }
+        
+        if len(closes) < 20 or len(volumes) < 20:
+            return result
+        
+        # Средние значения за последние 20 свечей
+        avg_volume = sum(volumes[-20:]) / 20
+        avg_spread = sum(abs(closes[i] - opens[i]) for i in range(-20, 0)) / 20
+        
+        # Последняя свеча
+        curr_open = opens[-1]
+        curr_high = highs[-1]
+        curr_low = lows[-1]
+        curr_close = closes[-1]
+        curr_volume = volumes[-1]
+        
+        curr_spread = abs(curr_close - curr_open)
+        curr_range = curr_high - curr_low
+        is_bullish = curr_close > curr_open
+        is_bearish = curr_close < curr_open
+        
+        # Размеры теней
+        upper_wick = curr_high - max(curr_open, curr_close)
+        lower_wick = min(curr_open, curr_close) - curr_low
+        
+        # Относительные значения
+        volume_ratio = curr_volume / avg_volume if avg_volume > 0 else 1
+        spread_ratio = curr_spread / avg_spread if avg_spread > 0 else 1
+        
+        # NO DEMAND (медвежий сигнал)
+        # Узкий спред + низкий объём на росте
+        if is_bullish and spread_ratio < 0.5 and volume_ratio < 0.7:
+            result = {
+                'signal': 'SHORT',
+                'pattern': 'no_demand',
+                'strength': 0.6,
+                'reasoning': "📉 VSA: No Demand (слабый рост)"
+            }
+            logger.info(f"[VSA] No Demand detected")
+            return result
+        
+        # NO SUPPLY (бычий сигнал)
+        # Узкий спред + низкий объём на падении
+        if is_bearish and spread_ratio < 0.5 and volume_ratio < 0.7:
+            result = {
+                'signal': 'LONG',
+                'pattern': 'no_supply',
+                'strength': 0.6,
+                'reasoning': "📈 VSA: No Supply (слабое падение)"
+            }
+            logger.info(f"[VSA] No Supply detected")
+            return result
+        
+        # STOPPING VOLUME (бычий сигнал)
+        # Высокий объём + длинная нижняя тень + закрытие в верхней половине
+        if volume_ratio > 1.5 and lower_wick > curr_spread and \
+           curr_close > (curr_high + curr_low) / 2:
+            result = {
+                'signal': 'LONG',
+                'pattern': 'stopping_volume',
+                'strength': 0.8,
+                'reasoning': "📈 VSA: Stopping Volume (покупатели)"
+            }
+            logger.info(f"[VSA] Stopping Volume detected")
+            return result
+        
+        # CLIMAX VOLUME (разворот)
+        # Экстремальный объём (> 2.5x среднего) часто означает разворот
+        if volume_ratio > 2.5:
+            if is_bullish:
+                # Бычий climax = потенциальный разворот вниз
+                result = {
+                    'signal': 'SHORT',
+                    'pattern': 'buying_climax',
+                    'strength': 0.7,
+                    'reasoning': "📉 VSA: Buying Climax (истощение покупок)"
+                }
+                logger.info(f"[VSA] Buying Climax detected")
+            else:
+                # Медвежий climax = потенциальный разворот вверх
+                result = {
+                    'signal': 'LONG',
+                    'pattern': 'selling_climax',
+                    'strength': 0.7,
+                    'reasoning': "📈 VSA: Selling Climax (истощение продаж)"
+                }
+                logger.info(f"[VSA] Selling Climax detected")
+            return result
+        
+        # EFFORT VS RESULT
+        # Большой объём + маленькое движение = сопротивление
+        if volume_ratio > 1.8 and spread_ratio < 0.4:
+            if is_bullish:
+                result = {
+                    'signal': 'SHORT',
+                    'pattern': 'effort_no_result_up',
+                    'strength': 0.65,
+                    'reasoning': "📉 VSA: Effort>Result (сопротивление росту)"
+                }
+            else:
+                result = {
+                    'signal': 'LONG',
+                    'pattern': 'effort_no_result_down',
+                    'strength': 0.65,
+                    'reasoning': "📈 VSA: Effort>Result (поддержка)"
+                }
+            logger.info(f"[VSA] Effort vs Result detected")
+            return result
+        
+        return result
+    
+    # ==================== SESSION ANALYSIS ====================
+    
+    def is_optimal_session(self) -> Tuple[bool, str, int]:
+        """
+        Проверить оптимальную торговую сессию
+        
+        London: 07:00-16:00 UTC (лучшая ликвидность для крипты)
+        NY: 13:00-22:00 UTC (высокая волатильность)
+        Overlap: 13:00-16:00 UTC (максимальная активность)
+        Asian: 00:00-07:00 UTC (низкая волатильность, избегаем)
+        
+        Returns:
+            (is_optimal, session_name, bonus_points)
+        """
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+        
+        # Overlap London + NY (лучшее время)
+        if 13 <= hour < 16:
+            return True, "London/NY Overlap", 15
+        
+        # NY Session
+        if 13 <= hour < 21:
+            return True, "NY Session", 10
+        
+        # London Session
+        if 7 <= hour < 16:
+            return True, "London Session", 10
+        
+        # Early London / Late NY (приемлемо)
+        if 6 <= hour < 7 or 21 <= hour < 22:
+            return True, "Session Edge", 5
+        
+        # Asian Session (избегаем для BTC/ETH)
+        if 0 <= hour < 6:
+            return False, "Asian Session", -10
+        
+        # Late night (избегаем)
+        return False, "Off-hours", -15
+    
+    # ==================== CONFIRMATION CANDLE ====================
+    
+    async def check_confirmation_candle(self, symbol: str, direction: str, 
+                                        entry_price: float, 
+                                        timeout_minutes: int = 15) -> Dict:
+        """
+        Ждать подтверждающую свечу перед входом
+        
+        LONG: ждём закрытия свечи выше entry_price
+        SHORT: ждём закрытия свечи ниже entry_price
+        
+        Это фильтрует ложные пробои
+        """
+        result = {
+            'confirmed': False,
+            'candle_close': None,
+            'waited_minutes': 0,
+            'reasoning': None
+        }
+        
+        start_time = datetime.now()
+        check_interval = 60  # Проверяем каждую минуту
+        
+        while True:
+            elapsed = (datetime.now() - start_time).total_seconds() / 60
+            
+            if elapsed >= timeout_minutes:
+                result['reasoning'] = f"⏰ Timeout {timeout_minutes}min без подтверждения"
+                logger.info(f"[CONFIRM] Timeout waiting for confirmation candle")
+                return result
+            
+            # Получаем последнюю закрытую свечу (15m)
+            klines = await self.get_klines(symbol, '15m', 2)
+            if not klines or len(klines) < 2:
+                await asyncio.sleep(check_interval)
+                continue
+            
+            # Предпоследняя свеча (последняя закрытая)
+            last_closed = klines[-2]
+            close_price = float(last_closed[4])
+            
+            result['candle_close'] = close_price
+            result['waited_minutes'] = elapsed
+            
+            if direction == 'LONG' and close_price > entry_price:
+                result['confirmed'] = True
+                result['reasoning'] = f"✅ Подтверждение: свеча закрылась выше {entry_price:.2f}"
+                logger.info(f"[CONFIRM] LONG confirmed: close {close_price:.2f} > entry {entry_price:.2f}")
+                return result
+            
+            elif direction == 'SHORT' and close_price < entry_price:
+                result['confirmed'] = True
+                result['reasoning'] = f"✅ Подтверждение: свеча закрылась ниже {entry_price:.2f}"
+                logger.info(f"[CONFIRM] SHORT confirmed: close {close_price:.2f} < entry {entry_price:.2f}")
+                return result
+            
+            # Ждём следующую проверку
+            await asyncio.sleep(check_interval)
+        
+        return result
+    
+    def get_quick_confirmation(self, closes: List[float], direction: str) -> Dict:
+        """
+        Быстрая проверка подтверждения на основе последних свечей
+        (без ожидания, для синхронного использования)
+        """
+        if len(closes) < 3:
+            return {'confirmed': False, 'strength': 0}
+        
+        # Проверяем последние 3 свечи
+        last_3 = closes[-3:]
+        
+        if direction == 'LONG':
+            # Подтверждение = последовательный рост
+            if last_3[2] > last_3[1] > last_3[0]:
+                return {
+                    'confirmed': True, 
+                    'strength': 0.8,
+                    'reasoning': "✅ 3 растущие свечи подряд"
+                }
+            elif last_3[2] > last_3[1]:
+                return {
+                    'confirmed': True, 
+                    'strength': 0.5,
+                    'reasoning': "✅ Последняя свеча растущая"
+                }
+        
+        elif direction == 'SHORT':
+            # Подтверждение = последовательное падение
+            if last_3[2] < last_3[1] < last_3[0]:
+                return {
+                    'confirmed': True, 
+                    'strength': 0.8,
+                    'reasoning': "✅ 3 падающие свечи подряд"
+                }
+            elif last_3[2] < last_3[1]:
+                return {
+                    'confirmed': True, 
+                    'strength': 0.5,
+                    'reasoning': "✅ Последняя свеча падающая"
+                }
+        
+        return {'confirmed': False, 'strength': 0}
     
     # ==================== MARKET STRUCTURE ====================
     
@@ -1110,84 +1883,123 @@ class SmartAnalyzer:
                                bullish_signals: int = 0,
                                bearish_signals: int = 0,
                                has_extreme_move: bool = False,
-                               has_divergence: bool = False) -> Tuple[SetupQuality, float]:
+                               has_divergence: bool = False,
+                               # === NEW HIGH WINRATE PARAMETERS ===
+                               mtf_aligned: bool = False,
+                               mtf_strength: int = 0,
+                               at_order_block: bool = False,
+                               in_fvg_zone: bool = False,
+                               liquidity_swept: bool = False,
+                               vsa_confirms: bool = False,
+                               session_bonus: int = 0,
+                               confirmation_candle: bool = False) -> Tuple[SetupQuality, float]:
         """
-        Оценка качества сетапа с учётом ДИСБАЛАНСА
+        Оценка качества сетапа v2.0 - HIGH WINRATE EDITION
         
-        A+ сетап (берём всегда):
-        - Сильный тренд в направлении сделки
-        - Цена у ключевого уровня
-        - Свечной паттерн подтверждает
-        - Объём растёт
-        - R/R >= 3
-        - ИЛИ: Сильный дисбаланс (>= 6 сигналов)
+        Новые факторы для высокого винрейта:
+        - MTF alignment (все TF согласны): +25
+        - Order Block confluence: +15
+        - Fair Value Gap zone: +10
+        - Liquidity sweep: +20
+        - RSI/MACD divergence: +15
+        - VSA confirmation: +10
+        - Optimal session: +10
+        - Confirmation candle: +15
         
-        A сетап:
-        - Тренд в направлении
-        - 3 из 4 подтверждений
-        - R/R >= 2.5
-        
-        B сетап:
-        - Тренд или нейтрально
-        - 2 из 4 подтверждений
-        - R/R >= 2
-        
+        A+ сетап (берём всегда): score >= 80
+        A сетап: score >= 65
+        B сетап: score >= 50
         C/D - пропускаем
         """
         score = 0
-        max_score = 100
+        max_score = 150  # Увеличен для новых факторов
         
-        # === ДИСБАЛАНС БОНУС (НОВОЕ!) ===
-        # Сильный дисбаланс может улучшить скор
+        # === ДИСБАЛАНС БОНУС ===
         signal_count = bullish_signals if direction == "LONG" else bearish_signals
         opposite_count = bearish_signals if direction == "LONG" else bullish_signals
-        
-        # Чистый дисбаланс в нашу сторону
         net_imbalance = signal_count - opposite_count
         
         if net_imbalance >= 6:
-            score += 25  # Очень сильный дисбаланс
-            logger.info(f"[QUALITY] Strong imbalance bonus +25 (net={net_imbalance})")
+            score += 20
+            logger.info(f"[QUALITY] Strong imbalance bonus +20 (net={net_imbalance})")
         elif net_imbalance >= 4:
-            score += 15  # Сильный дисбаланс
+            score += 12
         elif net_imbalance >= 2:
-            score += 8   # Умеренный дисбаланс
+            score += 6
         elif net_imbalance < 0:
-            score -= 15  # Дисбаланс против нас!
+            score -= 15
             logger.info(f"[QUALITY] Imbalance AGAINST us! penalty -15 (net={net_imbalance})")
+        
+        # === NEW: MULTI-TIMEFRAME ALIGNMENT (критически важно!) ===
+        if mtf_aligned:
+            score += 25
+            logger.info(f"[QUALITY] MTF aligned bonus +25")
+        elif mtf_strength >= 2:
+            score += 10  # 2 из 3 TF согласны
+        elif mtf_strength == 1:
+            score -= 5  # Только 1 TF
+        
+        # === NEW: SMART MONEY CONCEPTS ===
+        if liquidity_swept:
+            score += 20  # Сильнейший сигнал разворота
+            logger.info(f"[QUALITY] Liquidity sweep bonus +20")
+        
+        if at_order_block:
+            score += 15
+            logger.info(f"[QUALITY] Order Block bonus +15")
+        
+        if in_fvg_zone:
+            score += 10
+            logger.info(f"[QUALITY] FVG zone bonus +10")
+        
+        # === NEW: DIVERGENCE (сильный разворотный сигнал) ===
+        if has_divergence:
+            score += 15
+            logger.info(f"[QUALITY] Divergence bonus +15")
+        
+        # === NEW: VSA CONFIRMATION ===
+        if vsa_confirms:
+            score += 10
+            logger.info(f"[QUALITY] VSA confirms bonus +10")
+        
+        # === NEW: SESSION BONUS ===
+        score += session_bonus
+        if session_bonus > 0:
+            logger.info(f"[QUALITY] Session bonus +{session_bonus}")
+        elif session_bonus < 0:
+            logger.info(f"[QUALITY] Session penalty {session_bonus}")
+        
+        # === NEW: CONFIRMATION CANDLE ===
+        if confirmation_candle:
+            score += 15
+            logger.info(f"[QUALITY] Confirmation candle bonus +15")
         
         # Экстремальное движение бонус
         if has_extreme_move:
-            score += 10
-            logger.info(f"[QUALITY] Extreme move bonus +10")
-        
-        # Дивергенция бонус
-        if has_divergence:
             score += 8
         
-        # 1. Режим рынка (30 баллов)
+        # 1. Режим рынка (25 баллов)
         if direction == "LONG":
             if market_regime == MarketRegime.STRONG_UPTREND:
-                score += 30
-            elif market_regime == MarketRegime.UPTREND:
                 score += 25
+            elif market_regime == MarketRegime.UPTREND:
+                score += 20
             elif market_regime == MarketRegime.RANGING:
-                score += 10
+                score += 8
             elif market_regime in [MarketRegime.DOWNTREND, MarketRegime.STRONG_DOWNTREND]:
-                # Против тренда - но если сильный дисбаланс, меньший штраф
-                if net_imbalance >= 5:
-                    score -= 5  # Меньший штраф
+                if net_imbalance >= 5 or liquidity_swept or has_divergence:
+                    score -= 5  # Меньший штраф если есть разворотные сигналы
                 else:
-                    score -= 20  # Полный штраф
+                    score -= 20
         else:  # SHORT
             if market_regime == MarketRegime.STRONG_DOWNTREND:
-                score += 30
-            elif market_regime == MarketRegime.DOWNTREND:
                 score += 25
+            elif market_regime == MarketRegime.DOWNTREND:
+                score += 20
             elif market_regime == MarketRegime.RANGING:
-                score += 10
+                score += 8
             elif market_regime in [MarketRegime.UPTREND, MarketRegime.STRONG_UPTREND]:
-                if net_imbalance >= 5:
+                if net_imbalance >= 5 or liquidity_swept or has_divergence:
                     score -= 5
                 else:
                     score -= 20
@@ -1196,46 +2008,48 @@ class SmartAnalyzer:
         if market_regime == MarketRegime.HIGH_VOLATILITY:
             return SetupQuality.D, 0.0
         
-        # 2. Ключевой уровень (20 баллов)
+        # 2. Ключевой уровень (15 баллов)
         if at_key_level:
-            score += 20
+            score += 15
         
-        # 3. Свечной паттерн (20 баллов)
+        # 3. Свечной паттерн (15 баллов)
         if pattern_confirmation:
-            score += 20
+            score += 15
         
-        # 4. Объём (15 баллов)
+        # 4. Объём (10 баллов)
         if volume_confirmation:
-            score += 15
+            score += 10
         
-        # 5. Моментум (15 баллов)
+        # 5. Моментум (10 баллов)
         if momentum_aligned:
-            score += 15
+            score += 10
         
         # 6. Risk/Reward бонус
         if risk_reward >= 3:
             score += 10
         elif risk_reward >= 2.5:
             score += 5
-        elif risk_reward < 2:
-            score -= 10
+        elif risk_reward >= 2:
+            score += 2
+        elif risk_reward < 1.5:
+            score -= 15  # Строже для низкого R/R
         
         # Нормализуем confidence
         confidence = min(0.95, max(0.3, score / max_score))
         
-        # Определяем качество (сниженные пороги для большего количества сделок)
-        if score >= 70:
+        # Определяем качество (ПОВЫШЕННЫЕ пороги для высокого винрейта)
+        if score >= 80:
             quality = SetupQuality.A_PLUS
-        elif score >= 55:
+        elif score >= 65:
             quality = SetupQuality.A
-        elif score >= 40:
+        elif score >= 50:
             quality = SetupQuality.B
-        elif score >= 25:
+        elif score >= 35:
             quality = SetupQuality.C
         else:
             quality = SetupQuality.D
         
-        logger.info(f"[QUALITY] Score={score}, Quality={quality.name}, Confidence={confidence:.0%}, NetImbalance={net_imbalance}")
+        logger.info(f"[QUALITY] Score={score}, Quality={quality.name}, Confidence={confidence:.0%}, MTF={mtf_aligned}, SMC={at_order_block or in_fvg_zone or liquidity_swept}")
         
         return quality, confidence
     
@@ -1414,6 +2228,47 @@ class SmartAnalyzer:
         orderbook = await self.get_order_book_imbalance(symbol)
         oi_change = await self.get_open_interest_change(symbol)
         
+        # === HIGH WINRATE METHODS ===
+        
+        # 9a. Multi-Timeframe Analysis
+        mtf = await self.analyze_mtf(symbol)
+        
+        # 9b. Smart Money Concepts
+        order_blocks = self.find_order_blocks(opens_1h, highs_1h, lows_1h, closes_1h)
+        fvgs = self.find_fair_value_gaps(highs_1h, lows_1h)
+        liquidity_sweep = self.detect_liquidity_sweep(highs_1h, lows_1h, swings, current_price)
+        
+        # Проверяем цену у SMC зон
+        current_ob = self.check_price_at_ob(current_price, order_blocks)
+        current_fvg = self.check_price_in_fvg(current_price, fvgs)
+        
+        # 9c. Divergence Detection
+        divergence = self.detect_divergence(closes_1h, highs_1h, lows_1h)
+        
+        # 9d. Volume Spread Analysis
+        vsa = self.analyze_vsa(opens_1h, highs_1h, lows_1h, closes_1h, volumes_1h)
+        
+        # 9e. Session Analysis
+        is_optimal, session_name, session_bonus = self.is_optimal_session()
+        
+        # 9f. Quick Confirmation (без ожидания)
+        # Будет использовано после определения направления
+        
+        # Логируем новые методы
+        if mtf.aligned:
+            logger.info(f"[SMART] ✅ MTF ALIGNED: {mtf.trend_4h}")
+        if current_ob:
+            logger.info(f"[SMART] 🎯 AT ORDER BLOCK: {current_ob.type}")
+        if current_fvg:
+            logger.info(f"[SMART] 📊 IN FVG ZONE: {current_fvg.type}")
+        if liquidity_sweep:
+            logger.info(f"[SMART] 💧 LIQUIDITY SWEEP: {liquidity_sweep['type']}")
+        if divergence['found']:
+            logger.info(f"[SMART] 📈 DIVERGENCE: {divergence['type']}")
+        if vsa['pattern']:
+            logger.info(f"[SMART] 📊 VSA: {vsa['pattern']} -> {vsa['signal']}")
+        logger.info(f"[SMART] ⏰ Session: {session_name} (bonus={session_bonus})")
+        
         # Логируем дисбаланс
         if extreme_move['extreme']:
             logger.info(f"[SMART] 🔥 EXTREME MOVE: {extreme_move['type']} change_15m={extreme_move['change_15m']:.2f}%")
@@ -1435,6 +2290,61 @@ class SmartAnalyzer:
         # === СЧЁТЧИКИ СИГНАЛОВ ===
         bullish_signals = 0
         bearish_signals = 0
+        
+        # === HIGH WINRATE: SMC SIGNALS ===
+        
+        # Liquidity sweep - сильнейший сигнал разворота
+        if liquidity_sweep:
+            if liquidity_sweep['type'] == 'bullish':
+                bullish_signals += 4
+                reasoning.append(liquidity_sweep['reasoning'])
+            elif liquidity_sweep['type'] == 'bearish':
+                bearish_signals += 4
+                reasoning.append(liquidity_sweep['reasoning'])
+        
+        # Order Block confluence
+        if current_ob:
+            if current_ob.type == 'bullish':
+                bullish_signals += 3
+                reasoning.append(f"🎯 У Bullish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
+            elif current_ob.type == 'bearish':
+                bearish_signals += 3
+                reasoning.append(f"🎯 У Bearish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
+        
+        # Fair Value Gap zone
+        if current_fvg:
+            if current_fvg.type == 'bullish':
+                bullish_signals += 2
+                reasoning.append(f"📊 В Bullish FVG зоне")
+            elif current_fvg.type == 'bearish':
+                bearish_signals += 2
+                reasoning.append(f"📊 В Bearish FVG зоне")
+        
+        # Divergence
+        if divergence['found']:
+            if divergence['type'] in ['regular_bullish', 'hidden_bullish']:
+                bullish_signals += 3
+                reasoning.append(divergence['reasoning'])
+            elif divergence['type'] in ['regular_bearish', 'hidden_bearish']:
+                bearish_signals += 3
+                reasoning.append(divergence['reasoning'])
+        
+        # VSA signals
+        if vsa['signal'] == 'LONG':
+            bullish_signals += 2
+            reasoning.append(vsa['reasoning'])
+        elif vsa['signal'] == 'SHORT':
+            bearish_signals += 2
+            reasoning.append(vsa['reasoning'])
+        
+        # MTF alignment bonus
+        if mtf.aligned:
+            if mtf.trend_4h == 'BULLISH':
+                bullish_signals += 3
+                reasoning.append("✅ MTF: все таймфреймы бычьи")
+            elif mtf.trend_4h == 'BEARISH':
+                bearish_signals += 3
+                reasoning.append("✅ MTF: все таймфреймы медвежьи")
         
         # === ЛОГИКА СИГНАЛА ===
         
@@ -1631,7 +2541,10 @@ class SmartAnalyzer:
             _signal_stats['reasons']['bad_rr'] += 1
             return None
         
-        # 11. Оценка качества
+        # 11. Quick confirmation check
+        confirmation = self.get_quick_confirmation(closes_1h, direction)
+        
+        # 12. Оценка качества с HIGH WINRATE параметрами
         quality, confidence = self.evaluate_setup_quality(
             market_regime=market_regime,
             direction=direction,
@@ -1643,7 +2556,16 @@ class SmartAnalyzer:
             bullish_signals=bullish_signals,
             bearish_signals=bearish_signals,
             has_extreme_move=extreme_move['extreme'],
-            has_divergence=False  # TODO: добавить дивергенцию позже
+            has_divergence=divergence['found'],
+            # === NEW HIGH WINRATE PARAMETERS ===
+            mtf_aligned=mtf.aligned,
+            mtf_strength=mtf.strength,
+            at_order_block=current_ob is not None,
+            in_fvg_zone=current_fvg is not None,
+            liquidity_swept=liquidity_sweep is not None,
+            vsa_confirms=(vsa['signal'] == direction),
+            session_bonus=session_bonus,
+            confirmation_candle=confirmation.get('confirmed', False)
         )
         
         # Фильтр по качеству (A_PLUS=5, A=4, B=3, C=2, D=1)
@@ -1660,7 +2582,7 @@ class SmartAnalyzer:
             _signal_stats['reasons']['low_confidence'] += 1
             return None
         
-        # 12. Добавляем предупреждения
+        # 13. Добавляем предупреждения
         if volume_data['ratio'] < 0.8:
             warnings.append("⚠️ Низкий объём")
         
@@ -1669,6 +2591,16 @@ class SmartAnalyzer:
         
         if atr_percent > 2:
             warnings.append(f"⚠️ Высокая волатильность ({atr_percent:.1f}%)")
+        
+        # Новые предупреждения для HIGH WINRATE
+        if not mtf.aligned:
+            warnings.append(f"⚠️ MTF не согласованы (4H={mtf.trend_4h}, 1H={mtf.trend_1h})")
+        
+        if session_bonus < 0:
+            warnings.append(f"⚠️ Неоптимальная сессия ({session_name})")
+        
+        if not confirmation.get('confirmed', False):
+            warnings.append("⚠️ Нет подтверждающей свечи")
         
         # 13. Формируем сетап
         setup = TradeSetup(
