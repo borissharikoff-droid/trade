@@ -250,6 +250,39 @@ def init_db():
     except Exception as e:
         logger.warning(f"[DB] Migration warning (auto_trade): {e}")
     
+    # Миграция: создаём таблицу для системных настроек (pending_commission, invoices)
+    try:
+        if USE_POSTGRES:
+            c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS pending_invoices (
+                invoice_id BIGINT PRIMARY KEY,
+                user_id BIGINT,
+                amount REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
+            )''')
+        else:
+            c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )''')
+            c.execute('''CREATE TABLE IF NOT EXISTS pending_invoices (
+                invoice_id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                amount REAL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT
+            )''')
+        conn.commit()
+        logger.info("[DB] Migration: system_settings and pending_invoices tables ensured")
+    except Exception as e:
+        logger.warning(f"[DB] Migration warning (system_settings): {e}")
+    
     conn.close()
     db_type = "PostgreSQL" if USE_POSTGRES else f"SQLite ({DB_PATH})"
     logger.info(f"[DB] Initialized: {db_type}")
@@ -284,9 +317,20 @@ def db_get_user(user_id: int) -> Dict:
         'auto_trade_last_reset': row['auto_trade_last_reset']
     }
 
+# Whitelist of allowed columns for user updates (SQL injection prevention)
+ALLOWED_USER_COLUMNS = {
+    'balance', 'total_deposit', 'total_profit', 'trading', 'referrer_id',
+    'auto_trade', 'auto_trade_max_daily', 'auto_trade_min_winrate',
+    'auto_trade_today', 'auto_trade_last_reset'
+}
+
 def db_update_user(user_id: int, **kwargs):
-    """Обновить данные пользователя"""
+    """Обновить данные пользователя (с защитой от SQL injection)"""
     for key, value in kwargs.items():
+        # Security: Only allow whitelisted column names
+        if key not in ALLOWED_USER_COLUMNS:
+            logger.warning(f"[SECURITY] Blocked attempt to update invalid column: {key}")
+            continue
         if key in ['trading', 'auto_trade']:
             value = 1 if value else 0
         run_sql(f"UPDATE users SET {key} = ? WHERE user_id = ?", (value, user_id))
@@ -448,15 +492,81 @@ def db_get_referrals_count(user_id: int) -> int:
     row = run_sql("SELECT COUNT(*) as cnt FROM users WHERE referrer_id = ?", (user_id,), fetch="one")
     return row['cnt'] if row else 0
 
-def db_add_referral_bonus(referrer_id: int, amount: float):
-    """Добавить реферальный бонус"""
+# Referral bonus tracking to prevent abuse
+_referral_bonuses_given: Dict[int, set] = {}  # {referrer_id: {user_ids who gave bonus}}
+MAX_REFERRAL_BONUSES_PER_DAY = 10  # Limit bonuses per referrer per day
+
+def db_check_referral_bonus_given(referrer_id: int, user_id: int) -> bool:
+    """Check if referral bonus was already given for this user"""
+    # Check in-memory cache first
+    if referrer_id in _referral_bonuses_given:
+        if user_id in _referral_bonuses_given[referrer_id]:
+            return True
+    
+    # Check in DB (via setting key)
+    key = f"ref_bonus_{referrer_id}_{user_id}"
+    return db_get_setting(key) == "1"
+
+def db_mark_referral_bonus_given(referrer_id: int, user_id: int):
+    """Mark that referral bonus was given for this user"""
+    # Save to memory
+    if referrer_id not in _referral_bonuses_given:
+        _referral_bonuses_given[referrer_id] = set()
+    _referral_bonuses_given[referrer_id].add(user_id)
+    
+    # Save to DB
+    key = f"ref_bonus_{referrer_id}_{user_id}"
+    db_set_setting(key, "1")
+
+def db_get_daily_referral_bonus_count(referrer_id: int) -> int:
+    """Get count of referral bonuses given today"""
+    from datetime import date
+    today = date.today().isoformat()
+    key = f"ref_daily_{referrer_id}_{today}"
+    count = db_get_setting(key, "0")
+    try:
+        return int(count)
+    except ValueError:
+        return 0
+
+def db_increment_daily_referral_bonus(referrer_id: int):
+    """Increment daily referral bonus counter"""
+    from datetime import date
+    today = date.today().isoformat()
+    key = f"ref_daily_{referrer_id}_{today}"
+    current = db_get_daily_referral_bonus_count(referrer_id)
+    db_set_setting(key, str(current + 1))
+
+def db_add_referral_bonus(referrer_id: int, amount: float, from_user_id: int = 0) -> bool:
+    """
+    Добавить реферальный бонус с защитой от злоупотреблений
+    Returns: True if bonus was added, False if blocked
+    """
+    # Check if bonus already given for this user
+    if from_user_id and db_check_referral_bonus_given(referrer_id, from_user_id):
+        logger.warning(f"[REF] Blocked duplicate bonus: {referrer_id} <- {from_user_id}")
+        return False
+    
+    # Check daily limit
+    daily_count = db_get_daily_referral_bonus_count(referrer_id)
+    if daily_count >= MAX_REFERRAL_BONUSES_PER_DAY:
+        logger.warning(f"[REF] Daily limit reached for {referrer_id}: {daily_count}/{MAX_REFERRAL_BONUSES_PER_DAY}")
+        return False
+    
+    # Add bonus
     run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, referrer_id))
     
     # Обновляем кэш
     if referrer_id in users_cache:
-        users_cache[referrer_id]['balance'] += amount
+        users_cache[referrer_id]['balance'] = sanitize_balance(users_cache[referrer_id]['balance'] + amount)
     
-    logger.info(f"[REF] Bonus ${amount} added to {referrer_id}")
+    # Mark as given
+    if from_user_id:
+        db_mark_referral_bonus_given(referrer_id, from_user_id)
+    db_increment_daily_referral_bonus(referrer_id)
+    
+    logger.info(f"[REF] Bonus ${amount} added to {referrer_id} (from user {from_user_id})")
+    return True
 
 # ==================== АЛЕРТЫ ====================
 def db_add_alert(user_id: int, symbol: str, target_price: float, direction: str) -> int:
@@ -502,8 +612,205 @@ REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
 COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
 ADMIN_CRYPTO_ID = os.getenv("ADMIN_CRYPTO_ID", "")  # CryptoBot ID админа для вывода комиссий
 
-# Счётчик накопленных комиссий (в памяти, сбрасывается при выводе)
+# Счётчик накопленных комиссий (теперь персистентный в БД)
 pending_commission = 0.0
+
+def db_get_setting(key: str, default: str = "") -> str:
+    """Get a system setting from DB"""
+    row = run_sql("SELECT value FROM system_settings WHERE key = ?", (key,), fetch="one")
+    return row['value'] if row else default
+
+def db_set_setting(key: str, value: str):
+    """Set a system setting in DB"""
+    if USE_POSTGRES:
+        run_sql("""
+            INSERT INTO system_settings (key, value, updated_at) 
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE SET value = ?, updated_at = CURRENT_TIMESTAMP
+        """, (key, value, value))
+    else:
+        run_sql("INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, datetime('now'))", (key, value))
+
+def load_pending_commission() -> float:
+    """Load pending commission from DB"""
+    global pending_commission
+    value = db_get_setting('pending_commission', '0.0')
+    try:
+        pending_commission = float(value)
+    except ValueError:
+        pending_commission = 0.0
+    logger.info(f"[COMMISSION] Loaded from DB: ${pending_commission:.2f}")
+    return pending_commission
+
+def save_pending_commission():
+    """Save pending commission to DB"""
+    global pending_commission
+    db_set_setting('pending_commission', str(pending_commission))
+    logger.debug(f"[COMMISSION] Saved to DB: ${pending_commission:.2f}")
+
+# ==================== PERSISTENT INVOICES ====================
+_pending_invoices_db: Dict[int, Dict] = {}  # {invoice_id: {'user_id': int, 'amount': float}}
+
+def db_add_pending_invoice(invoice_id: int, user_id: int, amount: float):
+    """Save pending invoice to DB"""
+    if USE_POSTGRES:
+        run_sql("""
+            INSERT INTO pending_invoices (invoice_id, user_id, amount, expires_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP + INTERVAL '1 hour')
+            ON CONFLICT (invoice_id) DO UPDATE SET user_id = ?, amount = ?
+        """, (invoice_id, user_id, amount, user_id, amount))
+    else:
+        run_sql("""
+            INSERT OR REPLACE INTO pending_invoices (invoice_id, user_id, amount, expires_at)
+            VALUES (?, ?, ?, datetime('now', '+1 hour'))
+        """, (invoice_id, user_id, amount))
+    _pending_invoices_db[invoice_id] = {'user_id': user_id, 'amount': amount}
+    logger.info(f"[INVOICE] Saved: #{invoice_id} user={user_id} amount=${amount}")
+
+def db_get_pending_invoice(invoice_id: int) -> Optional[Dict]:
+    """Get pending invoice from DB"""
+    if invoice_id in _pending_invoices_db:
+        return _pending_invoices_db[invoice_id]
+    row = run_sql("SELECT user_id, amount FROM pending_invoices WHERE invoice_id = ?", (invoice_id,), fetch="one")
+    if row:
+        result = {'user_id': row['user_id'], 'amount': row['amount']}
+        _pending_invoices_db[invoice_id] = result
+        return result
+    return None
+
+def db_remove_pending_invoice(invoice_id: int):
+    """Remove pending invoice from DB"""
+    run_sql("DELETE FROM pending_invoices WHERE invoice_id = ?", (invoice_id,))
+    _pending_invoices_db.pop(invoice_id, None)
+    logger.info(f"[INVOICE] Removed: #{invoice_id}")
+
+def db_cleanup_expired_invoices():
+    """Remove expired invoices (older than 1 hour)"""
+    if USE_POSTGRES:
+        run_sql("DELETE FROM pending_invoices WHERE expires_at < CURRENT_TIMESTAMP")
+    else:
+        run_sql("DELETE FROM pending_invoices WHERE expires_at < datetime('now')")
+    logger.info("[INVOICE] Cleaned up expired invoices")
+
+def load_pending_invoices():
+    """Load all pending invoices from DB on startup"""
+    global _pending_invoices_db
+    rows = run_sql("SELECT invoice_id, user_id, amount FROM pending_invoices", fetch="all")
+    if rows:
+        for row in rows:
+            _pending_invoices_db[row['invoice_id']] = {'user_id': row['user_id'], 'amount': row['amount']}
+        logger.info(f"[INVOICE] Loaded {len(rows)} pending invoices from DB")
+    else:
+        logger.info("[INVOICE] No pending invoices in DB")
+
+# ==================== ADMIN AUDIT LOGGING ====================
+def audit_log(admin_id: int, action: str, details: str = "", target_user: int = None):
+    """
+    Log admin action for audit trail
+    
+    Args:
+        admin_id: Admin user ID who performed the action
+        action: Action type (e.g., 'ADD_BALANCE', 'CLEAR_DB', 'TOGGLE_HEDGE')
+        details: Additional details about the action
+        target_user: Target user ID if applicable
+    """
+    from datetime import datetime
+    timestamp = datetime.now().isoformat()
+    
+    log_entry = {
+        'timestamp': timestamp,
+        'admin_id': admin_id,
+        'action': action,
+        'details': details,
+        'target_user': target_user
+    }
+    
+    # Log to file/console
+    target_str = f" -> user {target_user}" if target_user else ""
+    logger.warning(f"[AUDIT] Admin {admin_id}: {action}{target_str} | {details}")
+    
+    # Store in DB for persistence
+    key = f"audit_{timestamp}_{admin_id}"
+    import json
+    db_set_setting(key, json.dumps(log_entry))
+
+async def get_recent_audit_logs(limit: int = 20) -> list:
+    """Get recent audit log entries"""
+    import json
+    rows = run_sql(
+        "SELECT key, value FROM system_settings WHERE key LIKE 'audit_%' ORDER BY key DESC LIMIT ?",
+        (limit,), fetch="all"
+    )
+    logs = []
+    if rows:
+        for row in rows:
+            try:
+                logs.append(json.loads(row['value']))
+            except:
+                pass
+    return logs
+
+# ==================== SECURITY LIMITS ====================
+MAX_POSITIONS_PER_USER = 10  # Maximum open positions per user
+MIN_BALANCE_RESERVE = 5.0    # Minimum balance to keep after trade
+MAX_SINGLE_TRADE = 10000.0   # Maximum single trade amount
+MAX_BALANCE = 1000000.0      # Maximum user balance (sanity check)
+
+# Allowed trading symbols (whitelist)
+ALLOWED_SYMBOLS = {
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'DOGE/USDT',
+    'AVAX/USDT', 'LINK/USDT', 'MATIC/USDT', 'POL/USDT', 'ARB/USDT', 'OP/USDT',
+    'APT/USDT', 'SUI/USDT', 'SEI/USDT', 'TIA/USDT', 'INJ/USDT', 'FTM/USDT',
+    'NEAR/USDT', 'ATOM/USDT', 'DOT/USDT', 'ADA/USDT', 'LTC/USDT',
+    'PEPE/USDT', 'SHIB/USDT', 'FLOKI/USDT', 'BONK/USDT', 'WIF/USDT', 'MEME/USDT',
+    'UNI/USDT', 'AAVE/USDT', 'MKR/USDT', 'CRV/USDT', 'LDO/USDT', 'PENDLE/USDT',
+    'FET/USDT', 'RNDR/USDT', 'TAO/USDT', 'WLD/USDT', 'TON/USDT', 'TRX/USDT',
+    'ORDI/USDT', 'ENA/USDT', 'JUP/USDT', 'STRK/USDT', 'ZK/USDT'
+}
+
+def validate_amount(amount: float, balance: float, min_amount: float = 1.0) -> tuple:
+    """
+    Validate trade amount
+    Returns: (is_valid: bool, error_message: str or None)
+    """
+    if not isinstance(amount, (int, float)):
+        return False, "Invalid amount type"
+    if amount <= 0:
+        return False, "Amount must be positive"
+    if amount < min_amount:
+        return False, f"Minimum amount is ${min_amount}"
+    if amount > MAX_SINGLE_TRADE:
+        return False, f"Maximum trade is ${MAX_SINGLE_TRADE}"
+    if amount > balance:
+        return False, f"Insufficient balance (${balance:.2f})"
+    if balance - amount < MIN_BALANCE_RESERVE:
+        return False, f"Must keep at least ${MIN_BALANCE_RESERVE} reserve"
+    return True, None
+
+def validate_symbol(symbol: str) -> tuple:
+    """
+    Validate trading symbol
+    Returns: (is_valid: bool, error_message: str or None)
+    """
+    if not symbol or not isinstance(symbol, str):
+        return False, "Invalid symbol"
+    symbol = symbol.upper().strip()
+    if symbol not in ALLOWED_SYMBOLS:
+        return False, f"Symbol {symbol} not supported"
+    return True, None
+
+def validate_direction(direction: str) -> tuple:
+    """
+    Validate trade direction
+    Returns: (is_valid: bool, error_message: str or None)
+    """
+    if direction not in ['LONG', 'SHORT']:
+        return False, "Direction must be LONG or SHORT"
+    return True, None
+
+def sanitize_balance(balance: float) -> float:
+    """Ensure balance stays within safe bounds"""
+    return max(0.0, min(MAX_BALANCE, balance))
 
 # ==================== BINANCE API ====================
 BINANCE_API = "https://api.binance.com/api/v3"
@@ -545,6 +852,42 @@ users_cache: Dict[int, Dict] = {}
 positions_cache: Dict[int, List[Dict]] = {}
 rate_limits: Dict[int, Dict] = {}  # {user_id: {'count': int, 'reset': datetime}}
 
+# ==================== TRANSACTION LOCKS ====================
+# Per-user locks to prevent race conditions on balance operations
+_user_locks: Dict[int, asyncio.Lock] = {}
+
+def get_user_lock(user_id: int) -> asyncio.Lock:
+    """Get or create a lock for a specific user's balance operations"""
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
+
+async def safe_balance_update(user_id: int, delta: float, reason: str = "") -> bool:
+    """
+    Safely update user balance with locking to prevent race conditions.
+    
+    Args:
+        user_id: User ID
+        delta: Amount to add (positive) or subtract (negative)
+        reason: Reason for the update (for logging)
+    
+    Returns:
+        True if successful, False if insufficient balance
+    """
+    lock = get_user_lock(user_id)
+    async with lock:
+        user = get_user(user_id)
+        new_balance = user['balance'] + delta
+        
+        if new_balance < 0:
+            logger.warning(f"[BALANCE] Blocked: user {user_id} delta={delta:.2f} would result in negative balance")
+            return False
+        
+        user['balance'] = sanitize_balance(new_balance)
+        save_user(user_id)
+        logger.info(f"[BALANCE] User {user_id}: {delta:+.2f} -> ${user['balance']:.2f} ({reason})")
+        return True
+
 # ==================== RATE LIMITING ====================
 MAX_REQUESTS_PER_MINUTE = 30
 
@@ -572,9 +915,10 @@ def check_rate_limit(user_id: int) -> bool:
 
 # ==================== КОМИССИИ (АВТО-ВЫВОД) ====================
 async def add_commission(amount: float):
-    """Добавить комиссию и вывести при достижении порога"""
+    """Добавить комиссию и вывести при достижении порога (с персистентностью)"""
     global pending_commission
     pending_commission += amount
+    save_pending_commission()  # Persist to DB
     
     logger.info(f"[COMMISSION] +${amount:.2f}, накоплено: ${pending_commission:.2f}")
     
@@ -617,6 +961,7 @@ async def withdraw_commission():
                 
                 if data.get("ok"):
                     pending_commission = 0
+                    save_pending_commission()  # Persist reset to DB
                     logger.info(f"[COMMISSION] ✅ Выведено ${amount:.2f} на CryptoBot ID {ADMIN_CRYPTO_ID}")
                     return True
                 else:
@@ -846,14 +1191,16 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if is_first_deposit:
         referrer_id = db_get_referrer(user_id)
         if referrer_id:
-            db_add_referral_bonus(referrer_id, REFERRAL_BONUS)
-            try:
-                await context.bot.send_message(
-                    referrer_id,
-                    f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}"
-                )
-            except:
-                pass
+            bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
+            if bonus_added:
+                try:
+                    await context.bot.send_message(
+                        referrer_id,
+                        f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
+                        parse_mode="HTML"
+                    )
+                except:
+                    pass
         
     text = f"""<b>✅ Оплата</b>
 
@@ -932,13 +1279,8 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
                 
                 invoice = data["result"]
         
-        # Сохраняем invoice_id для проверки
-        if 'pending_invoices' not in context.bot_data:
-            context.bot_data['pending_invoices'] = {}
-        context.bot_data['pending_invoices'][invoice['invoice_id']] = {
-            'user_id': user_id,
-            'amount': amount
-        }
+        # Сохраняем invoice_id для проверки (в БД для персистентности)
+        db_add_pending_invoice(invoice['invoice_id'], user_id, amount)
         
         text = f"""<b>💎 Оплата</b>
 
@@ -969,9 +1311,10 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Ошибка данных", show_alert=True)
         return
     
-    pending = context.bot_data.get('pending_invoices', {})
-    if invoice_id not in pending:
-        await query.answer("Платёж не найден", show_alert=True)
+    # Use persistent DB instead of context.bot_data
+    pending_info = db_get_pending_invoice(invoice_id)
+    if not pending_info:
+        await query.answer("Платёж не найден или истёк", show_alert=True)
         return
     
     crypto_token = os.getenv("CRYPTO_BOT_TOKEN")
@@ -998,14 +1341,15 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 invoice = data["result"]["items"][0]
         
         if invoice.get("status") == "paid":
-            info = pending.pop(invoice_id)
-            user_id = info['user_id']
-            amount = info['amount']
+            # Remove from DB
+            db_remove_pending_invoice(invoice_id)
+            user_id = pending_info['user_id']
+            amount = pending_info['amount']
             
             user = get_user(user_id)
             is_first_deposit = user['total_deposit'] == 100
             
-            user['balance'] += amount
+            user['balance'] = sanitize_balance(user['balance'] + amount)
             user['total_deposit'] += amount
             save_user(user_id)
             
@@ -1015,14 +1359,16 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             if is_first_deposit:
                 referrer_id = db_get_referrer(user_id)
                 if referrer_id:
-                    db_add_referral_bonus(referrer_id, REFERRAL_BONUS)
-                    try:
-                        await context.bot.send_message(
-                            referrer_id,
-                            f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}"
-                        )
-                    except:
-                        pass
+                    bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
+                    if bonus_added:
+                        try:
+                            await context.bot.send_message(
+                                referrer_id,
+                                f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
+                                parse_mode="HTML"
+                            )
+                        except:
+                            pass
             
             text = f"""<b>✅ Оплата</b>
 
@@ -1243,7 +1589,7 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             
             # Возвращаем только amount без PnL (позиция не была реально открыта)
             returned = pos['amount']
-            user['balance'] += returned
+            user['balance'] = sanitize_balance(user['balance'] + returned)
             save_user(user_id)
             
             db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
@@ -1287,7 +1633,7 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
 
             # Закрываем позицию в боте
             returned = pos['amount'] + real_pnl
-            user['balance'] += returned
+            user['balance'] = sanitize_balance(user['balance'] + returned)
             user['total_profit'] += real_pnl
             save_user(user_id)
 
@@ -1473,7 +1819,7 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         total_pnl += pnl
         total_returned += returned
         
-        user['balance'] += returned
+        user['balance'] = sanitize_balance(user['balance'] + returned)
         user['total_profit'] += pnl
         
         db_close_position(pos['id'], real_price, pnl, 'MANUAL_CLOSE')
@@ -1613,7 +1959,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
     # Обновляем баланс
-    user['balance'] += total_returned
+    user['balance'] = sanitize_balance(user['balance'] + total_returned)
     user['total_profit'] += total_pnl
     save_user(user_id)
     
@@ -2000,83 +2346,109 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             if skip_reason:
                 logger.info(f"[SMART] Авто-трейд пропущен: {skip_reason}")
             else:
-                # Расчёт ставки на основе качества сетапа (только A+ и A)
-                quality_mult = {
-                    SetupQuality.A_PLUS: 0.12,  # 12% баланса для идеального сетапа
-                    SetupQuality.A: 0.10,        # 10% для отличного сетапа
-                }.get(setup.quality, 0.08)
+                # === VALIDATION FOR AUTO-TRADE ===
+                auto_positions = get_positions(AUTO_TRADE_USER_ID)
                 
-                auto_bet = min(AUTO_TRADE_MAX_BET, max(AUTO_TRADE_MIN_BET, auto_balance * quality_mult))
-                auto_bet = min(auto_bet, auto_balance * 0.15)  # Не более 15% баланса
+                # Check max positions
+                if len(auto_positions) >= MAX_POSITIONS_PER_USER:
+                    logger.info(f"[SMART] Авто-трейд пропущен: лимит позиций ({len(auto_positions)})")
+                    skip_reason = f"лимит позиций {len(auto_positions)}/{MAX_POSITIONS_PER_USER}"
                 
-                ticker = symbol.split("/")[0]
+                # Validate symbol
+                valid, error = validate_symbol(symbol)
+                if not valid:
+                    logger.warning(f"[SMART] Invalid symbol for auto-trade: {symbol}")
+                    skip_reason = f"invalid symbol: {error}"
                 
-                # === ОТКРЫТИЕ НА BYBIT ===
-                bybit_qty = 0
-                hedging_enabled = await is_hedging_enabled()
-                bybit_success = True
+                if skip_reason:
+                    logger.info(f"[SMART] Авто-трейд пропущен (validation): {skip_reason}")
                 
-                if hedging_enabled:
-                    hedge_amount = float(auto_bet * LEVERAGE)
-                    hedge_result = await hedge_open(0, symbol, direction, hedge_amount, 
-                                                   sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
+                if not skip_reason:
+                    # Расчёт ставки на основе качества сетапа (только A+ и A)
+                    quality_mult = {
+                        SetupQuality.A_PLUS: 0.12,  # 12% баланса для идеального сетапа
+                        SetupQuality.A: 0.10,        # 10% для отличного сетапа
+                    }.get(setup.quality, 0.08)
                     
-                    if hedge_result:
-                        bybit_qty = hedge_result.get('qty', 0)
-                        logger.info(f"[SMART] ✓ Bybit открыт: qty={bybit_qty}")
+                    auto_bet = min(AUTO_TRADE_MAX_BET, max(AUTO_TRADE_MIN_BET, auto_balance * quality_mult))
+                    auto_bet = min(auto_bet, auto_balance * 0.15)  # Не более 15% баланса
+                    
+                    # Ensure minimum balance reserve
+                    if auto_balance - auto_bet < MIN_BALANCE_RESERVE:
+                        auto_bet = max(0, auto_balance - MIN_BALANCE_RESERVE)
+                        if auto_bet < AUTO_TRADE_MIN_BET:
+                            logger.info(f"[SMART] Авто-трейд пропущен: недостаточно для минимальной ставки с резервом")
+                            skip_reason = "недостаточно баланса с учётом резерва"
+                    
+                    ticker = symbol.split("/")[0]
+                    
+                    # === ОТКРЫТИЕ НА BYBIT ===
+                    bybit_qty = 0
+                    hedging_enabled = await is_hedging_enabled()
+                    bybit_success = True
+                    
+                    if hedging_enabled:
+                        hedge_amount = float(auto_bet * LEVERAGE)
+                        hedge_result = await hedge_open(0, symbol, direction, hedge_amount, 
+                                                       sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
                         
-                        # Верификация
-                        await asyncio.sleep(0.5)
-                        bybit_pos = await hedger.get_position_data(symbol)
-                        if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                            logger.error("[SMART] ❌ Bybit не подтвердил позицию")
-                            bybit_success = False
+                        if hedge_result:
+                            bybit_qty = hedge_result.get('qty', 0)
+                            logger.info(f"[SMART] ✓ Bybit открыт: qty={bybit_qty}")
+                            
+                            # Верификация
+                            await asyncio.sleep(0.5)
+                            bybit_pos = await hedger.get_position_data(symbol)
+                            if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                                logger.error("[SMART] ❌ Bybit не подтвердил позицию")
+                                bybit_success = False
+                            else:
+                                increment_bybit_opened()
                         else:
-                            increment_bybit_opened()
-                    else:
-                        logger.error("[SMART] ❌ Bybit ошибка")
-                        bybit_success = False
-                
-                if bybit_success:
-                    # Комиссия
-                    commission = auto_bet * (COMMISSION_PERCENT / 100)
-                    auto_user['balance'] -= auto_bet
-                    new_balance = auto_user['balance']
-                    save_user(AUTO_TRADE_USER_ID)
-                    await add_commission(commission)
+                            logger.error("[SMART] ❌ Bybit ошибка")
+                            bybit_success = False
                     
-                    # Создаём позицию
-                    position = {
-                        'symbol': symbol,
-                        'direction': direction,
-                        'entry': float(entry),
-                        'current': float(entry),
-                        'amount': float(auto_bet),
-                        'tp': float(tp1),
-                        'tp1': float(tp1),
-                        'tp2': float(tp2),
-                        'tp3': float(tp3),
-                        'tp1_hit': False,
-                        'tp2_hit': False,
-                        'sl': float(sl),
-                        'commission': float(commission),
-                        'pnl': float(-commission),
-                        'bybit_qty': bybit_qty,
-                        'original_amount': float(auto_bet)
-                    }
-                    
-                    pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
-                    position['id'] = pos_id
-                    
-                    if AUTO_TRADE_USER_ID not in positions_cache:
-                        positions_cache[AUTO_TRADE_USER_ID] = []
-                    positions_cache[AUTO_TRADE_USER_ID].append(position)
-                    
-                    # Уведомление
-                    reasoning_text = "\n".join([f"• {r}" for r in setup.reasoning[:4]])
-                    warnings_text = "\n".join([f"• {w}" for w in setup.warnings[:2]]) if setup.warnings else ""
-                    
-                    auto_msg = f"""<b>🤖 {quality_emoji} | Smart Trade</b>
+                    if bybit_success:
+                        # Комиссия
+                        commission = auto_bet * (COMMISSION_PERCENT / 100)
+                        auto_user['balance'] -= auto_bet
+                        auto_user['balance'] = sanitize_balance(auto_user['balance'])  # Security: ensure valid balance
+                        new_balance = auto_user['balance']
+                        save_user(AUTO_TRADE_USER_ID)
+                        await add_commission(commission)
+                        
+                        # Создаём позицию
+                        position = {
+                            'symbol': symbol,
+                            'direction': direction,
+                            'entry': float(entry),
+                            'current': float(entry),
+                            'amount': float(auto_bet),
+                            'tp': float(tp1),
+                            'tp1': float(tp1),
+                            'tp2': float(tp2),
+                            'tp3': float(tp3),
+                            'tp1_hit': False,
+                            'tp2_hit': False,
+                            'sl': float(sl),
+                            'commission': float(commission),
+                            'pnl': float(-commission),
+                            'bybit_qty': bybit_qty,
+                            'original_amount': float(auto_bet)
+                        }
+                        
+                        pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
+                        position['id'] = pos_id
+                        
+                        if AUTO_TRADE_USER_ID not in positions_cache:
+                            positions_cache[AUTO_TRADE_USER_ID] = []
+                        positions_cache[AUTO_TRADE_USER_ID].append(position)
+                        
+                        # Уведомление
+                        reasoning_text = "\n".join([f"• {r}" for r in setup.reasoning[:4]])
+                        warnings_text = "\n".join([f"• {w}" for w in setup.warnings[:2]]) if setup.warnings else ""
+                        
+                        auto_msg = f"""<b>🤖 {quality_emoji} | Smart Trade</b>
 
 <b>{ticker}</b> | {direction} | ${auto_bet:.0f} | x{LEVERAGE}
 {regime_text}
@@ -2090,24 +2462,24 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
 <b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
 <b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
 <b>R/R:</b> 1:{setup.risk_reward:.1f}"""
-                    
-                    if warnings_text:
-                        auto_msg += f"\n\n⚠️ <b>Риски:</b>\n{warnings_text}"
-                    
-                    auto_msg += f"\n\n💰 ${new_balance:.0f}"
-                    
-                    auto_keyboard = InlineKeyboardMarkup([
-                        [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
-                         InlineKeyboardButton("📊 Сделки", callback_data="trades")]
-                    ])
-                    
-                    await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
-                    logger.info(f"[SMART] ✓ Авто-сделка: {direction} {ticker} ${auto_bet:.0f}")
-                    auto_trade_executed = True
-                    
-                    # Обновляем счётчики
-                    auto_user['auto_trade_today'] = user_today_count + 1
-                    db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
+                        
+                        if warnings_text:
+                            auto_msg += f"\n\n⚠️ <b>Риски:</b>\n{warnings_text}"
+                        
+                        auto_msg += f"\n\n💰 ${new_balance:.0f}"
+                        
+                        auto_keyboard = InlineKeyboardMarkup([
+                            [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
+                             InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                        ])
+                        
+                        await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
+                        logger.info(f"[SMART] ✓ Авто-сделка: {direction} {ticker} ${auto_bet:.0f}")
+                        auto_trade_executed = True
+                        
+                        # Обновляем счётчики
+                        auto_user['auto_trade_today'] = user_today_count + 1
+                        db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
         
         # === ОТПРАВКА АКТИВНЫМ ЮЗЕРАМ ===
         for user_id in active_users:
@@ -2223,9 +2595,34 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text("❌ Ошибка данных")
         return
 
-    # Проверка баланса
-    if user['balance'] < amount:
-        await query.answer("Недостаточно средств", show_alert=True)
+    # === INPUT VALIDATION ===
+    # Validate symbol
+    valid, error = validate_symbol(symbol)
+    if not valid:
+        await query.edit_message_text(f"❌ {error}")
+        logger.warning(f"[SECURITY] User {user_id}: Invalid symbol {symbol}")
+        return
+    
+    # Validate direction
+    valid, error = validate_direction(direction)
+    if not valid:
+        await query.edit_message_text(f"❌ {error}")
+        logger.warning(f"[SECURITY] User {user_id}: Invalid direction {direction}")
+        return
+    
+    # Validate amount
+    valid, error = validate_amount(amount, user['balance'])
+    if not valid:
+        await query.edit_message_text(f"❌ {error}")
+        return
+    
+    # Check max positions limit
+    if len(user_positions) >= MAX_POSITIONS_PER_USER:
+        await query.edit_message_text(
+            f"❌ Лимит позиций ({MAX_POSITIONS_PER_USER})\n\n"
+            f"Закройте существующие сделки перед открытием новых."
+        )
+        logger.info(f"[LIMIT] User {user_id}: Max positions reached ({len(user_positions)})")
         return
 
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
@@ -2296,6 +2693,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Комиссия за открытие (только после успешного открытия на Bybit)
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
+    user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
     save_user(user_id)  # Сохраняем в БД
 
     # Добавляем комиссию в накопитель (авто-вывод)
@@ -2465,7 +2863,7 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     returned = pos['amount'] + pnl
     
-    user['balance'] += returned
+    user['balance'] = sanitize_balance(user['balance'] + returned)
     user['total_profit'] += pnl
     save_user(user_id)  # Сохраняем в БД
     
@@ -2610,7 +3008,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
             positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
     # Обновляем баланс
-    user['balance'] += total_returned
+    user['balance'] = sanitize_balance(user['balance'] + total_returned)
     user['total_profit'] += total_pnl
     save_user(user_id)
     
@@ -2792,6 +3190,7 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     # Комиссия за открытие (только после успешного открытия на Bybit)
     commission = amount * (COMMISSION_PERCENT / 100)
     user['balance'] -= amount
+    user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
     save_user(user_id)
 
     # Добавляем комиссию в накопитель (авто-вывод)
@@ -2972,7 +3371,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                         
                         # Возвращаем деньги пользователю
                         returned = pos['amount'] + real_pnl
-                        user['balance'] += returned
+                        user['balance'] = sanitize_balance(user['balance'] + returned)
                         user['total_profit'] += real_pnl
                         save_user(user_id)
                         
@@ -3079,7 +3478,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 
                 # Возвращаем часть и профит
                 returned = close_amount + partial_pnl
-                user['balance'] += returned
+                user['balance'] = sanitize_balance(user['balance'] + returned)
                 user['total_profit'] += partial_pnl
                 save_user(user_id)
                 
@@ -3135,7 +3534,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                     partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE
                 
                 returned = close_amount + partial_pnl
-                user['balance'] += returned
+                user['balance'] = sanitize_balance(user['balance'] + returned)
                 user['total_profit'] += partial_pnl
                 save_user(user_id)
                 
@@ -3211,7 +3610,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                             continue  # Пропускаем - попробуем в следующем цикле
                 
                 returned = pos['amount'] + real_pnl
-                user['balance'] += returned
+                user['balance'] = sanitize_balance(user['balance'] + returned)
                 user['total_profit'] += real_pnl
                 save_user(user_id)
                 
@@ -3346,6 +3745,8 @@ async def add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user = db_get_user(target_id)
         
         if user:
+            # Audit log
+            audit_log(admin_id, "ADD_BALANCE", f"amount=${amount:.2f}, new_balance=${user['balance']:.2f}", target_user=target_id)
             await update.message.reply_text(f"✅ Добавлено ${amount:.2f} юзеру {target_id}\n💰 Новый баланс: ${user['balance']:.2f}")
         else:
             await update.message.reply_text(f"❌ Юзер {target_id} не найден")
@@ -3381,14 +3782,18 @@ async def withdraw_commission_callback(update: Update, context: ContextTypes.DEF
     query = update.callback_query
     await query.answer()
     
-    if update.effective_user.id not in ADMIN_IDS:
+    admin_id = update.effective_user.id
+    if admin_id not in ADMIN_IDS:
         return
     
+    amount_to_withdraw = pending_commission
     await query.edit_message_text("⏳ Выводим комиссию...")
     
     success = await withdraw_commission()
     
     if success:
+        # Audit log
+        audit_log(admin_id, "WITHDRAW_COMMISSION", f"amount=${amount_to_withdraw:.2f}")
         await query.edit_message_text(f"✅ Комиссия выведена на CryptoBot!")
     else:
         await query.edit_message_text("❌ Ошибка вывода. Проверь настройки CRYPTO_BOT_TOKEN и ADMIN_CRYPTO_ID")
@@ -3591,9 +3996,11 @@ User ID: {AUTO_TRADE_USER_ID}
     
     if cmd == "on":
         AUTO_TRADE_ENABLED = True
+        audit_log(user_id, "AUTO_TRADE_TOGGLE", "enabled=True")
         await update.message.reply_text("✅ Авто-торговля ВКЛЮЧЕНА")
     elif cmd == "off":
         AUTO_TRADE_ENABLED = False
+        audit_log(user_id, "AUTO_TRADE_TOGGLE", "enabled=False")
         await update.message.reply_text("❌ Авто-торговля ВЫКЛЮЧЕНА")
     elif cmd == "balance" and len(args) > 1:
         try:
@@ -3602,6 +4009,7 @@ User ID: {AUTO_TRADE_USER_ID}
             # Обновляем кэш
             if AUTO_TRADE_USER_ID in users_cache:
                 users_cache[AUTO_TRADE_USER_ID]['balance'] = new_balance
+            audit_log(user_id, "SET_AUTO_TRADE_BALANCE", f"balance=${new_balance:.0f}", target_user=AUTO_TRADE_USER_ID)
             await update.message.reply_text(f"✅ Баланс установлен: ${new_balance:.0f}")
         except ValueError:
             await update.message.reply_text("❌ Неверная сумма")
@@ -3618,10 +4026,86 @@ User ID: {AUTO_TRADE_USER_ID}
         positions_cache.clear()
         users_cache.clear()
         
+        audit_log(user_id, "CLEAR_DATABASE", "Cleared all positions, history, alerts, stats")
         await update.message.reply_text("✅ ВСЯ БД очищена:\n• Позиции\n• История\n• Алерты\n• Статистика")
         logger.info(f"[ADMIN] User {user_id} cleared ALL database")
     else:
         await update.message.reply_text("❌ Неизвестная команда. Используй: on, off, balance AMOUNT, clear")
+
+async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Health check endpoint for monitoring"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ закрыт")
+        return
+    
+    from hedger import hedger
+    import time
+    
+    start_time = time.time()
+    status_lines = ["<b>🏥 Health Check</b>\n"]
+    all_ok = True
+    
+    # 1. Database check
+    try:
+        db_start = time.time()
+        row = run_sql("SELECT COUNT(*) as cnt FROM users", fetch="one")
+        db_time = (time.time() - db_start) * 1000
+        user_count = row['cnt'] if row else 0
+        status_lines.append(f"✅ DB: {user_count} users ({db_time:.0f}ms)")
+    except Exception as e:
+        status_lines.append(f"❌ DB: {str(e)[:50]}")
+        all_ok = False
+    
+    # 2. Binance API check
+    try:
+        api_start = time.time()
+        price = await get_real_price("BTC/USDT")
+        api_time = (time.time() - api_start) * 1000
+        if price:
+            status_lines.append(f"✅ Binance: BTC ${price:,.0f} ({api_time:.0f}ms)")
+        else:
+            status_lines.append("⚠️ Binance: No price")
+            all_ok = False
+    except Exception as e:
+        status_lines.append(f"❌ Binance: {str(e)[:50]}")
+        all_ok = False
+    
+    # 3. Bybit check
+    try:
+        bybit_balance = await hedger.get_balance()
+        hedging_on = await is_hedging_enabled()
+        if bybit_balance is not None:
+            status_lines.append(f"✅ Bybit: ${bybit_balance:.2f} (hedge: {'ON' if hedging_on else 'OFF'})")
+        else:
+            status_lines.append("⚠️ Bybit: No balance")
+    except Exception as e:
+        status_lines.append(f"❌ Bybit: {str(e)[:50]}")
+        all_ok = False
+    
+    # 4. Cache stats
+    users_in_cache = len(users_cache)
+    positions_in_cache = sum(len(p) for p in positions_cache.values())
+    status_lines.append(f"📊 Cache: {users_in_cache} users, {positions_in_cache} positions")
+    
+    # 5. Commission status
+    status_lines.append(f"💰 Pending commission: ${pending_commission:.2f}")
+    
+    # 6. Memory usage (basic)
+    try:
+        import sys
+        cache_size = sys.getsizeof(users_cache) + sys.getsizeof(positions_cache)
+        status_lines.append(f"🧠 Cache size: ~{cache_size / 1024:.1f}KB")
+    except:
+        pass
+    
+    # Total time
+    total_time = (time.time() - start_time) * 1000
+    status_lines.append(f"\n⏱ Total: {total_time:.0f}ms")
+    status_lines.append(f"{'✅ ALL OK' if all_ok else '⚠️ ISSUES DETECTED'}")
+    
+    await update.message.reply_text("\n".join(status_lines), parse_mode="HTML")
 
 async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест подключения к Bybit"""
@@ -4032,11 +4516,16 @@ def main() -> None:
         logger.error("BOT_TOKEN not set")
         return
     
+    # Load persistent data from DB
+    load_pending_commission()
+    load_pending_invoices()
+    
     app = Application.builder().token(token).build()
     
     # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("health", health_check))
     app.add_handler(CommandHandler("addbalance", add_balance))
     app.add_handler(CommandHandler("commission", commission_cmd))
     app.add_handler(CommandHandler("testbybit", test_bybit))
