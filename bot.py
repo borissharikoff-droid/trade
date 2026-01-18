@@ -9,17 +9,16 @@ from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
 # #region agent log - Debug instrumentation
-DEBUG_LOG_PATH = r"c:\random bot\.cursor\debug.log"
+DEBUG_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cursor", "debug.log")
 def debug_log(hypothesis_id: str, location: str, message: str, data: dict = None):
     """Write NDJSON debug log entry"""
     try:
-        import os as _os
-        _os.makedirs(_os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(DEBUG_LOG_PATH), exist_ok=True)
         entry = {"timestamp": datetime.now().isoformat(), "hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "sessionId": "debug-session"}
         with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as e:
-        pass  # Silent fail for debug logging
+        print(f"[DEBUG_LOG_ERROR] {e}")  # Временно выводим ошибки
 # #endregion
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
@@ -2307,6 +2306,11 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
     active_users = [row['user_id'] for row in rows] if rows else []
     
+    # #region agent log
+    all_users_debug = run_sql("SELECT user_id, balance, trading FROM users LIMIT 10", fetch="all")
+    debug_log("B", "send_smart_signal:db_query", "DB users query", {"MIN_DEPOSIT": MIN_DEPOSIT, "rows_found": len(rows) if rows else 0, "all_users_sample": [dict(u) for u in all_users_debug] if all_users_debug else []})
+    # #endregion
+    
     # Проверяем авто-трейд
     has_auto_trade = False
     auto_balance = 0
@@ -2314,6 +2318,10 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         auto_user_check = get_user(AUTO_TRADE_USER_ID)
         has_auto_trade = auto_user_check.get('auto_trade', False)
         auto_balance = auto_user_check.get('balance', 0)
+    
+    # #region agent log
+    debug_log("B", "send_smart_signal:users_check", "Checking active users", {"active_users_count": len(active_users), "active_user_ids": [u.get('id') for u in active_users], "has_auto_trade": has_auto_trade, "AUTO_TRADE_USER_ID": AUTO_TRADE_USER_ID})
+    # #endregion
     
     if not active_users and not has_auto_trade:
         logger.info("[SMART] Нет активных юзеров")
