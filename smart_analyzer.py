@@ -202,10 +202,10 @@ class SmartAnalyzer:
         self.cache_ttl = 30  # секунд
         self.state = TradingState()
         
-        # Настройки качества - менее строгие для большего количества сделок
+        # Настройки качества - СБАЛАНСИРОВАННЫЕ (не слишком строго, не слишком мягко)
         self.MIN_QUALITY = SetupQuality.C  # Минимум C-сетап (A+, A, B, C)
-        self.MIN_RISK_REWARD = 1.3         # Минимальное соотношение R/R 1:1.3
-        self.MIN_CONFIDENCE = 0.40         # Минимальная уверенность 40%
+        self.MIN_RISK_REWARD = 1.5         # Минимальное соотношение R/R 1:1.5 (было 1.3 - слишком низко)
+        self.MIN_CONFIDENCE = 0.50         # Минимальная уверенность 50% (было 0.40 - слишком низко)
         
         # Торговые сессии (UTC)
         self.LONDON_OPEN = 7
@@ -666,8 +666,8 @@ class SmartAnalyzer:
             'reasoning': []
         }
         
-        # === ЭКСТРЕМАЛЬНОЕ ПАДЕНИЕ (перепроданность) - сниженные пороги ===
-        if change_15m < -0.8 or change_10m < -0.6 or change_5m < -0.4:
+        # === ЭКСТРЕМАЛЬНОЕ ПАДЕНИЕ (перепроданность) - пороги сбалансированы ===
+        if change_15m < -1.2 or change_10m < -0.9 or change_5m < -0.6:
             result['extreme'] = True
             result['type'] = 'OVERSOLD'
             result['signal'] = 'LONG'  # Покупаем на перепроданности
@@ -677,14 +677,14 @@ class SmartAnalyzer:
             if change_15m < -2:
                 strength += 3
                 result['reasoning'].append(f"🔥 Обвал -{abs(change_15m):.1f}% за 15 мин")
-            elif change_15m < -1.2:
+            elif change_15m < -1.5:
                 strength += 2
                 result['reasoning'].append(f"📉 Сильное падение -{abs(change_15m):.1f}% за 15 мин")
-            elif change_15m < -0.8:
+            elif change_15m < -1.2:
                 strength += 1
                 result['reasoning'].append(f"📉 Падение -{abs(change_15m):.1f}% за 15 мин")
             
-            if change_5m < -0.4:
+            if change_5m < -0.6:
                 strength += 1
                 result['reasoning'].append(f"⚡ Резкое движение -{abs(change_5m):.1f}% за 5 мин")
             
@@ -697,8 +697,8 @@ class SmartAnalyzer:
             
             result['strength'] = min(5, strength)
             
-        # === ЭКСТРЕМАЛЬНЫЙ РОСТ (перекупленность) - сниженные пороги ===
-        elif change_15m > 0.8 or change_10m > 0.6 or change_5m > 0.4:
+        # === ЭКСТРЕМАЛЬНЫЙ РОСТ (перекупленность) - пороги сбалансированы ===
+        elif change_15m > 1.2 or change_10m > 0.9 or change_5m > 0.6:
             result['extreme'] = True
             result['type'] = 'OVERBOUGHT'
             result['signal'] = 'SHORT'  # Продаём на перекупленности
@@ -708,14 +708,14 @@ class SmartAnalyzer:
             if change_15m > 2:
                 strength += 3
                 result['reasoning'].append(f"🚀 Памп +{change_15m:.1f}% за 15 мин")
-            elif change_15m > 1.2:
+            elif change_15m > 1.5:
                 strength += 2
                 result['reasoning'].append(f"📈 Сильный рост +{change_15m:.1f}% за 15 мин")
-            elif change_15m > 0.8:
+            elif change_15m > 1.2:
                 strength += 1
                 result['reasoning'].append(f"📈 Рост +{change_15m:.1f}% за 15 мин")
             
-            if change_5m > 0.4:
+            if change_5m > 0.6:
                 strength += 1
                 result['reasoning'].append(f"⚡ Резкое движение +{change_5m:.1f}% за 5 мин")
             
@@ -821,19 +821,19 @@ class SmartAnalyzer:
             'strength': 0
         }
         
-        # Экстремальные значения - сниженные пороги
-        if k < 25:
+        # Экстремальные значения - сбалансированные пороги
+        if k < 20:
             result['signal'] = 'LONG'
             result['extreme'] = True
-            result['strength'] = min(3, int((25 - k) / 5) + 1)
-        elif k > 75:
+            result['strength'] = min(3, int((20 - k) / 5) + 1)
+        elif k > 80:
             result['signal'] = 'SHORT'
             result['extreme'] = True
-            result['strength'] = min(3, int((k - 75) / 5) + 1)
-        elif k < 40:
+            result['strength'] = min(3, int((k - 80) / 5) + 1)
+        elif k < 30:
             result['signal'] = 'LONG'
             result['strength'] = 1
-        elif k > 60:
+        elif k > 70:
             result['signal'] = 'SHORT'
             result['strength'] = 1
         
@@ -927,16 +927,16 @@ class SmartAnalyzer:
                         'reasoning': None
                     }
                     
-                    # Дисбаланс стакана - сниженные пороги
-                    if imbalance > 20:  # Много покупателей
+                    # Дисбаланс стакана - сбалансированные пороги
+                    if imbalance > 25:  # Много покупателей
                         result['signal'] = 'LONG'
-                        result['strength'] = min(3, int(imbalance / 10))
+                        result['strength'] = min(3, int(imbalance / 12))
                         result['reasoning'] = f"📗 Стакан: покупатели {bid_ratio:.0%} (дисбаланс +{imbalance:.0f}%)"
-                    elif imbalance < -20:  # Много продавцов
+                    elif imbalance < -25:  # Много продавцов
                         result['signal'] = 'SHORT'
-                        result['strength'] = min(3, int(abs(imbalance) / 10))
+                        result['strength'] = min(3, int(abs(imbalance) / 12))
                         result['reasoning'] = f"📕 Стакан: продавцы {1-bid_ratio:.0%} (дисбаланс {imbalance:.0f}%)"
-                    elif imbalance > 10:
+                    elif imbalance > 15:
                         result['signal'] = 'LONG'
                         result['strength'] = 1
                         result['reasoning'] = f"📗 Стакан: больше покупателей ({imbalance:.0f}%)"
@@ -1555,11 +1555,11 @@ class SmartAnalyzer:
                     reasoning.append(f"🕯️ {[p.name for p in recent_patterns if p.type == 'bullish']}")
         
         elif market_regime == MarketRegime.RANGING:
-            # В рейндже - менее строгие условия
-            if (at_support and rsi < 50) or (bullish_pattern and rsi < 45) or rsi < 35:
+            # В рейндже - ТРЕБУЕМ оба условия: уровень + паттерн/RSI
+            if at_support and (bullish_pattern or rsi < 35):
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
-                reasoning.insert(0, "⚖️ Рейндж: покупка на откате")
+                reasoning.insert(0, "⚖️ Рейндж: покупка от поддержки")
                 reasoning.insert(1, f"📊 RSI={rsi:.0f}")
                 bullish_signals += 2
         
@@ -1583,45 +1583,30 @@ class SmartAnalyzer:
                         reasoning.append(f"🕯️ {[p.name for p in recent_patterns if p.type == 'bearish']}")
             
             elif market_regime == MarketRegime.RANGING:
-                # В рейндже - менее строгие условия
-                if (at_resistance and rsi > 50) or (bearish_pattern and rsi > 55) or rsi > 65:
+                # В рейндже - ТРЕБУЕМ оба условия: уровень + паттерн/RSI
+                if at_resistance and (bearish_pattern or rsi > 65):
                     direction = "SHORT"
                     signal_type = SignalType.TREND_REVERSAL
-                    reasoning.insert(0, "⚖️ Рейндж: продажа на росте")
+                    reasoning.insert(0, "⚖️ Рейндж: продажа от сопротивления")
                     reasoning.insert(1, f"📊 RSI={rsi:.0f}")
                     bearish_signals += 2
         
-        # === ДИСБАЛАНС-ЛОГИКА: Если нет сигнала по тренду, но есть дисбаланс ===
-        if direction is None and (bullish_signals >= 2 or bearish_signals >= 2):
-            # Дисбаланс может создать сигнал даже без тренда (снижен порог с 4 до 2)
-            if bullish_signals >= 2 and bullish_signals > bearish_signals:
+        # === ДИСБАЛАНС-ЛОГИКА: Если нет сигнала по тренду, но есть сильный дисбаланс ===
+        if direction is None and (bullish_signals >= 3 or bearish_signals >= 3):
+            # Дисбаланс может создать сигнал - НО нужен СИЛЬНЫЙ дисбаланс (минимум 3)
+            if bullish_signals >= 3 and bullish_signals > bearish_signals + 1:
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
-                reasoning.insert(0, "🔥 ДИСБАЛАНС: Перепроданность")
+                reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перепроданность")
                 logger.info(f"[SMART] IMBALANCE LONG: {bullish_signals} vs {bearish_signals}")
-            elif bearish_signals >= 2 and bearish_signals > bullish_signals:
+            elif bearish_signals >= 3 and bearish_signals > bullish_signals + 1:
                 direction = "SHORT"
                 signal_type = SignalType.TREND_REVERSAL
-                reasoning.insert(0, "🔥 ДИСБАЛАНС: Перекупленность")
+                reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перекупленность")
                 logger.info(f"[SMART] IMBALANCE SHORT: {bearish_signals} vs {bullish_signals}")
         
-        # === FALLBACK: Если всё ещё нет сигнала, используем простую EMA логику ===
-        if direction is None:
-            # Простой сигнал на основе EMA и RSI
-            if current_price > ema_20[-1] and current_price > ema_50[-1] and rsi > 45 and rsi < 70:
-                direction = "LONG"
-                signal_type = SignalType.TREND_CONTINUATION
-                reasoning.insert(0, "📈 Цена выше EMA20/50")
-                reasoning.insert(1, f"📊 RSI={rsi:.0f}")
-                bullish_signals += 1
-                logger.info(f"[SMART] FALLBACK LONG: price > EMAs, RSI={rsi:.0f}")
-            elif current_price < ema_20[-1] and current_price < ema_50[-1] and rsi < 55 and rsi > 30:
-                direction = "SHORT"
-                signal_type = SignalType.TREND_CONTINUATION
-                reasoning.insert(0, "📉 Цена ниже EMA20/50")
-                reasoning.insert(1, f"📊 RSI={rsi:.0f}")
-                bearish_signals += 1
-                logger.info(f"[SMART] FALLBACK SHORT: price < EMAs, RSI={rsi:.0f}")
+        # FALLBACK УДАЛЁН - генерировал слабые сигналы с 5% winrate
+        # Лучше пропустить сигнал, чем взять плохой
         
         # Нет сигнала
         if direction is None:
