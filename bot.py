@@ -19,6 +19,19 @@ from smart_analyzer import (
     increment_bybit_opened
 )
 
+# Продвинутые модули
+try:
+    from whale_tracker import get_whale_signal, get_combined_whale_analysis, WhaleSignal
+    from advanced_signals import (
+        get_best_coins_to_trade, get_meme_opportunities, get_market_context,
+        COIN_CATEGORIES, ALL_TRADEABLE
+    )
+    ADVANCED_FEATURES = True
+    logger.info("[INIT] Advanced features loaded: whale tracker, meme scanner")
+except ImportError as e:
+    ADVANCED_FEATURES = False
+    logger.warning(f"[INIT] Advanced features disabled: {e}")
+
 load_dotenv()
 
 # Умный анализатор v2.0 - единственный режим
@@ -756,16 +769,46 @@ MIN_BALANCE_RESERVE = 5.0    # Minimum balance to keep after trade
 MAX_SINGLE_TRADE = 10000.0   # Maximum single trade amount
 MAX_BALANCE = 1000000.0      # Maximum user balance (sanity check)
 
-# Allowed trading symbols (whitelist)
+# Allowed trading symbols (whitelist) - РАСШИРЕННЫЙ СПИСОК
 ALLOWED_SYMBOLS = {
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'DOGE/USDT',
-    'AVAX/USDT', 'LINK/USDT', 'MATIC/USDT', 'POL/USDT', 'ARB/USDT', 'OP/USDT',
-    'APT/USDT', 'SUI/USDT', 'SEI/USDT', 'TIA/USDT', 'INJ/USDT', 'FTM/USDT',
-    'NEAR/USDT', 'ATOM/USDT', 'DOT/USDT', 'ADA/USDT', 'LTC/USDT',
-    'PEPE/USDT', 'SHIB/USDT', 'FLOKI/USDT', 'BONK/USDT', 'WIF/USDT', 'MEME/USDT',
-    'UNI/USDT', 'AAVE/USDT', 'MKR/USDT', 'CRV/USDT', 'LDO/USDT', 'PENDLE/USDT',
-    'FET/USDT', 'RNDR/USDT', 'TAO/USDT', 'WLD/USDT', 'TON/USDT', 'TRX/USDT',
-    'ORDI/USDT', 'ENA/USDT', 'JUP/USDT', 'STRK/USDT', 'ZK/USDT'
+    # === ОСНОВНЫЕ ===
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
+    
+    # === LAYER 1 ===
+    'AVAX/USDT', 'NEAR/USDT', 'APT/USDT', 'SUI/USDT', 'SEI/USDT',
+    'TON/USDT', 'INJ/USDT', 'TIA/USDT', 'ATOM/USDT', 'DOT/USDT',
+    'ADA/USDT', 'FTM/USDT', 'ALGO/USDT', 'HBAR/USDT', 'ICP/USDT',
+    
+    # === LAYER 2 ===
+    'ARB/USDT', 'OP/USDT', 'STRK/USDT', 'ZK/USDT', 'MATIC/USDT',
+    'POL/USDT', 'MANTA/USDT', 'METIS/USDT', 'IMX/USDT',
+    
+    # === МЕМЫ (высокая волатильность) ===
+    'DOGE/USDT', 'PEPE/USDT', 'SHIB/USDT', 'FLOKI/USDT', 'BONK/USDT',
+    'WIF/USDT', 'MEME/USDT', 'TURBO/USDT', 'NEIRO/USDT', 'POPCAT/USDT',
+    'MOG/USDT', 'BRETT/USDT', 'BOME/USDT', 'MYRO/USDT', 'SLERF/USDT',
+    'PEOPLE/USDT', 'LUNC/USDT', 'BABYDOGE/USDT',
+    
+    # === DeFi ===
+    'UNI/USDT', 'AAVE/USDT', 'MKR/USDT', 'CRV/USDT', 'LDO/USDT',
+    'PENDLE/USDT', 'GMX/USDT', 'DYDX/USDT', 'SNX/USDT', 'COMP/USDT',
+    'SUSHI/USDT', '1INCH/USDT', 'YFI/USDT', 'BAL/USDT',
+    
+    # === AI & Data ===
+    'FET/USDT', 'RNDR/USDT', 'TAO/USDT', 'WLD/USDT', 'ARKM/USDT',
+    'AGIX/USDT', 'OCEAN/USDT', 'GRT/USDT', 'FIL/USDT', 'AR/USDT',
+    
+    # === Gaming & NFT ===
+    'GALA/USDT', 'AXS/USDT', 'SAND/USDT', 'MANA/USDT', 'PIXEL/USDT',
+    'SUPER/USDT', 'MAGIC/USDT', 'BLUR/USDT',
+    
+    # === Новые листинги (высокий потенциал) ===
+    'JUP/USDT', 'ENA/USDT', 'W/USDT', 'ETHFI/USDT', 'AEVO/USDT',
+    'PORTAL/USDT', 'DYM/USDT', 'ALT/USDT', 'PYTH/USDT',
+    
+    # === Прочие ликвидные ===
+    'LINK/USDT', 'LTC/USDT', 'TRX/USDT', 'ORDI/USDT', 'BCH/USDT',
+    'ETC/USDT', 'XLM/USDT', 'VET/USDT', 'THETA/USDT', 'EGLD/USDT'
 }
 
 def validate_amount(amount: float, balance: float, min_amount: float = 1.0) -> tuple:
@@ -3868,6 +3911,168 @@ R/R: 1:{setup.risk_reward:.1f}
     finally:
         await smart.close()
 
+
+async def whale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Анализ китов на Hyperliquid: /whale [COIN]"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ закрыт")
+        return
+    
+    if not ADVANCED_FEATURES:
+        await update.message.reply_text("❌ Whale tracker не загружен")
+        return
+    
+    coin = context.args[0].upper() if context.args else "BTC"
+    
+    await update.message.reply_text(f"🐋 Анализирую китов для {coin}...")
+    
+    try:
+        analysis = await get_combined_whale_analysis(coin)
+        
+        whale_data = analysis.get('whale_data')
+        funding_data = analysis.get('funding_data', {})
+        reasoning = analysis.get('reasoning', [])
+        
+        signal_emoji = "🟢" if analysis.get('direction') == 'LONG' else "🔴" if analysis.get('direction') == 'SHORT' else "⚪"
+        
+        text = f"""<b>🐋 Whale Analysis: {coin}</b>
+
+{signal_emoji} <b>Сигнал:</b> {analysis.get('direction') or 'Нет'}
+<b>Уверенность:</b> {analysis.get('confidence', 0):.0%}
+
+<b>📊 Киты:</b>
+• Всего: {whale_data.whale_count if whale_data else 0}
+• Объём: ${whale_data.size_usd/1000:.0f}K
+
+<b>💰 Фандинг:</b>
+{funding_data.get('reasoning', 'Нет данных')}
+
+<b>📝 Анализ:</b>
+"""
+        for r in reasoning[:4]:
+            text += f"• {r}\n"
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"[WHALE] Error: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
+async def memes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Сканер мемкоинов: /memes"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ закрыт")
+        return
+    
+    if not ADVANCED_FEATURES:
+        await update.message.reply_text("❌ Meme scanner не загружен")
+        return
+    
+    await update.message.reply_text("🔍 Сканирую мемкоины...")
+    
+    try:
+        opportunities = await get_meme_opportunities()
+        
+        if not opportunities:
+            await update.message.reply_text("😴 Нет активных сигналов по мемам")
+            return
+        
+        text = "<b>🎰 Мем-сканер</b>\n\n"
+        
+        for opp in opportunities[:5]:
+            signal_emoji = "🟢" if opp['signal'] == 'LONG' else "🔴"
+            
+            text += f"{signal_emoji} <b>{opp['coin']}</b> | {opp['signal']}\n"
+            text += f"   💪 Сила: {opp['strength']}/5\n"
+            text += f"   📊 RSI: {opp['rsi']:.0f}\n"
+            text += f"   📈 1h: {opp['change_1h']:+.1f}%\n"
+            text += f"   🔥 Объём: x{opp['volume_spike']:.1f}\n"
+            
+            for r in opp.get('reasoning', [])[:2]:
+                text += f"   • {r}\n"
+            text += "\n"
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"[MEMES] Error: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
+async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Анализ рынка: /market"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ закрыт")
+        return
+    
+    if not ADVANCED_FEATURES:
+        await update.message.reply_text("❌ Market analyzer не загружен")
+        return
+    
+    await update.message.reply_text("📊 Анализирую рынок...")
+    
+    try:
+        context_data = await get_market_context()
+        
+        # Fear & Greed emoji
+        fg = context_data['fear_greed']
+        if fg < 25:
+            fg_emoji = "😱"
+            fg_text = "Экстремальный страх"
+        elif fg < 45:
+            fg_emoji = "😰"
+            fg_text = "Страх"
+        elif fg < 55:
+            fg_emoji = "😐"
+            fg_text = "Нейтрально"
+        elif fg < 75:
+            fg_emoji = "😊"
+            fg_text = "Жадность"
+        else:
+            fg_emoji = "🤑"
+            fg_text = "Экстремальная жадность"
+        
+        # Altseason
+        alt = context_data['altseason']
+        if alt > 70:
+            alt_text = "🚀 АЛЬТсезон!"
+        elif alt > 50:
+            alt_text = "📈 Альты растут"
+        elif alt > 30:
+            alt_text = "⚖️ Нейтрально"
+        else:
+            alt_text = "₿ BTC сезон"
+        
+        text = f"""<b>📊 Рыночный контекст</b>
+
+{fg_emoji} <b>Fear & Greed:</b> {fg} ({fg_text})
+₿ <b>BTC Доминация:</b> {context_data['btc_dominance']:.1f}%
+📊 <b>ETH/BTC:</b> {context_data['eth_btc']:.4f}
+
+{alt_text}
+<b>Altseason Index:</b> {alt}/100
+
+<b>💡 Рекомендации:</b>
+"""
+        for rec in context_data.get('recommendation', []):
+            text += f"• {rec}\n"
+        
+        text += f"\n<b>🎯 Лучшая категория:</b> {context_data.get('best_category', 'layer1').upper()}"
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"[MARKET] Error: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
 async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Статистика генерации сигналов: /signalstats [reset]"""
     user_id = update.effective_user.id
@@ -4532,6 +4737,9 @@ def main() -> None:
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
     app.add_handler(CommandHandler("signalstats", signal_stats_cmd))
+    app.add_handler(CommandHandler("whale", whale_cmd))
+    app.add_handler(CommandHandler("memes", memes_cmd))
+    app.add_handler(CommandHandler("market", market_cmd))
     app.add_handler(CommandHandler("autotrade", autotrade_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("reset", reset_all))

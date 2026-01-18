@@ -1810,14 +1810,31 @@ class SmartAnalyzer:
 smart_analyzer = SmartAnalyzer()
 
 
-async def find_best_setup(balance: float = 0) -> Optional[TradeSetup]:
+async def find_best_setup(balance: float = 0, use_whale_data: bool = True) -> Optional[TradeSetup]:
     """
     Найти лучший торговый сетап
     
-    Возвращает только качественные сетапы (A+, A, B)
+    Возвращает только качественные сетапы (A+, A, B, C)
+    Может учитывать данные китов с Hyperliquid
     """
     # Выбираем монеты
     coins = await smart_analyzer.select_best_coins(top_n=10)
+    
+    # Получаем данные китов если доступно
+    whale_signals = {}
+    if use_whale_data:
+        try:
+            from whale_tracker import get_combined_whale_analysis
+            for coin in coins[:5]:  # Топ-5 монет проверяем на китов
+                ticker = coin.split('/')[0]
+                analysis = await get_combined_whale_analysis(ticker)
+                if analysis.get('confidence', 0) > 0.5:
+                    whale_signals[coin] = analysis
+                    logger.info(f"[WHALE] {coin}: {analysis.get('direction')} ({analysis.get('confidence'):.0%})")
+        except ImportError:
+            pass  # Whale tracker не установлен
+        except Exception as e:
+            logger.warning(f"[WHALE] Error getting whale data: {e}")
     
     best_setup: Optional[TradeSetup] = None
     
@@ -1826,6 +1843,20 @@ async def find_best_setup(balance: float = 0) -> Optional[TradeSetup]:
             setup = await smart_analyzer.analyze(symbol, balance)
             
             if setup is not None:
+                # Если есть сигнал китов - бустим confidence
+                if symbol in whale_signals:
+                    whale = whale_signals[symbol]
+                    if whale.get('direction') == setup.direction:
+                        # Киты подтверждают направление
+                        setup.confidence = min(0.95, setup.confidence + 0.1)
+                        setup.reasoning.insert(0, f"🐋 Киты в {setup.direction} ({whale.get('confidence'):.0%})")
+                        logger.info(f"[SMART] {symbol}: Whale confirmation +10% confidence")
+                    elif whale.get('direction') and whale.get('direction') != setup.direction:
+                        # Киты против - снижаем confidence
+                        setup.confidence = max(0.3, setup.confidence - 0.15)
+                        setup.warnings.insert(0, f"⚠️ Киты против: {whale.get('direction')}")
+                        logger.info(f"[SMART] {symbol}: Whale disagreement -15% confidence")
+                
                 # Берём первый качественный сетап
                 if best_setup is None:
                     best_setup = setup
