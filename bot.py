@@ -8,12 +8,6 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 
-# #region agent log - Debug instrumentation
-def debug_log(hypothesis_id: str, location: str, message: str, data: dict = None):
-    """Write debug log via logger"""
-    print(f"[DBG:{hypothesis_id}] {location} | {message} | {data}")
-# #endregion
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
 from telegram.error import BadRequest
@@ -1087,12 +1081,8 @@ def save_user(user_id: int):
 
 def get_positions(user_id: int) -> List[Dict]:
     """Получить позиции (с кэшированием)"""
-    cache_hit = user_id in positions_cache
     if user_id not in positions_cache:
         positions_cache[user_id] = db_get_positions(user_id)
-    # #region agent log
-    debug_log("E", "get_positions", "Getting positions", {"user_id": user_id, "cache_hit": cache_hit, "count": len(positions_cache[user_id]), "position_ids": [p.get('id') for p in positions_cache[user_id]]})
-    # #endregion
     return positions_cache[user_id]
 
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
@@ -1607,14 +1597,7 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
     Returns:
         Количество синхронизированных (закрытых) позиций
     """
-    # #region agent log
-    debug_log("A", "sync_bybit_positions:entry", "Sync started", {"user_id": user_id})
-    # #endregion
-    
     if not await is_hedging_enabled():
-        # #region agent log
-        debug_log("A", "sync_bybit_positions:skip", "Hedging disabled", {})
-        # #endregion
         return 0
 
     user_positions = get_positions(user_id)
@@ -1629,10 +1612,6 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
     # Словарь: symbol -> size (размер позиции)
     bybit_sizes = {pos['symbol']: float(pos.get('size', 0)) for pos in bybit_positions}
     
-    # #region agent log
-    debug_log("A", "sync_bybit_positions:bybit_data", "Bybit positions fetched", {"bybit_count": len(bybit_positions), "bybit_sizes": bybit_sizes, "bot_positions_count": len(user_positions)})
-    # #endregion
-
     # Получаем закрытые позиции за последние 7 дней
     closed_pnl = await hedger.get_closed_pnl(limit=100)
 
@@ -2289,20 +2268,11 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     global smart
     
-    # #region agent log
-    debug_log("B", "send_smart_signal:entry", "Smart signal job started", {"time": datetime.now().isoformat()})
-    # #endregion
-    
     logger.info("[SMART] ========== Smart Signal v2.0 ==========")
     
     # Получаем активных юзеров
     rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
     active_users = [row['user_id'] for row in rows] if rows else []
-    
-    # #region agent log
-    all_users_debug = run_sql("SELECT user_id, balance, trading FROM users LIMIT 10", fetch="all")
-    debug_log("B", "send_smart_signal:db_query", "DB users query", {"MIN_DEPOSIT": MIN_DEPOSIT, "rows_found": len(rows) if rows else 0, "all_users_sample": [dict(u) for u in all_users_debug] if all_users_debug else []})
-    # #endregion
     
     # Проверяем авто-трейд
     has_auto_trade = False
@@ -2311,10 +2281,6 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         auto_user_check = get_user(AUTO_TRADE_USER_ID)
         has_auto_trade = auto_user_check.get('auto_trade', False)
         auto_balance = auto_user_check.get('balance', 0)
-    
-    # #region agent log
-    debug_log("B", "send_smart_signal:users_check", "Checking active users", {"active_users_count": len(active_users), "active_user_ids": [u.get('id') for u in active_users], "has_auto_trade": has_auto_trade, "AUTO_TRADE_USER_ID": AUTO_TRADE_USER_ID})
-    # #endregion
     
     if not active_users and not has_auto_trade:
         logger.info("[SMART] Нет активных юзеров")
@@ -2389,10 +2355,6 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         # === АВТО-ТОРГОВЛЯ ===
         auto_trade_executed = False
         
-        # #region agent log
-        debug_log("B", "send_smart_signal:auto_trade_check", "Checking auto-trade conditions", {"has_auto_trade": has_auto_trade, "AUTO_TRADE_USER_ID": AUTO_TRADE_USER_ID})
-        # #endregion
-        
         if has_auto_trade and AUTO_TRADE_USER_ID:
             auto_user = get_user(AUTO_TRADE_USER_ID)
             auto_balance = auto_user.get('balance', 0)
@@ -2402,10 +2364,6 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
             user_max_daily = auto_user.get('auto_trade_max_daily', 10)
             user_today_count = auto_user.get('auto_trade_today', 0)
-            
-            # #region agent log
-            debug_log("B", "send_smart_signal:auto_trade_settings", "Auto-trade settings", {"user_auto_enabled": user_auto_enabled, "auto_balance": auto_balance, "user_min_winrate": user_min_winrate, "user_max_daily": user_max_daily, "user_today_count": user_today_count, "confidence_percent": confidence_percent})
-            # #endregion
             
             # Сброс счётчика
             from datetime import date as dt_date
@@ -2648,10 +2606,6 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user = get_user(user_id)
     user_positions = get_positions(user_id)
     
-    # #region agent log
-    debug_log("E", "enter_trade:entry", "User entering trade", {"user_id": user_id, "balance": user.get('balance'), "positions_count": len(user_positions), "callback_data": query.data[:100]})
-    # #endregion
-
     # e|SYM|D|ENTRY|SL|TP1|TP2|TP3|AMT|WINRATE
     data = query.data.split("|")
     if len(data) < 7:
@@ -3404,10 +3358,6 @@ async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обновление цен и PnL с реальными данными Bybit (если хеджирование) или Binance"""
     
-    # #region agent log
-    debug_log("C", "update_positions:entry", "Update positions job started", {"positions_cache_users": list(positions_cache.keys()), "total_positions": sum(len(p) for p in positions_cache.values())})
-    # #endregion
-    
     # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
     bybit_open_symbols = set()
     bybit_sync_available = False  # Флаг что данные с Bybit получены успешно
@@ -3544,11 +3494,6 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                 hit_tp2 = pos['current'] <= tp2 and not pos.get('tp2_hit', False)
                 hit_tp3 = pos['current'] <= tp3
                 hit_sl = pos['current'] >= pos['sl']
-            
-            # #region agent log
-            if hit_tp1 or hit_tp2 or hit_tp3 or hit_sl:
-                debug_log("C", "update_positions:tp_sl_check", "TP/SL condition detected", {"pos_id": pos['id'], "symbol": pos['symbol'], "direction": pos['direction'], "current": pos['current'], "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": pos['sl'], "hit_tp1": hit_tp1, "hit_tp2": hit_tp2, "hit_tp3": hit_tp3, "hit_sl": hit_sl, "tp1_hit_flag": pos.get('tp1_hit', False), "tp2_hit_flag": pos.get('tp2_hit', False), "pnl": pos['pnl']})
-            # #endregion
             
             # === TP1: Закрываем 50%, двигаем SL в безубыток ===
             if hit_tp1 and not hit_sl:
@@ -3968,86 +3913,6 @@ R/R: 1:{setup.risk_reward:.1f}
         await update.message.reply_text(f"❌ Ошибка: {e}")
     finally:
         await smart.close()
-
-
-async def force_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Принудительная генерация тестового сигнала (игнорирует фильтры качества)"""
-    user_id = update.effective_user.id
-    
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ закрыт")
-        return
-    
-    await update.message.reply_text("🔧 Генерирую принудительный тестовый сигнал BTC...")
-    
-    try:
-        # Получаем текущую цену BTC
-        symbol = "BTC/USDT"
-        price = await get_real_price(symbol)
-        
-        if not price:
-            await update.message.reply_text("❌ Не удалось получить цену BTC")
-            return
-        
-        # Генерируем простой сигнал для тестирования
-        direction = "LONG"  # Всегда LONG для теста
-        atr_percent = 0.5  # 0.5% ATR
-        atr = price * (atr_percent / 100)
-        
-        entry = price
-        sl = entry - (atr * 1.5)  # SL 1.5 ATR
-        tp1 = entry + (atr * 2.0)  # TP1 2 ATR
-        tp2 = entry + (atr * 3.0)  # TP2 3 ATR  
-        tp3 = entry + (atr * 4.0)  # TP3 4 ATR
-        
-        confidence = 75
-        risk_reward = 2.0 / 1.5  # ~1.33
-        
-        text = f"""🔧 <b>FORCE TEST SIGNAL</b>
-
-<b>{symbol}</b> | {direction}
-Качество: TEST (игнорирует фильтры)
-Confidence: {confidence}%
-R/R: 1:{risk_reward:.1f}
-
-<b>Вход:</b> {format_price(entry)}
-<b>TP1:</b> {format_price(tp1)} (+{((tp1/entry)-1)*100:.2f}%)
-<b>TP2:</b> {format_price(tp2)} (+{((tp2/entry)-1)*100:.2f}%)
-<b>TP3:</b> {format_price(tp3)} (+{((tp3/entry)-1)*100:.2f}%)
-<b>SL:</b> {format_price(sl)} ({((sl/entry)-1)*100:.2f}%)
-
-⚠️ Это тестовый сигнал для проверки механики бота."""
-        
-        # Создаём кнопки для входа (сокращаем данные для лимита 64 байт)
-        # Используем BTC вместо BTC/USDT и округляем цены
-        short_symbol = "BTC"
-        e = int(entry)  # Округляем до целых
-        s = int(sl)
-        t1 = int(tp1)
-        t2 = int(tp2)
-        t3 = int(tp3)
-        
-        keyboard = [
-            [InlineKeyboardButton(f"✅ LONG $10", callback_data=f"e|{short_symbol}|L|{e}|{s}|{t1}|{t2}|{t3}|10|{confidence}")],
-            [InlineKeyboardButton(f"✅ LONG $25", callback_data=f"e|{short_symbol}|L|{e}|{s}|{t1}|{t2}|{t3}|25|{confidence}")],
-            [InlineKeyboardButton(f"✅ LONG $50", callback_data=f"e|{short_symbol}|L|{e}|{s}|{t1}|{t2}|{t3}|50|{confidence}")],
-            [InlineKeyboardButton("❌ Пропустить", callback_data="skip")]
-        ]
-        
-        await update.message.reply_text(
-            text, 
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        
-        # #region agent log
-        debug_log("TEST", "force_signal:created", "Force signal created", {"symbol": symbol, "direction": direction, "entry": entry, "sl": sl, "tp1": tp1})
-        # #endregion
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
 
 
 async def whale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4859,10 +4724,6 @@ def main() -> None:
         logger.error("BOT_TOKEN not set")
         return
     
-    # #region agent log
-    debug_log("INIT", "main:startup", "Bot starting", {"bybit_enabled": bool(os.getenv("BYBIT_API_KEY")), "demo_mode": os.getenv("BYBIT_DEMO", ""), "admin_ids": os.getenv("ADMIN_IDS", "")})
-    # #endregion
-    
     # Load persistent data from DB
     load_pending_commission()
     load_pending_invoices()
@@ -4878,7 +4739,6 @@ def main() -> None:
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
-    app.add_handler(CommandHandler("forcesignal", force_signal))
     app.add_handler(CommandHandler("signalstats", signal_stats_cmd))
     app.add_handler(CommandHandler("whale", whale_cmd))
     app.add_handler(CommandHandler("memes", memes_cmd))
