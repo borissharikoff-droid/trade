@@ -2660,7 +2660,10 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         symbol = data[1]
-        direction = "LONG" if data[2] == 'L' else "SHORT"
+        # Нормализуем символ: BTC -> BTC/USDT
+        if "/" not in symbol and not symbol.endswith("USDT"):
+            symbol = f"{symbol}/USDT"
+        direction = "LONG" if data[2] in ['L', 'LONG'] else "SHORT"
         entry = float(data[3])
         sl = float(data[4])
         tp1 = float(data[5])
@@ -4015,11 +4018,19 @@ R/R: 1:{risk_reward:.1f}
 
 ⚠️ Это тестовый сигнал для проверки механики бота."""
         
-        # Создаём кнопки для входа
+        # Создаём кнопки для входа (сокращаем данные для лимита 64 байт)
+        # Используем BTC вместо BTC/USDT и округляем цены
+        short_symbol = "BTC"
+        e = int(entry)  # Округляем до целых
+        s = int(sl)
+        t1 = int(tp1)
+        t2 = int(tp2)
+        t3 = int(tp3)
+        
         keyboard = [
-            [InlineKeyboardButton(f"✅ LONG $10", callback_data=f"e|{symbol}|{direction}|{entry}|{sl}|{tp1}|{tp2}|{tp3}|10|{confidence}")],
-            [InlineKeyboardButton(f"✅ LONG $25", callback_data=f"e|{symbol}|{direction}|{entry}|{sl}|{tp1}|{tp2}|{tp3}|25|{confidence}")],
-            [InlineKeyboardButton(f"✅ LONG $50", callback_data=f"e|{symbol}|{direction}|{entry}|{sl}|{tp1}|{tp2}|{tp3}|50|{confidence}")],
+            [InlineKeyboardButton(f"✅ LONG $10", callback_data=f"e|{short_symbol}|L|{e}|{s}|{t1}|{t2}|{t3}|10|{confidence}")],
+            [InlineKeyboardButton(f"✅ LONG $25", callback_data=f"e|{short_symbol}|L|{e}|{s}|{t1}|{t2}|{t3}|25|{confidence}")],
+            [InlineKeyboardButton(f"✅ LONG $50", callback_data=f"e|{short_symbol}|L|{e}|{s}|{t1}|{t2}|{t3}|50|{confidence}")],
             [InlineKeyboardButton("❌ Пропустить", callback_data="skip")]
         ]
         
