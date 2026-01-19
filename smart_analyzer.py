@@ -238,6 +238,17 @@ class SmartAnalyzer:
         self.MIN_RISK_REWARD = 1.5         # Минимальное соотношение R/R 1:1.5 (было 1.3 - слишком низко)
         self.MIN_CONFIDENCE = 0.50         # Минимальная уверенность 50% (было 0.40 - слишком низко)
         
+        # Динамические пороги R/R по режиму рынка (в сильных трендах можно брать меньший R/R)
+        self.RR_THRESHOLDS = {
+            MarketRegime.STRONG_UPTREND: 1.0,      # В сильном тренде R/R 1:1 достаточно
+            MarketRegime.UPTREND: 1.2,
+            MarketRegime.RANGING: 1.5,              # В рейндже нужен хороший R/R
+            MarketRegime.DOWNTREND: 1.2,
+            MarketRegime.STRONG_DOWNTREND: 1.0,    # В сильном тренде R/R 1:1 достаточно
+            MarketRegime.HIGH_VOLATILITY: 1.8,     # Высокая волатильность - строже
+            MarketRegime.UNKNOWN: 1.5
+        }
+        
         # Торговые сессии (UTC)
         self.LONDON_OPEN = 7
         self.LONDON_CLOSE = 16
@@ -2058,68 +2069,101 @@ class SmartAnalyzer:
                                   direction: str,
                                   atr: float,
                                   key_levels: List[KeyLevel],
-                                  swings: List[SwingPoint]) -> Dict:
+                                  swings: List[SwingPoint],
+                                  market_regime: MarketRegime = None) -> Dict:
         """
         Расчёт динамических TP/SL на основе структуры рынка
         
-        SL: За ближайшим свингом + буфер
+        SL: За ближайшим свингом + буфер (с ограничением макс. расстояния)
         TP1: До ближайшего уровня сопротивления (50% позиции)
         TP2: До следующего уровня (30% позиции)
         TP3: Трейлинг или далёкий уровень (20% позиции)
+        
+        В сильных трендах используем ATR-based уровни для лучшего R/R
         """
         
         # Буфер = 0.5 ATR
         buffer = atr * 0.5
         
-        if direction == "LONG":
-            # SL: под последним swing low
-            recent_lows = [s.price for s in swings if s.type in ['HL', 'LL', 'LOW']][-3:]
-            if recent_lows:
-                sl = min(recent_lows) - buffer
-            else:
-                sl = entry - atr * 1.5
+        # В сильных трендах используем ATR-based уровни (гарантирует хороший R/R)
+        is_strong_trend = market_regime in [MarketRegime.STRONG_UPTREND, MarketRegime.STRONG_DOWNTREND]
+        
+        if is_strong_trend:
+            # ATR-based уровни для сильных трендов
+            if direction == "LONG":
+                sl = entry - atr * 1.5      # SL: 1.5 ATR
+                tp1 = entry + atr * 2.0     # TP1: 2 ATR (R/R = 1.33)
+                tp2 = entry + atr * 3.0     # TP2: 3 ATR
+                tp3 = entry + atr * 4.5     # TP3: 4.5 ATR
+            else:  # SHORT
+                sl = entry + atr * 1.5      # SL: 1.5 ATR
+                tp1 = entry - atr * 2.0     # TP1: 2 ATR (R/R = 1.33)
+                tp2 = entry - atr * 3.0     # TP2: 3 ATR
+                tp3 = entry - atr * 4.5     # TP3: 4.5 ATR
             
-            # TP: ближайшие уровни сопротивления
-            resistances = sorted([l.price for l in key_levels 
-                                  if l.type == 'resistance' and l.price > entry])
-            
-            if len(resistances) >= 3:
-                tp1 = resistances[0]
-                tp2 = resistances[1]
-                tp3 = resistances[2]
-            elif len(resistances) >= 1:
-                tp1 = resistances[0]
-                tp2 = entry + atr * 2.5
-                tp3 = entry + atr * 4
-            else:
-                tp1 = entry + atr * 1.5
-                tp2 = entry + atr * 2.5
-                tp3 = entry + atr * 4
+            logger.info(f"[LEVELS] Using ATR-based levels for {market_regime.value}")
+        else:
+            # Стандартная логика на основе структуры
+            if direction == "LONG":
+                # SL: под последним swing low
+                recent_lows = [s.price for s in swings if s.type in ['HL', 'LL', 'LOW']][-3:]
+                if recent_lows:
+                    sl = min(recent_lows) - buffer
+                else:
+                    sl = entry - atr * 1.5
                 
-        else:  # SHORT
-            # SL: над последним swing high
-            recent_highs = [s.price for s in swings if s.type in ['HH', 'LH', 'HIGH']][-3:]
-            if recent_highs:
-                sl = max(recent_highs) + buffer
-            else:
-                sl = entry + atr * 1.5
+                # TP: ближайшие уровни сопротивления
+                resistances = sorted([l.price for l in key_levels 
+                                      if l.type == 'resistance' and l.price > entry])
+                
+                if len(resistances) >= 3:
+                    tp1 = resistances[0]
+                    tp2 = resistances[1]
+                    tp3 = resistances[2]
+                elif len(resistances) >= 1:
+                    tp1 = resistances[0]
+                    tp2 = entry + atr * 2.5
+                    tp3 = entry + atr * 4
+                else:
+                    tp1 = entry + atr * 1.5
+                    tp2 = entry + atr * 2.5
+                    tp3 = entry + atr * 4
+                    
+            else:  # SHORT
+                # SL: над последним swing high
+                recent_highs = [s.price for s in swings if s.type in ['HH', 'LH', 'HIGH']][-3:]
+                if recent_highs:
+                    sl = max(recent_highs) + buffer
+                else:
+                    sl = entry + atr * 1.5
+                
+                # TP: ближайшие уровни поддержки
+                supports = sorted([l.price for l in key_levels 
+                                  if l.type == 'support' and l.price < entry], reverse=True)
+                
+                if len(supports) >= 3:
+                    tp1 = supports[0]
+                    tp2 = supports[1]
+                    tp3 = supports[2]
+                elif len(supports) >= 1:
+                    tp1 = supports[0]
+                    tp2 = entry - atr * 2.5
+                    tp3 = entry - atr * 4
+                else:
+                    tp1 = entry - atr * 1.5
+                    tp2 = entry - atr * 2.5
+                    tp3 = entry - atr * 4
             
-            # TP: ближайшие уровни поддержки
-            supports = sorted([l.price for l in key_levels 
-                              if l.type == 'support' and l.price < entry], reverse=True)
-            
-            if len(supports) >= 3:
-                tp1 = supports[0]
-                tp2 = supports[1]
-                tp3 = supports[2]
-            elif len(supports) >= 1:
-                tp1 = supports[0]
-                tp2 = entry - atr * 2.5
-                tp3 = entry - atr * 4
-            else:
-                tp1 = entry - atr * 1.5
-                tp2 = entry - atr * 2.5
-                tp3 = entry - atr * 4
+            # Ограничение максимального расстояния SL (2.5 ATR) для не-трендовых режимов тоже
+            max_sl_distance = atr * 2.5
+            sl_distance = abs(entry - sl)
+            if sl_distance > max_sl_distance:
+                old_sl = sl
+                if direction == "LONG":
+                    sl = entry - max_sl_distance
+                else:
+                    sl = entry + max_sl_distance
+                logger.info(f"[LEVELS] SL capped: {old_sl:.4f} -> {sl:.4f} (max {max_sl_distance:.4f})")
         
         # Расчёт R/R
         risk = abs(entry - sl)
@@ -2525,18 +2569,20 @@ class SmartAnalyzer:
             _signal_stats['reasons']['no_setup'] += 1
             return None
         
-        # 10. Расчёт уровней
+        # 10. Расчёт уровней (с учётом режима рынка для ATR-based уровней в трендах)
         levels = self.calculate_dynamic_levels(
             entry=current_price,
             direction=direction,
             atr=atr,
             key_levels=key_levels,
-            swings=swings
+            swings=swings,
+            market_regime=market_regime
         )
         
-        # Проверка минимального R/R
-        if levels['risk_reward'] < self.MIN_RISK_REWARD:
-            logger.info(f"[SMART] Skip: R/R too low ({levels['risk_reward']:.2f})")
+        # Проверка минимального R/R (динамический порог по режиму рынка)
+        min_rr = self.RR_THRESHOLDS.get(market_regime, self.MIN_RISK_REWARD)
+        if levels['risk_reward'] < min_rr:
+            logger.info(f"[SMART] Skip: R/R too low ({levels['risk_reward']:.2f} < {min_rr})")
             _signal_stats['rejected'] += 1
             _signal_stats['reasons']['bad_rr'] += 1
             return None
