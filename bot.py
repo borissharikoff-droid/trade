@@ -4935,7 +4935,7 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     try:
         # Сначала закрываем все открытые позиции на Bybit
-        hedging_enabled = is_hedging_enabled()
+        hedging_enabled = await is_hedging_enabled()
         closed_count = 0
         failed_count = 0
         
@@ -4962,11 +4962,12 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                         failed_count += 1
                         logger.error(f"[RESET] Error closing position {pos.get('id')}: {e}")
         
-        # Очищаем все таблицы
-        run_sql("DELETE FROM positions")
-        run_sql("DELETE FROM history")
-        run_sql("DELETE FROM users")
-        run_sql("DELETE FROM alerts")
+        # Очищаем все таблицы (важен порядок из-за foreign key constraints)
+        # Сначала удаляем зависимые таблицы, потом основные
+        run_sql("DELETE FROM alerts")  # Зависит от users
+        run_sql("DELETE FROM positions")  # Зависит от users
+        run_sql("DELETE FROM history")  # Зависит от users
+        run_sql("DELETE FROM users")  # Основная таблица
         
         # Очищаем кэши
         positions_cache.clear()
