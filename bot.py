@@ -1707,17 +1707,16 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     users_cache.pop(user_id, None)
     user = get_user(user_id)
     
-    if not user['trading'] and user['balance'] < MIN_DEPOSIT:
-        logger.info(f"[TOGGLE] User {user_id} - insufficient balance (${user['balance']:.2f})")
-        await query.answer(f"❌ Недостаточно средств\n\nБаланс: ${user['balance']:.2f}\nМинимум: ${MIN_DEPOSIT}", show_alert=True)
-        return
-    
     new_state = not user['trading']
+    
+    # Разрешаем включать/выключать торговлю без проверки баланса
+    # (для тестирования на реальных деньгах с балансом $0)
+    # Обновляем состояние
     user['trading'] = new_state
     
     # Сохраняем напрямую в БД
     db_update_user(user_id, trading=new_state)
-    logger.info(f"[TOGGLE] User {user_id} trading = {new_state}")
+    logger.info(f"[TOGGLE] User {user_id} trading = {new_state} (balance: ${user['balance']:.2f})")
     
     # Очищаем кэш чтобы start() получил свежие данные из БД
     users_cache.pop(user_id, None)
