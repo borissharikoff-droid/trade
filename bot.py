@@ -2299,7 +2299,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         tp1_hit = pos.get('tp1_hit', False)
         tp2_hit = pos.get('tp2_hit', False)
         if tp2_hit:
-            tp_status = "TP3 🎯"
+            tp_status = "TP3"
             current_tp = pos.get('tp3', pos['tp'])
         elif tp1_hit:
             tp_status = "TP2"
@@ -2323,7 +2323,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Общий профит
     total_profit = user.get('total_profit', 0)
     profit_str = f"+${total_profit:.1f}" if total_profit >= 0 else f"-${abs(total_profit):.1f}"
+    realized_pnl_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
+    text += f"Реализованный P%L: {realized_pnl_str}\n\n"
     text += f"💰 Баланс: ${user['balance']:.2f} | {wins}/{total_trades} ({winrate}%) | {profit_str}"
     
     # Кнопка закрыть все (если больше 1 позиции)
