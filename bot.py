@@ -2706,6 +2706,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if synced > 0:
         logger.info(f"[TRADES] Synced {synced} positions from Bybit")
     
+    # ОБНОВЛЯЕМ КЭШ после синхронизации - загружаем свежие данные из БД
+    positions_cache.set(user_id, db_get_positions(user_id))
+    
     # Логируем состояние кэша ПОСЛЕ синхронизации
     cache_after = len(positions_cache.get(user_id, []))
     cache_ids_after = [p.get('id') for p in positions_cache.get(user_id, [])]
@@ -3138,9 +3141,8 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                         pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
                         position['id'] = pos_id
                         
-                        if AUTO_TRADE_USER_ID not in positions_cache:
-                            positions_cache[AUTO_TRADE_USER_ID] = []
-                        positions_cache[AUTO_TRADE_USER_ID].append(position)
+                        # Обновляем кэш - загружаем все позиции из БД
+                        positions_cache.set(AUTO_TRADE_USER_ID, db_get_positions(AUTO_TRADE_USER_ID))
                         
                         # Уведомление
                         auto_msg = f"""<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
@@ -3430,6 +3432,9 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         pos_id = existing['id']
         logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol}, total=${new_amount}")
+        
+        # Обновляем кэш после изменения позиции
+        positions_cache.set(user_id, db_get_positions(user_id))
     else:
         # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
         position = {
@@ -3455,10 +3460,8 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         pos_id = db_add_position(user_id, position)
         position['id'] = pos_id
 
-        # Обновляем кэш
-        if user_id not in positions_cache:
-            positions_cache[user_id] = []
-        positions_cache[user_id].append(position)
+        # Обновляем кэш - загружаем все позиции из БД
+        positions_cache.set(user_id, db_get_positions(user_id))
         
         logger.info(f"[TRADE] ✅ Позиция открыта: User {user_id} {direction} {symbol} ${amount:.2f}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
     
@@ -4028,10 +4031,8 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         pos_id = db_add_position(user_id, position)
         position['id'] = pos_id
 
-        # Обновляем кэш
-        if user_id not in positions_cache:
-            positions_cache[user_id] = []
-        positions_cache[user_id].append(position)
+        # Обновляем кэш - загружаем все позиции из БД
+        positions_cache.set(user_id, db_get_positions(user_id))
         
         logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom), TP1/2/3={tp1:.4f}/{tp2:.4f}/{tp3:.4f}")
     
@@ -5902,6 +5903,8 @@ def main() -> None:
         app.job_queue.run_repeating(check_pending_crypto_payments, interval=15, first=15)
         
         logger.info("[JOBS] All periodic tasks registered")
+    else:
+        logger.warning("[JOBS] JobQueue NOT available!")
     
     # Error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5917,8 +5920,6 @@ def main() -> None:
                 pass
     
     app.add_error_handler(error_handler)
-    else:
-        logger.warning("[JOBS] JobQueue NOT available!")
     
     # Устанавливаем меню команд
     async def post_init(application):
