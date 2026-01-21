@@ -974,33 +974,62 @@ async def withdraw_commission():
     global pending_commission
     
     if pending_commission < 1:
+        logger.info(f"[COMMISSION] Пропуск вывода: сумма ${pending_commission:.2f} < $1")
         return False
     
     amount = pending_commission
     
     # CryptoBot Transfer API
     crypto_token = os.getenv("CRYPTO_BOT_TOKEN", "")
-    if not crypto_token or not ADMIN_CRYPTO_ID:
-        logger.warning("[COMMISSION] CryptoBot не настроен для вывода")
+    if not crypto_token:
+        logger.warning("[COMMISSION] ❌ CRYPTO_BOT_TOKEN не настроен")
+        return False
+    
+    if not ADMIN_CRYPTO_ID:
+        logger.warning("[COMMISSION] ❌ ADMIN_CRYPTO_ID не настроен в .env")
         return False
     
     testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
     base_url = "https://testnet-pay.crypt.bot" if testnet else "https://pay.crypt.bot"
     
+    logger.info(f"[COMMISSION] Попытка вывода ${amount:.2f} на ID {ADMIN_CRYPTO_ID} (testnet={testnet})")
+    
     try:
         async with aiohttp.ClientSession() as session:
+            # Сначала проверим баланс бота
+            async with session.get(
+                f"{base_url}/api/getBalance",
+                headers={"Crypto-Pay-API-Token": crypto_token}
+            ) as resp:
+                balance_data = await resp.json()
+                logger.info(f"[COMMISSION] Bot balance: {balance_data}")
+                
+                if balance_data.get("ok"):
+                    balances = balance_data.get("result", [])
+                    usdt_balance = next((b for b in balances if b.get("currency_code") == "USDT"), None)
+                    if usdt_balance:
+                        available = float(usdt_balance.get("available", 0))
+                        logger.info(f"[COMMISSION] USDT доступно: ${available:.2f}")
+                        if available < amount:
+                            logger.warning(f"[COMMISSION] ❌ Недостаточно USDT на балансе бота: ${available:.2f} < ${amount:.2f}")
+                            return False
+            
             # Трансфер на CryptoBot ID админа
+            transfer_payload = {
+                "user_id": int(ADMIN_CRYPTO_ID),
+                "asset": "USDT",
+                "amount": str(round(amount, 2)),
+                "spend_id": f"commission_{int(datetime.now().timestamp())}"
+            }
+            logger.info(f"[COMMISSION] Transfer payload: {transfer_payload}")
+            
             async with session.post(
                 f"{base_url}/api/transfer",
                 headers={"Crypto-Pay-API-Token": crypto_token},
-                json={
-                    "user_id": int(ADMIN_CRYPTO_ID),
-                    "asset": "USDT",
-                    "amount": str(round(amount, 2)),
-                    "spend_id": f"commission_{int(datetime.now().timestamp())}"
-                }
+                json=transfer_payload
             ) as resp:
                 data = await resp.json()
+                logger.info(f"[COMMISSION] Transfer response: {data}")
                 
                 if data.get("ok"):
                     pending_commission = 0
@@ -1008,10 +1037,16 @@ async def withdraw_commission():
                     logger.info(f"[COMMISSION] ✅ Выведено ${amount:.2f} на CryptoBot ID {ADMIN_CRYPTO_ID}")
                     return True
                 else:
-                    logger.error(f"[COMMISSION] ❌ Ошибка вывода: {data}")
+                    error = data.get("error", {})
+                    error_code = error.get("code", "unknown")
+                    error_name = error.get("name", "Unknown")
+                    logger.error(f"[COMMISSION] ❌ Ошибка вывода: {error_code} - {error_name}")
+                    logger.error(f"[COMMISSION] Full response: {data}")
                     return False
     except Exception as e:
-        logger.error(f"[COMMISSION] ❌ Ошибка: {e}")
+        logger.error(f"[COMMISSION] ❌ Exception: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 # ==================== BATCH ОТПРАВКА (для 500+ юзеров) ====================
@@ -1248,7 +1283,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = f"""<b>✅ Оплата</b>
 
 Зачислено: ${usd}
-💰 ${user['balance']:.2f}"""
+💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1275,10 +1310,107 @@ async def pay_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             InlineKeyboardButton("$50", callback_data="crypto_50"),
             InlineKeyboardButton("$100", callback_data="crypto_100")
         ],
+        [InlineKeyboardButton("💵 Своя сумма", callback_data="crypto_custom")],
         [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def crypto_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запрос своей суммы для crypto депозита"""
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data['awaiting_crypto_amount'] = True
+    
+    text = """<b>💎 Своя сумма</b>
+
+Введи сумму в USDT (от $1 до $1000):"""
+    
+    keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="pay_crypto")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def handle_crypto_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Обработка ввода своей суммы для crypto"""
+    if not context.user_data.get('awaiting_crypto_amount'):
+        return False
+    
+    try:
+        amount = float(update.message.text.replace('$', '').replace(',', '.').strip())
+        if amount < 1 or amount > 1000:
+            await update.message.reply_text(
+                "❌ Сумма должна быть от $1 до $1000",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="pay_crypto")]])
+            )
+            return True
+        
+        context.user_data['awaiting_crypto_amount'] = False
+        
+        # Создаём инвойс напрямую
+        user_id = update.effective_user.id
+        amount = int(amount) if amount == int(amount) else round(amount, 2)
+        
+        crypto_token = os.getenv("CRYPTO_BOT_TOKEN")
+        if not crypto_token:
+            await update.message.reply_text(
+                "❌ Crypto временно недоступен",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]])
+            )
+            return True
+        
+        try:
+            is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
+            base_url = "https://testnet-pay.crypt.bot/api" if is_testnet else "https://pay.crypt.bot/api"
+            
+            async with aiohttp.ClientSession() as session:
+                headers = {"Crypto-Pay-API-Token": crypto_token}
+                payload = {
+                    "asset": "USDT",
+                    "amount": str(amount),
+                    "description": f"Пополнение баланса ${amount}",
+                    "payload": f"{user_id}_{amount}",
+                    "expires_in": 3600
+                }
+                
+                async with session.post(f"{base_url}/createInvoice", headers=headers, json=payload) as resp:
+                    data = await resp.json()
+                    
+                    if not data.get("ok"):
+                        raise Exception(data.get("error", {}).get("name", "Unknown error"))
+                    
+                    invoice = data["result"]
+            
+            db_add_pending_invoice(invoice['invoice_id'], user_id, amount)
+            
+            text = f"""<b>💎 Оплата</b>
+
+К оплате: <b>${amount} USDT</b>
+
+После оплаты нажми "Проверить"."""
+            
+            keyboard = [
+                [InlineKeyboardButton("💳 Оплатить", url=invoice['bot_invoice_url'])],
+                [InlineKeyboardButton("🔄 Проверить", callback_data=f"check_{invoice['invoice_id']}")],
+                [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
+            ]
+            
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            
+        except Exception as e:
+            logger.error(f"[CRYPTO] Custom amount error: {e}")
+            await update.message.reply_text(
+                "❌ Ошибка создания платежа",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]])
+            )
+        
+        return True
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Введи число, например: 15 или 25.5",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="pay_crypto")]])
+        )
+        return True
 
 async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -1327,15 +1459,17 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
         
         text = f"""<b>💎 Оплата</b>
 
-К оплате: ${amount} USDT"""
+К оплате: <b>${amount} USDT</b>
+
+После оплаты нажми "Проверить"."""
         
         keyboard = [
             [InlineKeyboardButton("💳 Оплатить", url=invoice['bot_invoice_url'])],
-            [InlineKeyboardButton("✅ Я оплатил", callback_data=f"check_{invoice['invoice_id']}")],
+            [InlineKeyboardButton("🔄 Проверить", callback_data=f"check_{invoice['invoice_id']}")],
             [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
         ]
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         
     except Exception as e:
         logger.error(f"[CRYPTO] Error: {e}")
@@ -1346,7 +1480,7 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer("Проверяем...")
+    await query.answer()
     
     try:
         invoice_id = int(query.data.split("_")[1])
@@ -1357,13 +1491,23 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
     # Use persistent DB instead of context.bot_data
     pending_info = db_get_pending_invoice(invoice_id)
     if not pending_info:
-        await query.answer("Платёж не найден или истёк", show_alert=True)
+        await query.edit_message_text(
+            "<b>❌ Ошибка</b>\n\nПлатёж не найден или истёк.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]]),
+            parse_mode="HTML"
+        )
         return
     
     crypto_token = os.getenv("CRYPTO_BOT_TOKEN")
     if not crypto_token:
         await query.answer("Ошибка", show_alert=True)
         return
+    
+    # Показываем статус проверки
+    await query.edit_message_text(
+        "<b>⏳ Проверяем ваш платёж...</b>",
+        parse_mode="HTML"
+    )
     
     try:
         is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
@@ -1378,7 +1522,20 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 data = await resp.json()
                 
                 if not data.get("ok") or not data.get("result", {}).get("items"):
-                    await query.answer("Платёж ещё не получен", show_alert=True)
+                    # Платёж не найден - возвращаем к оплате
+                    amount = pending_info['amount']
+                    text = f"""<b>💎 Оплата</b>
+
+К оплате: <b>${amount} USDT</b>
+
+⚠️ Платёж ещё не получен. Оплатите и попробуйте снова."""
+                    
+                    # Получаем URL инвойса заново
+                    keyboard = [
+                        [InlineKeyboardButton("🔄 Проверить снова", callback_data=f"check_{invoice_id}")],
+                        [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
+                    ]
+                    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
                     return
                 
                 invoice = data["result"]["items"][0]
@@ -1413,19 +1570,37 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                         except:
                             pass
             
-            text = f"""<b>✅ Оплата</b>
+            text = f"""<b>✅ Оплата успешна</b>
 
-Зачислено: ${amount}
-💰 ${user['balance']:.2f}"""
+Зачислено: <b>${amount}</b>
+
+💰 Баланс: ${user['balance']:.2f}"""
             
             keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         else:
-            await query.answer("Платёж ещё не получен", show_alert=True)
+            # Платёж не оплачен
+            amount = pending_info['amount']
+            text = f"""<b>💎 Оплата</b>
+
+К оплате: <b>${amount} USDT</b>
+
+⚠️ Платёж ещё не получен. Оплатите и попробуйте снова."""
+            
+            keyboard = [
+                [InlineKeyboardButton("💳 Оплатить", url=invoice.get('bot_invoice_url', ''))],
+                [InlineKeyboardButton("🔄 Проверить снова", callback_data=f"check_{invoice_id}")],
+                [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
+            ]
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
             
     except Exception as e:
         logger.error(f"[CRYPTO] Check error: {e}")
-        await query.answer("Ошибка проверки", show_alert=True)
+        await query.edit_message_text(
+            "<b>❌ Ошибка проверки</b>\n\nПопробуйте позже.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]]),
+            parse_mode="HTML"
+        )
 
 # ==================== ТОРГОВЛЯ ====================
 async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1652,7 +1827,7 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                     f"<b>⚠️ Синхронизация</b>\n\n"
                     f"{ticker} закрыт (не был на Bybit)\n"
                     f"Возврат: ${returned:.0f}\n\n"
-                    f"💰 ${user['balance']:.0f}",
+                    f"💰 Баланс: ${user['balance']:.0f}",
                     parse_mode="HTML"
                 )
             except Exception as e:
@@ -1702,14 +1877,14 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
 {ticker} закрыт
 Итого: <b>+${pnl_abs:.0f}</b>
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
                 else:
                     text = f"""<b>📡 Bybit</b>
 
 {ticker} закрыт
 Итого: <b>-${pnl_abs:.0f}</b>
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
 
                 await context.bot.send_message(user_id, text, parse_mode="HTML")
             except Exception as e:
@@ -1880,7 +2055,7 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 PnL: {pnl_sign}${total_pnl:.2f}
 
-💰 ${user['balance']:.2f}"""
+💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades"),
                  InlineKeyboardButton("🔙 Меню", callback_data="back")]]
@@ -2019,7 +2194,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 Итого: <b>+${pnl_abs:.0f}</b>
 Хороший сет.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     elif total_pnl < 0:
         text = f"""<b>📊 Все сделки закрыты</b>
 
@@ -2030,7 +2205,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 Итого: <b>-${pnl_abs:.0f}</b>
 Следующий будет лучше.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     else:
         text = f"""<b>📊 Все сделки закрыты</b>
 
@@ -2039,7 +2214,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 Итого: $0
 Капитал сохранён.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -2085,7 +2260,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 {wins}/{total_trades} ({winrate}%)
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
         
         keyboard = [
             [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
@@ -2110,6 +2285,13 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         dir_text = "LONG" if pos['direction'] == "LONG" else "SHORT"
         current = pos.get('current', pos['entry'])
         
+        # Расчёт PnL в процентах
+        if pos['direction'] == "LONG":
+            pnl_percent = (current - pos['entry']) / pos['entry'] * 100 * LEVERAGE
+        else:
+            pnl_percent = (pos['entry'] - current) / pos['entry'] * 100 * LEVERAGE
+        pnl_pct_str = f"+{pnl_percent:.0f}%" if pnl_percent >= 0 else f"{pnl_percent:.0f}%"
+        
         # Показываем количество стакнутых позиций
         stack_info = f" x{pos['stacked_count']}" if pos.get('stacked_count', 1) > 1 else ""
         
@@ -2126,9 +2308,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             tp_status = "TP1"
             current_tp = pos.get('tp1', pos['tp'])
         
-        text += f"<b>{ticker}</b> | {dir_text} | ${pos['amount']:.0f} | x{LEVERAGE}{stack_info} {emoji}\n"
-        text += f"{format_price(current)} → {tp_status}: {format_price(current_tp)} | SL: {format_price(pos['sl'])}\n"
-        text += f"PnL: {pnl_str}\n\n"
+        text += f"{ticker} | {dir_text} | ${pos['amount']:.0f} | x{LEVERAGE}{stack_info} {emoji}\n"
+        text += f"${current:,.2f} → {tp_status}: ${current_tp:,.2f} | SL: ${pos['sl']:,.2f}\n"
+        text += f"PnL: <b>{pnl_str}</b> ({pnl_pct_str})\n\n"
         
         # Для стакнутых позиций передаём все ID через запятую
         if pos.get('position_ids'):
@@ -2138,14 +2320,11 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=close_data)])
     
-    # Общий PnL
-    total_pnl = sum(p.get('pnl', 0) for p in user_positions)
-    total_pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+    # Общий профит
+    total_profit = user.get('total_profit', 0)
+    profit_str = f"+${total_profit:.1f}" if total_profit >= 0 else f"-${abs(total_profit):.1f}"
     
-    text += f"""───
-Всего: <b>{total_pnl_str}</b>
-
-💰 ${user['balance']:.2f} | {wins}/{total_trades} ({winrate}%)"""
+    text += f"💰 Баланс: ${user['balance']:.2f} | {wins}/{total_trades} ({winrate}%) | {profit_str}"
     
     # Кнопка закрыть все (если больше 1 позиции)
     if len(user_positions) > 0:
@@ -2488,28 +2667,20 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                         positions_cache[AUTO_TRADE_USER_ID].append(position)
                         
                         # Уведомление
-                        reasoning_text = "\n".join([f"• {r}" for r in setup.reasoning[:4]])
-                        warnings_text = "\n".join([f"• {w}" for w in setup.warnings[:2]]) if setup.warnings else ""
-                        
-                        auto_msg = f"""<b>🤖 {quality_emoji} | Smart Trade</b>
+                        auto_msg = f"""<b>🤖 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
 
-<b>{ticker}</b> | {direction} | ${auto_bet:.0f} | x{LEVERAGE}
-{regime_text}
+<b>${auto_bet:.0f}</b> открыто
 
-<b>Анализ:</b>
-{reasoning_text}
+Вход: <b>${entry:,.2f}</b>
 
-<b>Вход:</b> {format_price(entry)}
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
-<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
-<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
-<b>R/R:</b> 1:{setup.risk_reward:.1f}"""
-                        
-                        if warnings_text:
-                            auto_msg += f"\n\n⚠️ <b>Риски:</b>\n{warnings_text}"
-                        
-                        auto_msg += f"\n\n💰 ${new_balance:.0f}"
+TP1: ${tp1:,.2f} (<b>+{tp1_percent:.1f}%</b>) — 50%
+TP2: ${tp2:,.2f} (+{tp2_percent:.1f}%) — 30%
+TP3: ${tp3:,.2f} (+{tp3_percent:.1f}%) — 20%
+SL: ${sl:,.2f} (-{sl_percent:.1f}%)
+
+R/R: 1:{setup.risk_reward:.1f}
+
+💰 Баланс: ${new_balance:.0f}"""
                         
                         auto_keyboard = InlineKeyboardMarkup([
                             [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
@@ -2538,25 +2709,18 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             ticker = symbol.split("/")[0]
             d = 'L' if direction == "LONG" else 'S'
             
-            # Форматируем анализ
-            reasoning_text = "\n".join([f"• {r}" for r in setup.reasoning[:3]])
-            
-            text = f"""<b>📡 Smart Signal</b>
+            text = f"""<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
 
-<b>{ticker}</b> | {direction} | x{LEVERAGE}
-{quality_emoji} | {regime_text}
+Вход: <b>${entry:,.2f}</b>
 
-<b>Анализ:</b>
-{reasoning_text}
+TP1: ${tp1:,.2f} (<b>+{tp1_percent:.1f}%</b>)
+TP2: ${tp2:,.2f} (+{tp2_percent:.1f}%)
+TP3: ${tp3:,.2f} (+{tp3_percent:.1f}%)
+SL: ${sl:,.2f} (-{sl_percent:.1f}%)
 
-<b>Вход:</b> {format_price(entry)}
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%)
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%)
-<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%)
-<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
-<b>R/R:</b> 1:{setup.risk_reward:.1f}
+R/R: 1:{setup.risk_reward:.1f}
 
-💰 ${balance:.0f}"""
+💰 Баланс: ${balance:.0f}"""
             
             # Кнопки
             if balance >= 100:
@@ -2819,20 +2983,18 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     tp3_percent = abs(tp3 - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""<b>✅ Сделка открыта</b>
+    text = f"""<b>✅ {winrate}%</b> | {ticker} | {dir_text} | x{LEVERAGE}
 
-{ticker} | {dir_text} | ${amount:.0f} | x{LEVERAGE}
-Winrate: {winrate}%
+<b>${amount:.0f}</b> открыто
 
-<b>Вход:</b> {format_price(entry)}
+Вход: <b>${entry:,.2f}</b>
 
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
-<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
+TP1: ${tp1:,.2f} (<b>+{tp1_percent:.1f}%</b>) — 50%
+TP2: ${tp2:,.2f} (+{tp2_percent:.1f}%) — 30%
+TP3: ${tp3:,.2f} (+{tp3_percent:.1f}%) — 20%
+SL: ${sl:,.2f} (-{sl_percent:.1f}%)
 
-<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
-
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -2928,21 +3090,21 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 {ticker} | +${pnl_abs:.0f}
 Чистая работа.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     elif pnl == 0:
         text = f"""<b>➖ Безубыток</b>
 
 {ticker} | $0
 Вышли без потерь.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     else:
         text = f"""<b>📉 Сделка закрыта</b>
 
 {ticker} | -${pnl_abs:.0f}
 Часть стратегии.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -3067,7 +3229,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
 Закрыто: {len(to_close)}
 Чистая работа.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     elif total_pnl == 0:
         text = f"""<b>➖ Безубыток</b>
 
@@ -3075,7 +3237,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
 Закрыто: {len(to_close)}
 Вышли без потерь.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     else:
         text = f"""<b>📉 Сделки закрыты</b>
 
@@ -3083,7 +3245,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
 Закрыто: {len(to_close)}
 Часть стратегии.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -3143,6 +3305,12 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка введённой суммы"""
+    # Проверяем crypto custom amount сначала
+    if context.user_data.get('awaiting_crypto_amount'):
+        handled = await handle_crypto_custom_amount(update, context)
+        if handled:
+            return
+    
     if 'pending_trade' not in context.user_data:
         return
 
@@ -3316,20 +3484,18 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     tp3_percent = abs(tp3 - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""<b>✅ Сделка открыта</b>
+    text = f"""<b>✅ {winrate}%</b> | {ticker} | {dir_text} | x{LEVERAGE}
 
-{ticker} | {dir_text} | ${amount:.0f} | x{LEVERAGE}
-Winrate: {winrate}%
+<b>${amount:.0f}</b> открыто
 
-<b>Вход:</b> {format_price(entry)}
+Вход: <b>${entry:,.2f}</b>
 
-<b>TP1:</b> {format_price(tp1)} (+{tp1_percent:.1f}%) — 50%
-<b>TP2:</b> {format_price(tp2)} (+{tp2_percent:.1f}%) — 30%
-<b>TP3:</b> {format_price(tp3)} (+{tp3_percent:.1f}%) — 20%
+TP1: ${tp1:,.2f} (<b>+{tp1_percent:.1f}%</b>) — 50%
+TP2: ${tp2:,.2f} (+{tp2_percent:.1f}%) — 30%
+TP3: ${tp3:,.2f} (+{tp3_percent:.1f}%) — 20%
+SL: ${sl:,.2f} (-{sl_percent:.1f}%)
 
-<b>SL:</b> {format_price(sl)} (-{sl_percent:.1f}%)
-
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -3439,7 +3605,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 f"<b>📡 Bybit: позиция закрыта</b>\n\n"
                                 f"{ticker} | {pos['direction']} | {reason}\n"
                                 f"{pnl_emoji} {pnl_sign}${real_pnl:.2f}\n\n"
-                                f"💰 ${user['balance']:.0f}",
+                                f"💰 Баланс: ${user['balance']:.0f}",
                                 parse_mode="HTML"
                             )
                             logger.info(f"[BYBIT_SYNC] User {user_id}: {ticker} closed on Bybit, PnL=${real_pnl:.2f}")
@@ -3547,7 +3713,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 Закрыто 50%, SL → безубыток
 Следующая цель: TP2
 
-💰 ${user['balance']:.0f}""", parse_mode="HTML")
+💰 Баланс: ${user['balance']:.0f}""", parse_mode="HTML")
                     logger.info(f"[TP1] User {user_id} {ticker}: +${partial_pnl:.2f}, remaining {remaining_amount:.0f}")
                 except Exception as e:
                     logger.error(f"[TP1] Notify error: {e}")
@@ -3607,7 +3773,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 Закрыто 80%, moonbag 20%
 Цель: TP3
 
-💰 ${user['balance']:.0f}""", parse_mode="HTML")
+💰 Баланс: ${user['balance']:.0f}""", parse_mode="HTML")
                     logger.info(f"[TP2] User {user_id} {ticker}: +${partial_pnl:.2f}, runner {remaining_amount:.0f}")
                 except Exception as e:
                     logger.error(f"[TP2] Notify error: {e}")
@@ -3676,21 +3842,21 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 {format_price(pos['entry'])} → {format_price(exit_price)}
 Все цели достигнуты!
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
                 elif real_pnl >= 0:
                     text = f"""<b>➖ Безубыток</b>
 
 {ticker} | ${real_pnl:.2f}
 Защитный стоп сработал.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
                 else:
                     text = f"""<b>📉 Stop Loss</b>
 
 {ticker} | -${pnl_abs:.2f}
 Стоп отработал.
 
-💰 ${user['balance']:.0f}"""
+💰 Баланс: ${user['balance']:.0f}"""
                 
                 try:
                     await context.bot.send_message(
@@ -3809,19 +3975,103 @@ async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     
     stats = db_get_stats()
     
+    # Проверяем баланс CryptoBot
+    crypto_balance = "❓ Не удалось проверить"
+    crypto_token = os.getenv("CRYPTO_BOT_TOKEN", "")
+    testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
+    
+    if crypto_token:
+        try:
+            base_url = "https://testnet-pay.crypt.bot" if testnet else "https://pay.crypt.bot"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base_url}/api/getBalance",
+                    headers={"Crypto-Pay-API-Token": crypto_token}
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("ok"):
+                        balances = data.get("result", [])
+                        usdt = next((b for b in balances if b.get("currency_code") == "USDT"), None)
+                        if usdt:
+                            crypto_balance = f"${float(usdt.get('available', 0)):.2f} USDT"
+                        else:
+                            crypto_balance = "$0.00 USDT"
+                    else:
+                        crypto_balance = f"❌ {data.get('error', {}).get('name', 'Error')}"
+        except Exception as e:
+            crypto_balance = f"❌ {str(e)[:30]}"
+    else:
+        crypto_balance = "❌ CRYPTO_BOT_TOKEN не настроен"
+    
     text = f"""💰 <b>КОМИССИИ</b>
 
 📊 Всего заработано: <b>${stats['commissions']:.2f}</b>
 ⏳ В ожидании вывода: <b>${pending_commission:.2f}</b>
-🎯 Порог вывода: ${COMMISSION_WITHDRAW_THRESHOLD}
+🎯 Порог авто-вывода: ${COMMISSION_WITHDRAW_THRESHOLD}
 
-CryptoBot ID: {ADMIN_CRYPTO_ID or '❌ Не настроен'}"""
+<b>CryptoBot:</b>
+├ Баланс: {crypto_balance}
+├ Admin ID: <code>{ADMIN_CRYPTO_ID or '❌ Не настроен'}</code>
+└ Testnet: {'Да' if testnet else 'Нет'}
+
+💡 Комиссия {COMMISSION_PERCENT}% взимается при открытии сделки и накапливается до порога, затем автовыводится."""
     
     keyboard = []
     if pending_commission >= 1:
         keyboard.append([InlineKeyboardButton(f"💸 Вывести ${pending_commission:.2f}", callback_data="withdraw_commission")])
+    keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_commission")])
     
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
+
+async def refresh_commission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обновить статус комиссий"""
+    query = update.callback_query
+    await query.answer()
+    
+    admin_id = update.effective_user.id
+    if admin_id not in ADMIN_IDS:
+        return
+    
+    # Перезагружаем из БД
+    load_pending_commission()
+    
+    # Вызываем commission_cmd логику
+    stats = db_get_stats()
+    
+    crypto_balance = "❓"
+    crypto_token = os.getenv("CRYPTO_BOT_TOKEN", "")
+    testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
+    
+    if crypto_token:
+        try:
+            base_url = "https://testnet-pay.crypt.bot" if testnet else "https://pay.crypt.bot"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base_url}/api/getBalance",
+                    headers={"Crypto-Pay-API-Token": crypto_token}
+                ) as resp:
+                    data = await resp.json()
+                    if data.get("ok"):
+                        balances = data.get("result", [])
+                        usdt = next((b for b in balances if b.get("currency_code") == "USDT"), None)
+                        crypto_balance = f"${float(usdt.get('available', 0)):.2f}" if usdt else "$0.00"
+        except:
+            crypto_balance = "❌"
+    
+    text = f"""💰 <b>КОМИССИИ</b>
+
+📊 Всего: <b>${stats['commissions']:.2f}</b>
+⏳ Накоплено: <b>${pending_commission:.2f}</b>
+🎯 Порог: ${COMMISSION_WITHDRAW_THRESHOLD}
+
+CryptoBot: {crypto_balance} | ID: <code>{ADMIN_CRYPTO_ID or '—'}</code>"""
+    
+    keyboard = []
+    if pending_commission >= 1:
+        keyboard.append([InlineKeyboardButton(f"💸 Вывести ${pending_commission:.2f}", callback_data="withdraw_commission")])
+    keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_commission")])
+    
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def withdraw_commission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Callback для вывода комиссий"""
@@ -3833,16 +4083,34 @@ async def withdraw_commission_callback(update: Update, context: ContextTypes.DEF
         return
     
     amount_to_withdraw = pending_commission
-    await query.edit_message_text("⏳ Выводим комиссию...")
+    await query.edit_message_text("⏳ Выводим комиссию...\n\nПроверяем баланс CryptoBot и отправляем перевод...")
     
     success = await withdraw_commission()
     
     if success:
         # Audit log
         audit_log(admin_id, "WITHDRAW_COMMISSION", f"amount=${amount_to_withdraw:.2f}")
-        await query.edit_message_text(f"✅ Комиссия выведена на CryptoBot!")
+        text = f"""✅ <b>Комиссия выведена!</b>
+
+Сумма: <b>${amount_to_withdraw:.2f}</b>
+Получатель: CryptoBot ID {ADMIN_CRYPTO_ID}
+
+Проверьте @CryptoBot"""
+        keyboard = [[InlineKeyboardButton("🔙 К статусу", callback_data="refresh_commission")]]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     else:
-        await query.edit_message_text("❌ Ошибка вывода. Проверь настройки CRYPTO_BOT_TOKEN и ADMIN_CRYPTO_ID")
+        text = f"""❌ <b>Ошибка вывода</b>
+
+Возможные причины:
+• Недостаточно средств на балансе CryptoBot
+• Неверный ADMIN_CRYPTO_ID
+• Ошибка API CryptoBot
+
+Проверьте логи сервера для деталей.
+
+<code>/commission</code> - посмотреть статус"""
+        keyboard = [[InlineKeyboardButton("🔄 Попробовать снова", callback_data="withdraw_commission")]]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест генерации SMART сигнала"""
@@ -4769,6 +5037,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(pay_stars_menu, pattern="^pay_stars$"))
     app.add_handler(CallbackQueryHandler(send_stars_invoice, pattern="^stars_"))
     app.add_handler(CallbackQueryHandler(pay_crypto_menu, pattern="^pay_crypto$"))
+    app.add_handler(CallbackQueryHandler(crypto_custom_amount, pattern="^crypto_custom$"))
     app.add_handler(CallbackQueryHandler(create_crypto_invoice, pattern="^crypto_\\d+$"))
     app.add_handler(CallbackQueryHandler(check_crypto_payment, pattern="^check_"))
     app.add_handler(CallbackQueryHandler(show_trades, pattern="^(trades|my_positions|refresh_positions)$"))
@@ -4779,6 +5048,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(close_trade, pattern="^close_\\d+$"))
     app.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
     app.add_handler(CallbackQueryHandler(withdraw_commission_callback, pattern="^withdraw_commission$"))
+    app.add_handler(CallbackQueryHandler(refresh_commission_callback, pattern="^refresh_commission$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
     
     # Обработка текста для своей суммы
