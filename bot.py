@@ -373,8 +373,9 @@ def db_get_user(user_id: int) -> Dict:
     """, (user_id,), fetch="one")
 
     if not row:
-        run_sql("INSERT INTO users (user_id) VALUES (?)", (user_id,))
-        logger.info(f"[DB] New user {user_id} created")
+        # Явно указываем balance=0.0 и total_deposit=0.0 при создании
+        run_sql("INSERT INTO users (user_id, balance, total_deposit) VALUES (?, 0.0, 0.0)", (user_id,))
+        logger.info(f"[DB] New user {user_id} created with balance=0.0")
         return {
             'balance': 0.0, 'total_deposit': 0.0, 'total_profit': 0.0, 'trading': False,
             'auto_trade': False, 'auto_trade_max_daily': 10, 'auto_trade_min_winrate': 70,
@@ -1227,6 +1228,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except ValueError:
                 pass
     
+    # Принудительно читаем из БД (не из кэша) для актуального баланса
+    users_cache.pop(user_id, None)
     user = get_user(user_id)
     
     balance = user['balance']
@@ -1715,6 +1718,9 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Сохраняем напрямую в БД
     db_update_user(user_id, trading=new_state)
     logger.info(f"[TOGGLE] User {user_id} trading = {new_state}")
+    
+    # Очищаем кэш чтобы start() получил свежие данные из БД
+    users_cache.pop(user_id, None)
     
     await start(update, context)
 
@@ -3125,15 +3131,18 @@ SL: ${sl:,.2f} (-{sl_percent:.1f}%)
 💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Пытаемся отредактировать сообщение, если не получается - отправляем новое
     try:
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-        logger.info(f"[TRADE] ✅ Уведомление об открытии отправлено пользователю {user_id}")
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+        logger.info(f"[TRADE] ✅ Уведомление об открытии отправлено (edit) пользователю {user_id}")
     except Exception as e:
-        logger.error(f"[TRADE] ❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
+        logger.warning(f"[TRADE] ⚠️ Не удалось отредактировать сообщение пользователю {user_id}: {e}, отправляю новое")
         # Пытаемся отправить новое сообщение если edit не удался
         try:
-            await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-            logger.info(f"[TRADE] ✅ Уведомление отправлено новым сообщением пользователю {user_id}")
+            await context.bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode="HTML")
+            logger.info(f"[TRADE] ✅ Уведомление об открытии отправлено (новое сообщение) пользователю {user_id}")
         except Exception as e2:
             logger.error(f"[TRADE] ❌ Критическая ошибка отправки пользователю {user_id}: {e2}")
 
