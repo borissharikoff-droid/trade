@@ -584,6 +584,15 @@ def db_get_referrals_count(user_id: int) -> int:
     row = run_sql("SELECT COUNT(*) as cnt FROM users WHERE referrer_id = ?", (user_id,), fetch="one")
     return row['cnt'] if row else 0
 
+# Многоуровневая реферальная система - проценты от комиссии для каждого уровня
+# Определяем здесь, до использования в функциях ниже
+REFERRAL_COMMISSION_LEVELS = [
+    5.0,   # Уровень 1 (прямой реферал): 5% от комиссии
+    3.0,   # Уровень 2 (реферал реферала): 3% от комиссии
+    2.0,   # Уровень 3 (реферал реферала реферала): 2% от комиссии
+]
+MAX_REFERRAL_LEVELS = len(REFERRAL_COMMISSION_LEVELS)  # Максимум уровней
+
 def db_get_referral_commission_earned(user_id: int) -> float:
     """
     Подсчитать сколько комиссий заработано с рефералов
@@ -767,12 +776,6 @@ REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
 COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
 
 # Многоуровневая реферальная система - проценты от комиссии для каждого уровня
-REFERRAL_COMMISSION_LEVELS = [
-    5.0,   # Уровень 1 (прямой реферал): 5% от комиссии
-    3.0,   # Уровень 2 (реферал реферала): 3% от комиссии
-    2.0,   # Уровень 3 (реферал реферала реферала): 2% от комиссии
-]
-MAX_REFERRAL_LEVELS = len(REFERRAL_COMMISSION_LEVELS)  # Максимум уровней
 ADMIN_CRYPTO_ID_RAW = os.getenv("ADMIN_CRYPTO_ID", "")  # CryptoBot ID админа для вывода комиссий
 # Убираем префикс "U" если он есть (формат CryptoBot: U1077249 -> 1077249)
 ADMIN_CRYPTO_ID = ADMIN_CRYPTO_ID_RAW.lstrip("Uu") if ADMIN_CRYPTO_ID_RAW else ""
@@ -3077,7 +3080,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"[SMART] Торговля на паузе до {trading_state['pause_until']}")
         return
     
-    logger.info(f"[SMART] Активных юзеров: {len(active_users)} (trading=1, balance>={MIN_DEPOSIT}), Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
+    logger.info(f"[SMART] Активных юзеров: {len(active_users)} (balance>={MIN_DEPOSIT}), Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
     if active_users:
         logger.info(f"[SMART] Активные юзеры: {active_users}")
     logger.info(f"[SMART] Сделок сегодня: {trading_state['daily_trades']}, Убытков подряд: {trading_state['consecutive_losses']}")
@@ -3313,7 +3316,8 @@ R/R: 1:{setup.risk_reward:.1f}
             
             user = get_user(user_id)
             balance = user['balance']
-            trading_enabled = user.get('trading', False)
+            # trading может быть 0/1 (int) или True/False (bool), приводим к bool
+            trading_enabled = bool(user.get('trading', False))
             
             # Отправляем сигналы только пользователям с достаточным балансом
             if balance < MIN_DEPOSIT:
