@@ -18,6 +18,19 @@ from smart_analyzer import (
     TradeSetup, SetupQuality, MarketRegime, get_signal_stats, reset_signal_stats,
     increment_bybit_opened
 )
+from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
+from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
+from cache_manager import users_cache, positions_cache, price_cache, cleanup_caches
+
+load_dotenv()
+
+# Настройка логирования ДО импорта модулей, которые используют logger
+logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Умный анализатор v2.0 - единственный режим
+smart = SmartAnalyzer()
+
 # Новые модули для максимизации прибыли
 try:
     from trailing_stop import trailing_manager
@@ -30,17 +43,6 @@ try:
 except ImportError as e:
     ADVANCED_POSITION_MANAGEMENT = False
     logger.warning(f"[INIT] Advanced position management disabled: {e}")
-from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
-from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
-from cache_manager import users_cache, positions_cache, price_cache, cleanup_caches
-
-load_dotenv()
-
-# Умный анализатор v2.0 - единственный режим
-smart = SmartAnalyzer()
-
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Продвинутые модули (после создания logger)
 try:
