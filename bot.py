@@ -1248,7 +1248,8 @@ Winrate: {wr_text}"""
     keyboard = [
         [InlineKeyboardButton(f"{'🔴 Выкл' if user['trading'] else '🟢 Вкл'}", callback_data="toggle"),
          InlineKeyboardButton(f"{'🟢' if user.get('auto_trade') else '🔴'} Авто-трейд", callback_data="auto_trade_menu")],
-        [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+        [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")],
+        [InlineKeyboardButton("Дополнительно", callback_data="more_menu")]
     ]
     
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -4102,41 +4103,6 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text(text, parse_mode="HTML")
 
-@rate_limit(max_requests=10, window_seconds=60, action_type="admin_add_balance")
-async def add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Добавить баланс пользователю (админ)"""
-    admin_id = update.effective_user.id
-    
-    if admin_id not in ADMIN_IDS:
-        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
-        return
-    
-    # /addbalance [user_id] [amount] или /addbalance [amount] (себе)
-    if not context.args:
-        await update.message.reply_text("Использование:\n/addbalance 100 — себе\n/addbalance 123456 100 — юзеру")
-        return
-    
-    try:
-        if len(context.args) == 1:
-            target_id = admin_id
-            amount = float(context.args[0])
-        else:
-            target_id = int(context.args[0])
-            amount = float(context.args[1])
-        
-        # Обновляем баланс
-        run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, target_id))
-        user = db_get_user(target_id)
-        
-        if user:
-            # Audit log
-            audit_log(admin_id, "ADD_BALANCE", f"amount=${amount:.2f}, new_balance=${user['balance']:.2f}", target_user=target_id)
-            await update.message.reply_text(f"✅ Добавлено ${amount:.2f} юзеру {target_id}\n💰 Новый баланс: ${user['balance']:.2f}")
-        else:
-            await update.message.reply_text(f"❌ Юзер {target_id} не найден")
-    except (ValueError, IndexError):
-        await update.message.reply_text("❌ Неверный формат. Пример: /addbalance 100")
-
 async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Статус и вывод комиссий (админ)"""
     admin_id = update.effective_user.id
@@ -4968,6 +4934,34 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     try:
+        # Сначала закрываем все открытые позиции на Bybit
+        hedging_enabled = is_hedging_enabled()
+        closed_count = 0
+        failed_count = 0
+        
+        if hedging_enabled:
+            await update.message.reply_text("⏳ Закрываю позиции на Bybit...", parse_mode="HTML")
+            
+            # Получаем все позиции из БД
+            all_positions = run_sql("SELECT * FROM positions", fetch="all")
+            
+            for pos in all_positions:
+                bybit_qty = pos.get('bybit_qty', 0) or 0
+                if bybit_qty > 0:
+                    try:
+                        symbol = pos['symbol']
+                        direction = pos['direction']
+                        hedge_result = await hedge_close(pos['id'], symbol, direction, bybit_qty)
+                        if hedge_result:
+                            closed_count += 1
+                            logger.info(f"[RESET] Closed position {pos['id']} on Bybit: {symbol} {direction} qty={bybit_qty}")
+                        else:
+                            failed_count += 1
+                            logger.warning(f"[RESET] Failed to close position {pos['id']} on Bybit")
+                    except Exception as e:
+                        failed_count += 1
+                        logger.error(f"[RESET] Error closing position {pos.get('id')}: {e}")
+        
         # Очищаем все таблицы
         run_sql("DELETE FROM positions")
         run_sql("DELETE FROM history")
@@ -4981,22 +4975,31 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Сбрасываем статистику сигналов (уже импортировано из smart_analyzer)
         reset_signal_stats()
         
-        await update.message.reply_text(
-            "✅ <b>Полный сброс выполнен!</b>\n\n"
-            "🗑 Удалено:\n"
-            "• Все пользователи\n"
-            "• Все позиции\n"
-            "• Вся история сделок\n"
-            "• Все алерты\n"
-            "• Все кэши\n"
-            "• Статистика сигналов\n\n"
-            "Бот готов к работе с нуля.",
-            parse_mode="HTML"
-        )
-        logger.info(f"[ADMIN] Full reset executed by user {user_id}")
+        # Формируем сообщение
+        message_parts = ["✅ <b>Полный сброс выполнен!</b>\n\n"]
+        
+        if hedging_enabled and (closed_count > 0 or failed_count > 0):
+            message_parts.append("📡 <b>Bybit:</b>\n")
+            if closed_count > 0:
+                message_parts.append(f"✅ Закрыто позиций: {closed_count}\n")
+            if failed_count > 0:
+                message_parts.append(f"❌ Ошибок закрытия: {failed_count}\n")
+            message_parts.append("\n")
+        
+        message_parts.append("🗑 <b>Удалено:</b>\n")
+        message_parts.append("• Все пользователи\n")
+        message_parts.append("• Все позиции\n")
+        message_parts.append("• Вся история сделок\n")
+        message_parts.append("• Все алерты\n")
+        message_parts.append("• Все кэши\n")
+        message_parts.append("• Статистика сигналов\n\n")
+        message_parts.append("Бот готов к работе с нуля.")
+        
+        await update.message.reply_text("".join(message_parts), parse_mode="HTML")
+        logger.info(f"[ADMIN] Full reset executed by user {user_id} (Bybit: {closed_count} closed, {failed_count} failed)")
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
         logger.error(f"[ADMIN] Reset error: {e}")
 
 # ==================== РЕФЕРАЛЬНАЯ КОМАНДА ====================
@@ -5008,140 +5011,79 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     ref_count = db_get_referrals_count(user_id)
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
     
-    text = f"""🤝 Реферальная программа
+    text = f"""<b>🤝 Реферальная программа</b>
 
-Приглашай друзей и получай ${REFERRAL_BONUS} за каждого!
+Приглашай друзей и получай <b>${REFERRAL_BONUS:.2f}</b> за каждого!
 
-📊 Твои рефералы: {ref_count}
-💰 Бонус за реферала: ${REFERRAL_BONUS}
+📊 Твои рефералы: <b>{ref_count}</b>
+💰 Бонус за реферала: <b>${REFERRAL_BONUS:.2f}</b>
 
 🔗 Твоя ссылка:
-{ref_link}"""
+<code>{ref_link}</code>"""
     
     await update.message.reply_text(text, parse_mode="HTML")
 
-# ==================== АЛЕРТЫ КОМАНДЫ ====================
-@rate_limit(max_requests=10, window_seconds=60, action_type="alert")
-async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Создать или показать алерты. /alert BTC 100000 или /alert"""
-    user_id = update.effective_user.id
+# ==================== МЕНЮ "ДОПОЛНИТЕЛЬНО" ====================
+async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню дополнительных функций"""
+    query = update.callback_query
+    await query.answer()
     
-    if not context.args or len(context.args) == 0:
-        # Показать алерты
-        alerts = db_get_user_alerts(user_id)
-        if not alerts:
-            await update.message.reply_text("<b>🔔 Нет алертов</b>\n\nСоздать: /alert BTC 100000", parse_mode="HTML")
-            return
+    text = "<b>Дополнительно</b>\n\nВыбери раздел:"
     
-        text = "<b>🔔 Алерты</b>\n\n"
-        for a in alerts:
-            ticker = a['symbol'].split("/")[0] if "/" in a['symbol'] else a['symbol']
-            direction = "⬆️" if a['direction'] == 'above' else "⬇️"
-            text += f"#{a['id']} {ticker} {direction} ${a['target_price']:,.0f}\n"
-        
-        text += "\nУдалить: /delalert <id>"
-        await update.message.reply_text(text, parse_mode="HTML")
-        return
+    keyboard = [
+        [InlineKeyboardButton("🤝 Рефералка", callback_data="referral_menu")],
+        [InlineKeyboardButton("📜 История", callback_data="history_menu")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+    ]
     
-    # Создать алерт: /alert BTC 100000
-    if len(context.args) < 2:
-        await update.message.reply_text("Использование: /alert BTC 100000")
-        return
-    
-    ticker = context.args[0].upper()
-    symbol = f"{ticker}/USDT"
-    
-    try:
-        target_price = float(context.args[1].replace(",", ""))
-    except ValueError:
-        await update.message.reply_text("<b>❌ Ошибка</b>\n\nНеверная цена. Использование: /alert BTC 100000", parse_mode="HTML")
-        return
-    
-    # Получаем текущую цену
-    current_price = await get_real_price(symbol)
-    if not current_price:
-        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\nТикер {ticker} не найден.", parse_mode="HTML")
-        return
-    
-    # Определяем направление
-    direction = "above" if target_price > current_price else "below"
-    
-    alert_id = db_add_alert(user_id, symbol, target_price, direction)
-    
-    emoji = "⬆️" if direction == "above" else "⬇️"
-    text = f"""<b>🔔 Алерт создан</b>
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
-{ticker} {emoji} <b>${target_price:,.2f}</b>
-Сейчас: ${current_price:,.2f}"""
+async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показать реферальную программу через меню"""
+    query = update.callback_query
+    await query.answer()
     
-    await update.message.reply_text(text, parse_mode="HTML")
-
-@rate_limit(max_requests=10, window_seconds=60, action_type="delete_alert")
-async def delete_alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Удалить алерт: /delalert <id>"""
     user_id = update.effective_user.id
+    bot_username = (await context.bot.get_me()).username
     
-    if not context.args:
-        await update.message.reply_text("<b>📋 Использование</b>\n\n/delalert <id>", parse_mode="HTML")
-        return
+    ref_count = db_get_referrals_count(user_id)
+    ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
     
-    try:
-        alert_id = int(context.args[0].replace("#", ""))
-    except ValueError:
-        await update.message.reply_text("<b>❌ Ошибка</b>\n\nНеверный ID. Использование: /delalert <id>", parse_mode="HTML")
-        return
+    text = f"""<b>🤝 Реферальная программа</b>
+
+Приглашай друзей и получай <b>${REFERRAL_BONUS:.2f}</b> за каждого!
+
+📊 Твои рефералы: <b>{ref_count}</b>
+💰 Бонус за реферала: <b>${REFERRAL_BONUS:.2f}</b>
+
+🔗 Твоя ссылка:
+<code>{ref_link}</code>"""
     
-    if db_delete_alert(alert_id, user_id):
-        await update.message.reply_text(f"✅ Алерт #{alert_id} удалён")
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показать историю сделок через меню"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    trades = db_get_history(user_id, limit=10)
+    
+    if not trades:
+        text = "<b>📜 История пуста</b>"
     else:
-        await update.message.reply_text("<b>❌ Ошибка</b>\n\nАлерт не найден", parse_mode="HTML")
-
-async def check_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Job для проверки алертов"""
-    alerts = db_get_active_alerts()
+        text = "<b>📜 История сделок</b>\n\n"
+        for t in trades:
+            pnl_str = f"+${t['pnl']:.2f}" if t['pnl'] >= 0 else f"-${abs(t['pnl']):.2f}"
+            ticker = t['symbol'].split("/")[0] if "/" in t['symbol'] else t['symbol']
+            text += f"{ticker} {t['direction']} | <b>{pnl_str}</b> | {t['reason']}\n"
     
-    if not alerts:
-        return
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]]
     
-    # Группируем по символам
-    symbols = set(a['symbol'] for a in alerts)
-    prices = {}
-    
-    for symbol in symbols:
-        price = await get_real_price(symbol)
-        if price:
-            prices[symbol] = price
-    
-    for alert in alerts:
-        symbol = alert['symbol']
-        if symbol not in prices:
-            continue
-        
-        current_price = prices[symbol]
-        target = alert['target_price']
-        direction = alert['direction']
-        
-        triggered = False
-        if direction == 'above' and current_price >= target:
-            triggered = True
-        elif direction == 'below' and current_price <= target:
-            triggered = True
-        
-        if triggered:
-            db_trigger_alert(alert['id'])
-            
-            ticker = symbol.split("/")[0] if "/" in symbol else symbol
-            emoji = "🚀" if direction == 'above' else "📉"
-            
-            text = f"""<b>🔔 Алерт</b>
-
-{ticker} достиг <b>${target:,.2f}</b>"""
-            
-            try:
-                await context.bot.send_message(alert['user_id'], text, parse_mode="HTML")
-                logger.info(f"[ALERT] Triggered #{alert['id']} for {alert['user_id']}")
-            except:
-                pass
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 # ==================== ИСТОРИЯ СДЕЛОК ====================
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5179,7 +5121,6 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("health", health_check))
-    app.add_handler(CommandHandler("addbalance", add_balance))
     app.add_handler(CommandHandler("commission", commission_cmd))
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
@@ -5194,8 +5135,6 @@ def main() -> None:
     app.add_handler(CommandHandler("resetall", reset_everything))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("ref", referral_cmd))
-    app.add_handler(CommandHandler("alert", alert_cmd))
-    app.add_handler(CommandHandler("delalert", delete_alert_cmd))
     
     # Оплата Stars
     app.add_handler(PreCheckoutQueryHandler(precheckout))
@@ -5226,6 +5165,9 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(skip_signal, pattern="^skip$"))
     app.add_handler(CallbackQueryHandler(withdraw_commission_callback, pattern="^withdraw_commission$"))
     app.add_handler(CallbackQueryHandler(refresh_commission_callback, pattern="^refresh_commission$"))
+    app.add_handler(CallbackQueryHandler(more_menu, pattern="^more_menu$"))
+    app.add_handler(CallbackQueryHandler(referral_menu, pattern="^referral_menu$"))
+    app.add_handler(CallbackQueryHandler(history_menu, pattern="^history_menu$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
     
     # Обработка текста для своей суммы
@@ -5254,7 +5196,6 @@ def main() -> None:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
         # Интервал 300 сек (5 минут) - качество важнее количества
         app.job_queue.run_repeating(send_smart_signal, interval=120, first=10)  # 2 минуты
-        app.job_queue.run_repeating(check_alerts, interval=30, first=15)
         # Cache cleanup job - run every 5 minutes
         app.job_queue.run_repeating(lambda ctx: cleanup_caches(), interval=300, first=300)
         logger.info("[JOBS] JobQueue configured (SMART only, interval=300s)")
@@ -5266,12 +5207,6 @@ def main() -> None:
         from telegram import BotCommand
         commands = [
             BotCommand("start", "🏠 Главное меню"),
-            BotCommand("history", "📜 История сделок"),
-            BotCommand("ref", "👥 Реферальная программа"),
-            BotCommand("alert", "🔔 Создать алерт"),
-            BotCommand("delalert", "🔕 Удалить алерт"),
-            BotCommand("autotrade", "🤖 Авто-трейд настройки"),
-            BotCommand("signalstats", "📊 Статистика сигналов"),
         ]
         await application.bot.set_my_commands(commands)
         logger.info("[BOT] Commands menu set")
