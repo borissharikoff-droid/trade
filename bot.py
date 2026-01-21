@@ -19,6 +19,8 @@ from smart_analyzer import (
     increment_bybit_opened
 )
 from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
+from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
+from cache_manager import users_cache, positions_cache, price_cache, cleanup_caches
 
 load_dotenv()
 
@@ -964,6 +966,16 @@ rate_limits: Dict[int, Dict] = {}  # Deprecated - kept for compatibility
 # Per-user locks to prevent race conditions on balance operations
 _user_locks: Dict[int, asyncio.Lock] = {}
 
+def isolate_errors(func):
+    """Decorator to isolate errors in async functions"""
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"[ISOLATE] Error in {func.__name__}: {e}")
+            return None
+    return wrapper
+
 def get_user_lock(user_id: int) -> asyncio.Lock:
     """Get or create a lock for a specific user's balance operations"""
     if user_id not in _user_locks:
@@ -1181,11 +1193,7 @@ def update_positions_cache(user_id: int, positions: List[Dict]):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     
-    # Rate limiting
-    if check_rate_limit(user_id):
-        if update.callback_query:
-            await update.callback_query.answer("⏳ Подожди немного", show_alert=True)
-        return
+    # Rate limiting is now handled by @rate_limit decorator
     
     logger.info(f"[START] User {user_id}")
     
