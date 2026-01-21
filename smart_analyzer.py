@@ -14,12 +14,21 @@ import logging
 import asyncio
 import aiohttp
 import numpy as np
+import random
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+# Импорты для улучшений
+try:
+    from liquidity_analyzer import liquidity_analyzer
+    LIQUIDITY_ANALYSIS_ENABLED = True
+except ImportError:
+    LIQUIDITY_ANALYSIS_ENABLED = False
+    logger.warning("[SMART] Liquidity analyzer not available")
 
 
 # ==================== ENUMS ====================
@@ -553,7 +562,7 @@ class SmartAnalyzer:
                                 'type': 'bullish',
                                 'swept_level': swing.price,
                                 'strength': min(1.0, sweep_depth * 2),
-                                'reasoning': f"🎯 Sweep ликвидности на {swing.price:.2f}"
+                                'reasoning': f"Sweep ликвидности на {swing.price:.2f}"
                             }
             
             # BEARISH SWEEP (sweep high + возврат вниз)
@@ -567,7 +576,7 @@ class SmartAnalyzer:
                                 'type': 'bearish',
                                 'swept_level': swing.price,
                                 'strength': min(1.0, sweep_depth * 2),
-                                'reasoning': f"🎯 Sweep ликвидности на {swing.price:.2f}"
+                                'reasoning': f"Sweep ликвидности на {swing.price:.2f}"
                             }
         
         return None
@@ -668,7 +677,7 @@ class SmartAnalyzer:
                     'found': True,
                     'type': 'regular_bullish',
                     'strength': min(1.0, strength),
-                    'reasoning': f"📊 Bullish дивергенция RSI (цена LL, RSI HL)"
+                    'reasoning': f"Bullish дивергенция RSI (цена LL, RSI HL)"
                 }
                 logger.info(f"[DIVERGENCE] Regular Bullish: price LL, RSI HL")
                 return result
@@ -688,7 +697,7 @@ class SmartAnalyzer:
                     'found': True,
                     'type': 'regular_bearish',
                     'strength': min(1.0, strength),
-                    'reasoning': f"📊 Bearish дивергенция RSI (цена HH, RSI LH)"
+                    'reasoning': f"Bearish дивергенция RSI (цена HH, RSI LH)"
                 }
                 logger.info(f"[DIVERGENCE] Regular Bearish: price HH, RSI LH")
                 return result
@@ -707,7 +716,7 @@ class SmartAnalyzer:
                     'found': True,
                     'type': 'hidden_bullish',
                     'strength': min(0.8, strength),  # Скрытая дивергенция слабее
-                    'reasoning': f"📊 Hidden Bullish дивергенция (продолжение тренда)"
+                    'reasoning': f"Hidden Bullish дивергенция (продолжение тренда)"
                 }
                 logger.info(f"[DIVERGENCE] Hidden Bullish: price HL, RSI LL")
                 return result
@@ -726,7 +735,7 @@ class SmartAnalyzer:
                     'found': True,
                     'type': 'hidden_bearish',
                     'strength': min(0.8, strength),
-                    'reasoning': f"📊 Hidden Bearish дивергенция (продолжение тренда)"
+                    'reasoning': f"Hidden Bearish дивергенция (продолжение тренда)"
                 }
                 logger.info(f"[DIVERGENCE] Hidden Bearish: price LH, RSI HH")
                 return result
@@ -820,7 +829,7 @@ class SmartAnalyzer:
                 'signal': 'SHORT',
                 'pattern': 'no_demand',
                 'strength': 0.6,
-                'reasoning': "📉 VSA: No Demand (слабый рост)"
+                'reasoning': "VSA: No Demand (слабый рост)"
             }
             logger.info(f"[VSA] No Demand detected")
             return result
@@ -832,7 +841,7 @@ class SmartAnalyzer:
                 'signal': 'LONG',
                 'pattern': 'no_supply',
                 'strength': 0.6,
-                'reasoning': "📈 VSA: No Supply (слабое падение)"
+                'reasoning': "VSA: No Supply (слабое падение)"
             }
             logger.info(f"[VSA] No Supply detected")
             return result
@@ -845,7 +854,7 @@ class SmartAnalyzer:
                 'signal': 'LONG',
                 'pattern': 'stopping_volume',
                 'strength': 0.8,
-                'reasoning': "📈 VSA: Stopping Volume (покупатели)"
+                'reasoning': "VSA: Stopping Volume (покупатели)"
             }
             logger.info(f"[VSA] Stopping Volume detected")
             return result
@@ -859,7 +868,7 @@ class SmartAnalyzer:
                     'signal': 'SHORT',
                     'pattern': 'buying_climax',
                     'strength': 0.7,
-                    'reasoning': "📉 VSA: Buying Climax (истощение покупок)"
+                    'reasoning': "VSA: Buying Climax (истощение покупок)"
                 }
                 logger.info(f"[VSA] Buying Climax detected")
             else:
@@ -868,7 +877,7 @@ class SmartAnalyzer:
                     'signal': 'LONG',
                     'pattern': 'selling_climax',
                     'strength': 0.7,
-                    'reasoning': "📈 VSA: Selling Climax (истощение продаж)"
+                    'reasoning': "VSA: Selling Climax (истощение продаж)"
                 }
                 logger.info(f"[VSA] Selling Climax detected")
             return result
@@ -881,14 +890,14 @@ class SmartAnalyzer:
                     'signal': 'SHORT',
                     'pattern': 'effort_no_result_up',
                     'strength': 0.65,
-                    'reasoning': "📉 VSA: Effort>Result (сопротивление росту)"
+                    'reasoning': "VSA: Effort>Result (сопротивление росту)"
                 }
             else:
                 result = {
                     'signal': 'LONG',
                     'pattern': 'effort_no_result_down',
                     'strength': 0.65,
-                    'reasoning': "📈 VSA: Effort>Result (поддержка)"
+                    'reasoning': "VSA: Effort>Result (поддержка)"
                 }
             logger.info(f"[VSA] Effort vs Result detected")
             return result
@@ -1013,13 +1022,13 @@ class SmartAnalyzer:
                 return {
                     'confirmed': True, 
                     'strength': 0.8,
-                    'reasoning': "✅ 3 растущие свечи подряд"
+                    'reasoning': "3 растущие свечи подряд"
                 }
             elif last_3[2] > last_3[1]:
                 return {
                     'confirmed': True, 
                     'strength': 0.5,
-                    'reasoning': "✅ Последняя свеча растущая"
+                    'reasoning': "Последняя свеча растущая"
                 }
         
         elif direction == 'SHORT':
@@ -1028,13 +1037,13 @@ class SmartAnalyzer:
                 return {
                     'confirmed': True, 
                     'strength': 0.8,
-                    'reasoning': "✅ 3 падающие свечи подряд"
+                    'reasoning': "3 падающие свечи подряд"
                 }
             elif last_3[2] < last_3[1]:
                 return {
                     'confirmed': True, 
                     'strength': 0.5,
-                    'reasoning': "✅ Последняя свеча падающая"
+                    'reasoning': "Последняя свеча падающая"
                 }
         
         return {'confirmed': False, 'strength': 0}
@@ -2165,6 +2174,24 @@ class SmartAnalyzer:
                     sl = entry + max_sl_distance
                 logger.info(f"[LEVELS] SL capped: {old_sl:.4f} -> {sl:.4f} (max {max_sl_distance:.4f})")
         
+        # === ЗАЩИТА ОТ ОХОТЫ: Добавляем случайные отклонения ===
+        # Небольшие отклонения делают уровни менее предсказуемыми для маркет-мейкеров
+        sl_offset = random.uniform(-0.2, 0.2) * atr * 0.1
+        tp1_offset = random.uniform(-0.15, 0.15) * atr * 0.1
+        tp2_offset = random.uniform(-0.1, 0.1) * atr * 0.1
+        # TP3 без отклонений (moonbag остаётся на месте)
+        
+        if direction == "LONG":
+            sl = sl + sl_offset
+            tp1 = tp1 + tp1_offset
+            tp2 = tp2 + tp2_offset
+        else:  # SHORT
+            sl = sl - sl_offset
+            tp1 = tp1 - tp1_offset
+            tp2 = tp2 - tp2_offset
+        
+        logger.info(f"[LEVELS] Anti-hunt offsets applied: SL±{abs(sl_offset):.4f}, TP1±{abs(tp1_offset):.4f}")
+        
         # Расчёт R/R
         risk = abs(entry - sl)
         reward = abs(tp1 - entry)
@@ -2350,19 +2377,19 @@ class SmartAnalyzer:
         if current_ob:
             if current_ob.type == 'bullish':
                 bullish_signals += 3
-                reasoning.append(f"🎯 У Bullish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
+                reasoning.append(f"У Bullish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
             elif current_ob.type == 'bearish':
                 bearish_signals += 3
-                reasoning.append(f"🎯 У Bearish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
+                reasoning.append(f"У Bearish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
         
         # Fair Value Gap zone
         if current_fvg:
             if current_fvg.type == 'bullish':
                 bullish_signals += 2
-                reasoning.append(f"📊 В Bullish FVG зоне")
+                reasoning.append(f"В Bullish FVG зоне")
             elif current_fvg.type == 'bearish':
                 bearish_signals += 2
-                reasoning.append(f"📊 В Bearish FVG зоне")
+                reasoning.append(f"В Bearish FVG зоне")
         
         # Divergence
         if divergence['found']:
@@ -2385,10 +2412,10 @@ class SmartAnalyzer:
         if mtf.aligned:
             if mtf.trend_4h == 'BULLISH':
                 bullish_signals += 3
-                reasoning.append("✅ MTF: все таймфреймы бычьи")
+                reasoning.append("MTF: все таймфреймы бычьи")
             elif mtf.trend_4h == 'BEARISH':
                 bearish_signals += 3
-                reasoning.append("✅ MTF: все таймфреймы медвежьи")
+                reasoning.append("MTF: все таймфреймы медвежьи")
         
         # === ЛОГИКА СИГНАЛА ===
         
@@ -2425,15 +2452,15 @@ class SmartAnalyzer:
             if stochastic['signal'] == 'LONG':
                 bullish_signals += stochastic['strength'] + 1
                 if stochastic['extreme']:
-                    reasoning.append(f"📊 Стохастик перепродан (K={stochastic['k']:.0f})")
+                    reasoning.append(f"Стохастик перепродан (K={stochastic['k']:.0f})")
                 else:
-                    reasoning.append(f"📊 Стохастик низкий (K={stochastic['k']:.0f})")
+                    reasoning.append(f"Стохастик низкий (K={stochastic['k']:.0f})")
             elif stochastic['signal'] == 'SHORT':
                 bearish_signals += stochastic['strength'] + 1
                 if stochastic['extreme']:
-                    reasoning.append(f"📊 Стохастик перекуплен (K={stochastic['k']:.0f})")
+                    reasoning.append(f"Стохастик перекуплен (K={stochastic['k']:.0f})")
                 else:
-                    reasoning.append(f"📊 Стохастик высокий (K={stochastic['k']:.0f})")
+                    reasoning.append(f"Стохастик высокий (K={stochastic['k']:.0f})")
         
         # 3. Bollinger Bands - учитываем даже не экстремальные
         if bollinger['signal'] != 'NEUTRAL':
@@ -2471,10 +2498,10 @@ class SmartAnalyzer:
         # 6. MACD crossover
         if macd['crossover'] == 'BULLISH':
             bullish_signals += 2
-            reasoning.append("📈 MACD бычье пересечение")
+            reasoning.append("MACD бычье пересечение")
         elif macd['crossover'] == 'BEARISH':
             bearish_signals += 2
-            reasoning.append("📉 MACD медвежье пересечение")
+            reasoning.append("MACD медвежье пересечение")
         
         # 7. Open Interest
         if oi_change['reasoning']:
@@ -2496,25 +2523,25 @@ class SmartAnalyzer:
             if at_support or current_price > ema_50[-1] or rsi < 50:
                 direction = "LONG"
                 signal_type = SignalType.PULLBACK
-                reasoning.insert(0, "📈 Восходящий тренд")
+                reasoning.insert(0, "Восходящий тренд")
                 if at_support:
-                    reasoning.insert(1, "🎯 У поддержки")
+                    reasoning.insert(1, "У поддержки")
                     bullish_signals += 2
                 else:
-                    reasoning.insert(1, "🎯 По тренду")
+                    reasoning.insert(1, "По тренду")
                 bullish_signals += 3
                 
                 if bullish_pattern:
                     bullish_signals += 2
-                    reasoning.append(f"🕯️ {[p.name for p in recent_patterns if p.type == 'bullish']}")
+                    reasoning.append(f"Паттерн: {[p.name for p in recent_patterns if p.type == 'bullish']}")
         
         elif market_regime == MarketRegime.RANGING:
             # В рейндже - ТРЕБУЕМ оба условия: уровень + паттерн/RSI
             if at_support and (bullish_pattern or rsi < 35):
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
-                reasoning.insert(0, "⚖️ Рейндж: покупка от поддержки")
-                reasoning.insert(1, f"📊 RSI={rsi:.0f}")
+                reasoning.insert(0, "Рейндж: покупка от поддержки")
+                reasoning.insert(1, f"RSI={rsi:.0f}")
                 bullish_signals += 2
         
         # === SHORT SETUP === (менее строгие условия)
@@ -2524,25 +2551,25 @@ class SmartAnalyzer:
                 if at_resistance or current_price < ema_50[-1] or rsi > 50:
                     direction = "SHORT"
                     signal_type = SignalType.PULLBACK
-                    reasoning.insert(0, "📉 Нисходящий тренд")
+                    reasoning.insert(0, "Нисходящий тренд")
                     if at_resistance:
-                        reasoning.insert(1, "🎯 У сопротивления")
+                        reasoning.insert(1, "У сопротивления")
                         bearish_signals += 2
                     else:
-                        reasoning.insert(1, "🎯 По тренду")
+                        reasoning.insert(1, "По тренду")
                     bearish_signals += 3
                     
                     if bearish_pattern:
                         bearish_signals += 2
-                        reasoning.append(f"🕯️ {[p.name for p in recent_patterns if p.type == 'bearish']}")
+                        reasoning.append(f"Паттерн: {[p.name for p in recent_patterns if p.type == 'bearish']}")
             
             elif market_regime == MarketRegime.RANGING:
                 # В рейндже - ТРЕБУЕМ оба условия: уровень + паттерн/RSI
                 if at_resistance and (bearish_pattern or rsi > 65):
                     direction = "SHORT"
                     signal_type = SignalType.TREND_REVERSAL
-                    reasoning.insert(0, "⚖️ Рейндж: продажа от сопротивления")
-                    reasoning.insert(1, f"📊 RSI={rsi:.0f}")
+                    reasoning.insert(0, "Рейндж: продажа от сопротивления")
+                    reasoning.insert(1, f"RSI={rsi:.0f}")
                     bearish_signals += 2
         
         # === ДИСБАЛАНС-ЛОГИКА: Если нет сигнала по тренду, но есть сильный дисбаланс ===
@@ -2578,6 +2605,25 @@ class SmartAnalyzer:
             swings=swings,
             market_regime=market_regime
         )
+        
+        # === ПРОВЕРКА ЛИКВИДНОСТИ: Избегаем зон охоты на стопы ===
+        if LIQUIDITY_ANALYSIS_ENABLED:
+            liquidity_zones = liquidity_analyzer.find_liquidity_zones(klines_1h, direction, symbol)
+            should_avoid, reason = liquidity_analyzer.should_avoid_entry(
+                current_price, liquidity_zones, atr, min_distance_percent=0.5
+            )
+            
+            if should_avoid:
+                logger.info(f"[SMART] Skip {symbol}: {reason}")
+                _signal_stats['rejected'] += 1
+                _signal_stats['reasons']['liquidity_zone'] = _signal_stats['reasons'].get('liquidity_zone', 0) + 1
+                return None
+            
+            # Проверка order flow на манипуляции
+            order_flow = liquidity_analyzer.analyze_order_flow(klines_1h)
+            if order_flow.get('manipulation_risk', False):
+                logger.warning(f"[SMART] ⚠️ Manipulation risk detected: {order_flow.get('reason', '')}")
+                warnings.append(f"⚠️ Риск манипуляции: {order_flow.get('reason', '')}")
         
         # Проверка минимального R/R (динамический порог по режиму рынка)
         min_rr = self.RR_THRESHOLDS.get(market_regime, self.MIN_RISK_REWARD)

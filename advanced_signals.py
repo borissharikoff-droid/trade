@@ -290,21 +290,21 @@ class CrossMarketAnalyzer:
         
         # Рекомендации
         if self.fear_greed < 25:
-            result['recommendation'].append("😱 Страх - хорошо для покупок")
+            result['recommendation'].append("Страх - хорошо для покупок")
         elif self.fear_greed > 75:
-            result['recommendation'].append("🤑 Жадность - осторожно с лонгами")
+            result['recommendation'].append("Жадность - осторожно с лонгами")
         
         if self.altseason_index > 70:
-            result['recommendation'].append("🚀 Альт-сезон - торгуй альты")
+            result['recommendation'].append("Альт-сезон - торгуй альты")
             result['best_category'] = 'memes'  # Мемы лучше всего в альт-сезон
         elif self.altseason_index < 30:
-            result['recommendation'].append("₿ BTC сезон - фокус на BTC/ETH")
+            result['recommendation'].append("BTC сезон - фокус на BTC/ETH")
             result['best_category'] = 'layer1'
         
         if self.eth_btc_ratio > 0.055:
-            result['recommendation'].append("📈 ETH сильный - L2 могут расти")
+            result['recommendation'].append("ETH сильный - L2 могут расти")
         elif self.eth_btc_ratio < 0.045:
-            result['recommendation'].append("📉 ETH слабый - избегай L2")
+            result['recommendation'].append("ETH слабый - избегай L2")
         
         return result
 
@@ -426,11 +426,11 @@ class MemeCoinScanner:
             
             signal = "LONG"
             strength = min(5, int(volume_spike))
-            reasoning.append(f"🔥 Объём x{volume_spike:.1f}")
-            reasoning.append(f"📈 +{change_1h:.1f}% за час")
-            reasoning.append(f"💪 RSI={rsi:.0f}")
+            reasoning.append(f"Объём x{volume_spike:.1f}")
+            reasoning.append(f"+{change_1h:.1f}% за час")
+            reasoning.append(f"RSI={rsi:.0f}")
             if distance_to_high < 2:
-                reasoning.append("🎯 Пробой хая!")
+                reasoning.append("Пробой хая")
                 strength += 1
         
         # SHORT условия (мемы часто дампятся резко)
@@ -440,8 +440,8 @@ class MemeCoinScanner:
             
             signal = "SHORT"
             strength = min(4, int(abs(change_1h)))
-            reasoning.append(f"📉 {change_1h:.1f}% за час")
-            reasoning.append(f"😰 RSI={rsi:.0f}")
+            reasoning.append(f"{change_1h:.1f}% за час")
+            reasoning.append(f"RSI={rsi:.0f}")
         
         if not signal:
             return None

@@ -261,9 +261,9 @@ class WhaleTracker:
         short_ratio = short_volume / total_volume
         
         reasoning = []
-        reasoning.append(f"🐋 Китов: {len(whales)} (${total_volume/1000:.0f}K)")
-        reasoning.append(f"📈 Long: {long_count} (${long_volume/1000:.0f}K)")
-        reasoning.append(f"📉 Short: {short_count} (${short_volume/1000:.0f}K)")
+        reasoning.append(f"Китов: {len(whales)} (${total_volume/1000:.0f}K)")
+        reasoning.append(f"Long: {long_count} (${long_volume/1000:.0f}K)")
+        reasoning.append(f"Short: {short_count} (${short_volume/1000:.0f}K)")
         
         # Определяем сигнал
         signal = WhaleSignal.NONE
@@ -278,22 +278,22 @@ class WhaleTracker:
             signal = WhaleSignal.MEGA_LONG
             direction = "LONG"
             confidence = min(0.9, 0.6 + len(mega_longs) * 0.1)
-            reasoning.insert(0, f"🔥 {len(mega_longs)} МЕГА-КИТ в LONG!")
+            reasoning.insert(0, f"{len(mega_longs)} МЕГА-КИТ в LONG")
         elif mega_shorts and not mega_longs:
             signal = WhaleSignal.MEGA_SHORT
             direction = "SHORT"
             confidence = min(0.9, 0.6 + len(mega_shorts) * 0.1)
-            reasoning.insert(0, f"🔥 {len(mega_shorts)} МЕГА-КИТ в SHORT!")
+            reasoning.insert(0, f"{len(mega_shorts)} МЕГА-КИТ в SHORT")
         elif long_ratio > 0.65:
             signal = WhaleSignal.WHALE_LONG
             direction = "LONG"
             confidence = min(0.8, long_ratio)
-            reasoning.insert(0, f"🐋 Киты в LONG ({long_ratio:.0%})")
+            reasoning.insert(0, f"Киты в LONG ({long_ratio:.0%})")
         elif short_ratio > 0.65:
             signal = WhaleSignal.WHALE_SHORT
             direction = "SHORT"
             confidence = min(0.8, short_ratio)
-            reasoning.insert(0, f"🐋 Киты в SHORT ({short_ratio:.0%})")
+            reasoning.insert(0, f"Киты в SHORT ({short_ratio:.0%})")
         
         return WhaleAlert(
             signal=signal,
@@ -339,19 +339,19 @@ class WhaleTracker:
             if annual_rate > 50:  # >50% годовых = слишком много лонгов
                 result['signal'] = 'SHORT'
                 result['strength'] = min(3, int(annual_rate / 30))
-                result['reasoning'] = f"💰 Фандинг +{annual_rate:.0f}% годовых - перекос в лонг"
+                result['reasoning'] = f"Фандинг +{annual_rate:.0f}% годовых - перекос в лонг"
             elif annual_rate < -50:  # <-50% годовых = слишком много шортов
                 result['signal'] = 'LONG'
                 result['strength'] = min(3, int(abs(annual_rate) / 30))
-                result['reasoning'] = f"💰 Фандинг {annual_rate:.0f}% годовых - перекос в шорт"
+                result['reasoning'] = f"Фандинг {annual_rate:.0f}% годовых - перекос в шорт"
             elif annual_rate > 20:
                 result['signal'] = 'SHORT'
                 result['strength'] = 1
-                result['reasoning'] = f"💰 Фандинг +{annual_rate:.0f}% - больше лонгов"
+                result['reasoning'] = f"Фандинг +{annual_rate:.0f}% - больше лонгов"
             elif annual_rate < -20:
                 result['signal'] = 'LONG'
                 result['strength'] = 1
-                result['reasoning'] = f"💰 Фандинг {annual_rate:.0f}% - больше шортов"
+                result['reasoning'] = f"Фандинг {annual_rate:.0f}% - больше шортов"
                 
         except Exception as e:
             logger.warning(f"[WHALE] Funding error: {e}")
@@ -386,7 +386,7 @@ class WhaleTracker:
                     # Но мы можем отслеживать изменения между вызовами
                     
                     result['oi_change'] = oi
-                    result['reasoning'] = f"📊 Open Interest: ${oi/1000:.0f}K"
+                    result['reasoning'] = f"Open Interest: ${oi/1000:.0f}K"
                     break
                     
         except Exception as e:
