@@ -689,7 +689,9 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 configure_rate_limiter(run_sql, USE_POSTGRES, ADMIN_IDS)
 REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
 COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
-ADMIN_CRYPTO_ID = os.getenv("ADMIN_CRYPTO_ID", "")  # CryptoBot ID админа для вывода комиссий
+ADMIN_CRYPTO_ID_RAW = os.getenv("ADMIN_CRYPTO_ID", "")  # CryptoBot ID админа для вывода комиссий
+# Убираем префикс "U" если он есть (формат CryptoBot: U1077249 -> 1077249)
+ADMIN_CRYPTO_ID = ADMIN_CRYPTO_ID_RAW.lstrip("Uu") if ADMIN_CRYPTO_ID_RAW else ""
 
 # Счётчик накопленных комиссий (теперь персистентный в БД)
 pending_commission = 0.0
@@ -719,6 +721,17 @@ def load_pending_commission() -> float:
     except ValueError:
         pending_commission = 0.0
     logger.info(f"[COMMISSION] Loaded from DB: ${pending_commission:.2f}")
+    
+    # Логируем статус комиссий
+    if ADMIN_CRYPTO_ID:
+        logger.info(f"[COMMISSION] ✅ ADMIN_CRYPTO_ID настроен: {ADMIN_CRYPTO_ID} (исходный: {ADMIN_CRYPTO_ID_RAW})")
+        logger.info(f"[COMMISSION] Порог авто-вывода: ${COMMISSION_WITHDRAW_THRESHOLD:.2f}")
+        if pending_commission >= COMMISSION_WITHDRAW_THRESHOLD:
+            logger.info(f"[COMMISSION] ⚠️ Накоплено ${pending_commission:.2f} >= ${COMMISSION_WITHDRAW_THRESHOLD:.2f} - будет выведено при следующей сделке")
+    else:
+        logger.warning(f"[COMMISSION] ❌ ADMIN_CRYPTO_ID не настроен! Комиссии не будут выводиться.")
+        logger.warning(f"[COMMISSION] Установите ADMIN_CRYPTO_ID в .env (например: U1077249 или 1077249)")
+    
     return pending_commission
 
 def save_pending_commission():
@@ -1072,8 +1085,14 @@ async def withdraw_commission():
                             return False
             
             # Трансфер на CryptoBot ID админа
+            try:
+                user_id_int = int(ADMIN_CRYPTO_ID)
+            except (ValueError, TypeError):
+                logger.error(f"[COMMISSION] ❌ Неверный формат ADMIN_CRYPTO_ID: '{ADMIN_CRYPTO_ID}' (должен быть числом, например: 1077249 или U1077249)")
+                return False
+            
             transfer_payload = {
-                "user_id": int(ADMIN_CRYPTO_ID),
+                "user_id": user_id_int,
                 "asset": "USDT",
                 "amount": str(round(amount, 2)),
                 "spend_id": f"commission_{int(datetime.now().timestamp())}"
