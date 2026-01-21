@@ -145,6 +145,16 @@ class ThreadSafeCache:
             if key in self._data:
                 del self._data[key]
     
+    def pop(self, key: int, default: Any = None) -> Any:
+        """Pop key with per-key locking (like dict.pop)"""
+        lock = self._get_lock(key)
+        with lock:
+            if key in self._data:
+                value = self._data[key]
+                del self._data[key]
+                return value
+            return default
+    
     def items(self):
         """Get all items (read-only, no locking)"""
         return self._data.items()
