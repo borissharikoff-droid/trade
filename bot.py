@@ -3675,8 +3675,8 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
             # Проверяем если данные с Bybit получены успешно (даже если там 0 позиций)
             if bybit_sync_available:
                 for pos in user_positions[:]:
-                if pos.get('bybit_qty', 0) > 0:
-                    bybit_symbol = pos['symbol'].replace('/', '')
+                    if pos.get('bybit_qty', 0) > 0:
+                        bybit_symbol = pos['symbol'].replace('/', '')
                     
                     # Если позиция была на Bybit но её больше нет - закрылась по TP/SL
                     if bybit_symbol not in bybit_open_symbols:
@@ -4008,6 +4008,8 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     logger.info(f"[AUTO-CLOSE] User {user_id} {reason} {ticker}: Real PnL=${real_pnl:.2f}, Balance: ${user['balance']:.2f}")
                 except Exception as e:
                     logger.error(f"[AUTO-CLOSE] Failed to notify user {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"[PROCESS_USER] Error processing user {user_id}: {e}")
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 def db_get_stats() -> Dict:
