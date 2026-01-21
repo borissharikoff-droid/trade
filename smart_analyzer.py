@@ -2718,7 +2718,7 @@ class SmartAnalyzer:
         logger.info(f"[SMART] Entry: {current_price:.4f}, SL: {levels['stop_loss']:.4f}, TP1: {levels['take_profit_1']:.4f}")
         logger.info(f"[SMART] Signals: Bullish={bullish_signals}, Bearish={bearish_signals}")
         
-        _signal_stats['accepted'] += 1
+        # НЕ увеличиваем accepted здесь - это будет сделано только когда сигнал реально отправлен или открыт через автотрейд
         
         # Отслеживаем дисбаланс-сделки
         if extreme_move['extreme']:
@@ -2929,8 +2929,13 @@ _signal_stats = {
         'no_setup': 0,
         'state_blocked': 0,
         'outside_hours': 0,
+        'liquidity_zone': 0,  # Добавляем liquidity_zone в словарь причин
     }
 }
+
+def increment_accepted():
+    """Увеличить счетчик принятых сигналов (только когда сигнал реально отправлен)"""
+    _signal_stats['accepted'] += 1
 
 
 def get_signal_stats() -> Dict:
@@ -2956,6 +2961,7 @@ def reset_signal_stats():
             'no_setup': 0,
             'state_blocked': 0,
             'outside_hours': 0,
+            'liquidity_zone': 0,  # Добавляем liquidity_zone в словарь причин
         }
     }
     # Также сбрасываем состояние торговли

@@ -16,7 +16,7 @@ from hedger import hedge_open, hedge_close, is_hedging_enabled, hedger
 from smart_analyzer import (
     SmartAnalyzer, find_best_setup, record_trade_result, get_trading_state,
     TradeSetup, SetupQuality, MarketRegime, get_signal_stats, reset_signal_stats,
-    increment_bybit_opened
+    increment_bybit_opened, increment_accepted
 )
 from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
 from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
@@ -1233,9 +1233,15 @@ async def withdraw_commission():
                     if usdt_balance:
                         available = float(usdt_balance.get("available", 0))
                         logger.info(f"[COMMISSION] USDT доступно: ${available:.2f}")
+                        
+                        # Если доступно меньше, чем нужно - выводим то, что есть (минимум $1)
                         if available < amount:
-                            logger.warning(f"[COMMISSION] ❌ Недостаточно USDT на балансе бота: ${available:.2f} < ${amount:.2f}")
-                            return False
+                            if available >= 1.0:
+                                logger.info(f"[COMMISSION] ⚠️ Доступно меньше запрошенного: ${available:.2f} < ${amount:.2f}, выводим доступное")
+                                amount = available  # Выводим то, что есть
+                            else:
+                                logger.warning(f"[COMMISSION] ❌ Недостаточно USDT на балансе бота: ${available:.2f} < $1.00 (минимум для вывода)")
+                                return False
             
             # Трансфер на CryptoBot ID админа
             try:
@@ -1261,9 +1267,12 @@ async def withdraw_commission():
                 logger.info(f"[COMMISSION] Transfer response: {data}")
                 
                 if data.get("ok"):
-                    pending_commission = 0
-                    save_pending_commission()  # Persist reset to DB
-                    logger.info(f"[COMMISSION] ✅ Выведено ${amount:.2f} на CryptoBot ID {ADMIN_CRYPTO_ID}")
+                    # Вычитаем выведенную сумму из pending_commission (может быть частичный вывод)
+                    pending_commission -= amount
+                    if pending_commission < 0:
+                        pending_commission = 0  # Защита от отрицательных значений
+                    save_pending_commission()  # Persist to DB
+                    logger.info(f"[COMMISSION] ✅ Выведено ${amount:.2f} на CryptoBot ID {ADMIN_CRYPTO_ID}, осталось: ${pending_commission:.2f}")
                     return True
                 else:
                     error = data.get("error", {})
@@ -3310,6 +3319,8 @@ R/R: 1:{setup.risk_reward:.1f}
                         db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
         
         # === ОТПРАВКА АКТИВНЫМ ЮЗЕРАМ ===
+        signal_sent_to_users = False  # Флаг что сигнал был отправлен хотя бы одному пользователю
+        
         for user_id in active_users:
             if user_id == AUTO_TRADE_USER_ID and auto_trade_executed:
                 continue
@@ -3396,8 +3407,13 @@ R/R: 1:{setup.risk_reward:.1f}
             try:
                 await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
                 logger.info(f"[SMART] ✅ Сигнал отправлен пользователю {user_id} (баланс: ${balance:.2f})")
+                signal_sent_to_users = True  # Отметим что сигнал был отправлен
             except Exception as e:
                 logger.error(f"[SMART] ❌ Ошибка отправки пользователю {user_id}: {e}")
+        
+        # Увеличиваем accepted один раз на сигнал, если он был отправлен пользователям или открыт через автотрейд
+        if signal_sent_to_users or auto_trade_executed:
+            increment_accepted()
     
     except Exception as e:
         logger.error(f"[SMART] ❌ Error: {e}")
@@ -5390,6 +5406,7 @@ async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 'no_setup': '❌ Нет сетапа',
                 'state_blocked': '⏸️ Пауза/лимит',
                 'outside_hours': '🕐 Вне торговых часов',
+                'liquidity_zone': '💧 Зона ликвидности',
             }.get(reason, reason)
             reasons_text += f"• {reason_name}: {count}\n"
     
