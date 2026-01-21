@@ -584,6 +584,66 @@ def db_get_referrals_count(user_id: int) -> int:
     row = run_sql("SELECT COUNT(*) as cnt FROM users WHERE referrer_id = ?", (user_id,), fetch="one")
     return row['cnt'] if row else 0
 
+def db_get_referral_commission_earned(user_id: int) -> float:
+    """
+    Подсчитать сколько комиссий заработано с рефералов
+    Считает на основе истории сделок всех рефералов
+    """
+    # Получаем всех рефералов пользователя
+    referrals = run_sql("SELECT user_id FROM users WHERE referrer_id = ?", (user_id,), fetch="all")
+    if not referrals:
+        return 0.0
+    
+    total_earned = 0.0
+    
+    # Для каждого реферала считаем его комиссии
+    for ref in referrals:
+        ref_id = ref['user_id']
+        
+        # Получаем все сделки реферала из истории
+        ref_trades = run_sql("SELECT commission FROM history WHERE user_id = ?", (ref_id,), fetch="all")
+        
+        for trade in ref_trades:
+            commission = trade.get('commission', 0) or 0
+            if commission > 0:
+                # Уровень 1 получает REFERRAL_COMMISSION_LEVELS[0]% от комиссии
+                level_percent = REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0
+                earned = commission * (level_percent / 100)
+                total_earned += earned
+    
+    return round(total_earned, 2)
+
+def db_get_referrer_chain(user_id: int, max_levels: int = MAX_REFERRAL_LEVELS) -> List[int]:
+    """
+    Получить цепочку рефереров от пользователя до корня (админа)
+    Возвращает список [уровень1, уровень2, уровень3, ...] или до админа
+    """
+    chain = []
+    current_id = user_id
+    visited = set()  # Защита от циклов
+    
+    for level in range(max_levels):
+        referrer_id = db_get_referrer(current_id)
+        
+        # Если нет реферера или это админ - останавливаемся
+        if not referrer_id:
+            break
+        
+        # Защита от циклов
+        if referrer_id in visited or referrer_id == current_id:
+            break
+        
+        # Если реферер - админ, добавляем и останавливаемся
+        if referrer_id in ADMIN_IDS:
+            chain.append(referrer_id)
+            break
+        
+        chain.append(referrer_id)
+        visited.add(referrer_id)
+        current_id = referrer_id
+    
+    return chain
+
 # Referral bonus tracking to prevent abuse
 _referral_bonuses_given: Dict[int, set] = {}  # {referrer_id: {user_ids who gave bonus}}
 MAX_REFERRAL_BONUSES_PER_DAY = 10  # Limit bonuses per referrer per day
@@ -705,6 +765,14 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 configure_rate_limiter(run_sql, USE_POSTGRES, ADMIN_IDS)
 REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
 COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
+
+# Многоуровневая реферальная система - проценты от комиссии для каждого уровня
+REFERRAL_COMMISSION_LEVELS = [
+    5.0,   # Уровень 1 (прямой реферал): 5% от комиссии
+    3.0,   # Уровень 2 (реферал реферала): 3% от комиссии
+    2.0,   # Уровень 3 (реферал реферала реферала): 2% от комиссии
+]
+MAX_REFERRAL_LEVELS = len(REFERRAL_COMMISSION_LEVELS)  # Максимум уровней
 ADMIN_CRYPTO_ID_RAW = os.getenv("ADMIN_CRYPTO_ID", "")  # CryptoBot ID админа для вывода комиссий
 # Убираем префикс "U" если он есть (формат CryptoBot: U1077249 -> 1077249)
 ADMIN_CRYPTO_ID = ADMIN_CRYPTO_ID_RAW.lstrip("Uu") if ADMIN_CRYPTO_ID_RAW else ""
@@ -1069,13 +1137,53 @@ async def safe_balance_update(user_id: int, delta: float, reason: str = "") -> b
 rate_limits: Dict[int, Dict] = {}  # Deprecated - kept for compatibility
 
 # ==================== КОМИССИИ (АВТО-ВЫВОД) ====================
-async def add_commission(amount: float):
-    """Добавить комиссию и вывести при достижении порога (с персистентностью)"""
+async def add_commission(amount: float, user_id: Optional[int] = None):
+    """
+    Добавить комиссию и вывести при достижении порога (с персистентностью)
+    Распределяет комиссию между рефералами и админом
+    
+    Args:
+        amount: Общая сумма комиссии
+        user_id: ID пользователя, который открыл сделку (для реферальной системы)
+    """
     global pending_commission
-    pending_commission += amount
+    
+    # Распределяем комиссию между рефералами и админом
+    if user_id:
+        referrer_chain = db_get_referrer_chain(user_id, MAX_REFERRAL_LEVELS)
+        total_referral_share = 0.0
+        
+        # Начисляем комиссию рефералам по уровням
+        for level, referrer_id in enumerate(referrer_chain):
+            if level < len(REFERRAL_COMMISSION_LEVELS):
+                # Процент от комиссии для этого уровня
+                level_percent = REFERRAL_COMMISSION_LEVELS[level]
+                referral_commission = amount * (level_percent / 100)
+                
+                # Начисляем рефереру
+                run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (referral_commission, referrer_id))
+                
+                # Обновляем кэш
+                if referrer_id in users_cache:
+                    users_cache[referrer_id]['balance'] = sanitize_balance(
+                        users_cache[referrer_id]['balance'] + referral_commission
+                    )
+                
+                total_referral_share += referral_commission
+                logger.info(f"[REF_COMMISSION] Level {level+1}: ${referral_commission:.2f} to user {referrer_id} ({level_percent}% of ${amount:.2f})")
+        
+        # Остаток идет админу
+        admin_commission = amount - total_referral_share
+        pending_commission += admin_commission
+        logger.info(f"[COMMISSION] Total: ${amount:.2f}, Referrals: ${total_referral_share:.2f}, Admin: ${admin_commission:.2f}")
+    else:
+        # Если user_id не указан - вся комиссия идет админу (старый режим)
+        pending_commission += amount
+        logger.info(f"[COMMISSION] +${amount:.2f} (no user_id, all to admin)")
+    
     save_pending_commission()  # Persist to DB
     
-    logger.info(f"[COMMISSION] +${amount:.2f}, накоплено: ${pending_commission:.2f}")
+    logger.info(f"[COMMISSION] Накоплено: ${pending_commission:.2f}")
     
     # Авто-вывод при достижении порога
     if pending_commission >= COMMISSION_WITHDRAW_THRESHOLD and ADMIN_CRYPTO_ID:
@@ -2945,8 +3053,10 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     
     logger.info("[SMART] ========== Smart Signal v2.0 ==========")
     
-    # Получаем активных юзеров
-    rows = run_sql("SELECT user_id, balance FROM users WHERE trading = 1 AND balance >= ?", (MIN_DEPOSIT,), fetch="all")
+    # Получаем активных юзеров (с балансом >= MIN_DEPOSIT)
+    # Включаем всех пользователей с достаточным балансом, независимо от статуса trading
+    # Статус trading будет проверяться при отправке сигналов
+    rows = run_sql("SELECT user_id, balance FROM users WHERE balance >= ?", (MIN_DEPOSIT,), fetch="all")
     active_users = [row['user_id'] for row in rows] if rows else []
     
     # Проверяем авто-трейд
@@ -3135,7 +3245,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                         auto_user['balance'] = sanitize_balance(auto_user['balance'])  # Security: ensure valid balance
                         new_balance = auto_user['balance']
                         save_user(AUTO_TRADE_USER_ID)
-                        await add_commission(commission)
+                        await add_commission(commission, user_id=AUTO_TRADE_USER_ID)
                         
                         # Создаём позицию
                         position = {
@@ -3203,6 +3313,7 @@ R/R: 1:{setup.risk_reward:.1f}
             
             user = get_user(user_id)
             balance = user['balance']
+            trading_enabled = user.get('trading', False)
             
             # Отправляем сигналы только пользователям с достаточным балансом
             if balance < MIN_DEPOSIT:
@@ -3212,6 +3323,33 @@ R/R: 1:{setup.risk_reward:.1f}
             ticker = symbol.split("/")[0]
             d = 'L' if direction == "LONG" else 'S'
             
+            # Если ручной трейд выключен, отправляем только уведомление об автотрейде (если он зашел)
+            if not trading_enabled:
+                if auto_trade_executed:
+                    # Отправляем уведомление о том, что автотрейд зашел в сделку
+                    notification_text = f"""<b>🤖 Авто-трейд зашел в сделку</b>
+
+<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
+
+Вход: <b>${entry:,.2f}</b>
+
+TP1: ${tp1:,.2f} (<b>+{tp1_percent:.1f}%</b>) — 50%
+TP2: ${tp2:,.2f} (+{tp2_percent:.1f}%) — 30%
+TP3: ${tp3:,.2f} (+{tp3_percent:.1f}%) — 20%
+SL: ${sl:,.2f} (-{sl_percent:.1f}%)
+
+R/R: 1:{setup.risk_reward:.1f}
+
+<i>Ручной трейд выключен. Включите его, чтобы получать сигналы для входа.</i>"""
+                    
+                    try:
+                        await context.bot.send_message(user_id, notification_text, parse_mode="HTML")
+                        logger.info(f"[SMART] ✅ Уведомление об автотрейде отправлено пользователю {user_id}")
+                    except Exception as e:
+                        logger.error(f"[SMART] ❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
+                continue  # Пропускаем отправку сигнала для входа
+            
+            # Если ручной трейд включен - отправляем обычный сигнал для входа
             text = f"""<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
 
 Вход: <b>${entry:,.2f}</b>
@@ -3411,8 +3549,8 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
     save_user(user_id)  # Сохраняем в БД
 
-    # Добавляем комиссию в накопитель (авто-вывод)
-    await add_commission(commission)
+    # Добавляем комиссию в накопитель (авто-вывод) с учетом рефералов
+    await add_commission(commission, user_id=user_id)
 
     # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
     existing = None
@@ -3986,8 +4124,8 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
     save_user(user_id)
 
-    # Добавляем комиссию в накопитель (авто-вывод)
-    await add_commission(commission)
+    # Добавляем комиссию в накопитель (авто-вывод) с учетом рефералов
+    await add_commission(commission, user_id=user_id)
 
     # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
     existing = None
@@ -5739,13 +5877,24 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     ref_count = db_get_referrals_count(user_id)
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    ref_commission_earned = db_get_referral_commission_earned(user_id)
+    
+    # Формируем информацию о процентах
+    commission_info = ""
+    if REFERRAL_COMMISSION_LEVELS:
+        commission_info = f"\n💵 Комиссия с рефералов:\n"
+        for level, percent in enumerate(REFERRAL_COMMISSION_LEVELS, 1):
+            commission_info += f"• Уровень {level}: {percent}% от комиссии\n"
+        commission_info += f"\n💰 Заработано: <b>${ref_commission_earned:.2f}</b>"
     
     text = f"""<b>🤝 Реферальная программа</b>
 
-Приглашай друзей и получай <b>${REFERRAL_BONUS:.2f}</b> за каждого!
+Приглашай друзей и получай:
+• <b>${REFERRAL_BONUS:.2f}</b> за депозит реферала
+• <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки реферала
 
 📊 Твои рефералы: <b>{ref_count}</b>
-💰 Бонус за реферала: <b>${REFERRAL_BONUS:.2f}</b>
+{commission_info}
 
 🔗 Твоя ссылка:
 <code>{ref_link}</code>"""
@@ -5779,13 +5928,24 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     ref_count = db_get_referrals_count(user_id)
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    ref_commission_earned = db_get_referral_commission_earned(user_id)
+    
+    # Формируем информацию о процентах
+    commission_info = ""
+    if REFERRAL_COMMISSION_LEVELS:
+        commission_info = f"\n💵 Комиссия с рефералов:\n"
+        for level, percent in enumerate(REFERRAL_COMMISSION_LEVELS, 1):
+            commission_info += f"• Уровень {level}: {percent}% от комиссии\n"
+        commission_info += f"\n💰 Заработано: <b>${ref_commission_earned:.2f}</b>"
     
     text = f"""<b>🤝 Реферальная программа</b>
 
-Приглашай друзей и получай <b>${REFERRAL_BONUS:.2f}</b> за каждого!
+Приглашай друзей и получай:
+• <b>${REFERRAL_BONUS:.2f}</b> за депозит реферала
+• <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки реферала
 
 📊 Твои рефералы: <b>{ref_count}</b>
-💰 Бонус за реферала: <b>${REFERRAL_BONUS:.2f}</b>
+{commission_info}
 
 🔗 Твоя ссылка:
 <code>{ref_link}</code>"""
