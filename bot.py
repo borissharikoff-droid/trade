@@ -382,7 +382,7 @@ def db_get_user(user_id: int) -> Dict:
     row = run_sql("""
         SELECT balance, total_deposit, total_profit, trading,
                auto_trade, auto_trade_max_daily, auto_trade_min_winrate,
-               auto_trade_today, auto_trade_last_reset
+               auto_trade_today, auto_trade_last_reset, referrer_id
         FROM users WHERE user_id = ?
     """, (user_id,), fetch="one")
 
@@ -393,7 +393,7 @@ def db_get_user(user_id: int) -> Dict:
         return {
             'balance': 0.0, 'total_deposit': 0.0, 'total_profit': 0.0, 'trading': False,
             'auto_trade': False, 'auto_trade_max_daily': 10, 'auto_trade_min_winrate': 70,
-            'auto_trade_today': 0, 'auto_trade_last_reset': None
+            'auto_trade_today': 0, 'auto_trade_last_reset': None, 'referrer_id': None
         }
 
     return {
@@ -405,7 +405,8 @@ def db_get_user(user_id: int) -> Dict:
         'auto_trade_max_daily': int(row['auto_trade_max_daily'] or 10),
         'auto_trade_min_winrate': int(row['auto_trade_min_winrate'] or 70),
         'auto_trade_today': int(row['auto_trade_today'] or 0),
-        'auto_trade_last_reset': row['auto_trade_last_reset']
+        'auto_trade_last_reset': row['auto_trade_last_reset'],
+        'referrer_id': row.get('referrer_id')
     }
 
 # Whitelist of allowed columns for user updates (SQL injection prevention)
@@ -1257,20 +1258,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     logger.info(f"[START] User {user_id}")
     
-    # Обработка реферальной ссылки
+    # Принудительно читаем из БД (не из кэша) для актуального баланса
+    users_cache.pop(user_id, None)
+    
+    # Обработка реферальной ссылки ДО создания пользователя
+    referrer_id_to_set = None
     if context.args and len(context.args) > 0:
         ref_arg = context.args[0]
         if ref_arg.startswith("ref_"):
             try:
-                referrer_id = int(ref_arg.replace("ref_", ""))
-                if db_set_referrer(user_id, referrer_id):
-                    logger.info(f"[REF] User {user_id} registered via referral from {referrer_id}")
+                referrer_id_to_set = int(ref_arg.replace("ref_", ""))
+                logger.info(f"[REF] Referral link detected: user {user_id} from {referrer_id_to_set}")
             except ValueError:
                 pass
     
-    # Принудительно читаем из БД (не из кэша) для актуального баланса
-    users_cache.pop(user_id, None)
+    # Получаем пользователя (создастся если не существует)
     user = get_user(user_id)
+    
+    # Устанавливаем реферера если ссылка была и пользователь новый (без реферера)
+    if referrer_id_to_set and not user.get('referrer_id'):
+        if db_set_referrer(user_id, referrer_id_to_set):
+            logger.info(f"[REF] User {user_id} registered via referral from {referrer_id_to_set}")
+            # Обновляем кэш
+            users_cache.pop(user_id, None)
+            user = get_user(user_id)
     
     balance = user['balance']
     trading_status = "ВКЛ" if user['trading'] else "ВЫКЛ"
@@ -1385,7 +1396,9 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     usd = stars // STARS_RATE
     
     # Проверяем первый депозит для реферального бонуса
-    is_first_deposit = user['total_deposit'] == 100  # Начальный баланс
+    # Первый депозит = когда total_deposit был 0 до этого депозита
+    old_total_deposit = user['total_deposit'] - usd
+    is_first_deposit = old_total_deposit == 0.0
     
     user['balance'] += usd
     user['total_deposit'] += usd
@@ -1677,7 +1690,9 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             amount = pending_info['amount']
             
             user = get_user(user_id)
-            is_first_deposit = user['total_deposit'] == 100
+            # Первый депозит = когда total_deposit был 0 до этого депозита
+            old_total_deposit = user['total_deposit'] - amount
+            is_first_deposit = old_total_deposit == 0.0
             
             user['balance'] = sanitize_balance(user['balance'] + amount)
             user['total_deposit'] += amount
@@ -1771,7 +1786,9 @@ async def check_pending_crypto_payments(context: ContextTypes.DEFAULT_TYPE) -> N
                             db_remove_pending_invoice(invoice_id)
                             
                             user = get_user(user_id)
-                            is_first_deposit = user['total_deposit'] == 100
+                            # Первый депозит = когда total_deposit был 0 до этого депозита
+                            old_total_deposit = user['total_deposit'] - amount
+                            is_first_deposit = old_total_deposit == 0.0
                             
                             user['balance'] = sanitize_balance(user['balance'] + amount)
                             user['total_deposit'] += amount
@@ -1831,7 +1848,7 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     text = f"""<b>💸 Вывод средств</b>
 
-💰 Баланс: <b>${user['balance']:.2f}</b>
+💰 Баланс: ${user['balance']:.2f}
 Минимум для вывода: <b>${MIN_WITHDRAW:.2f} USDT</b>
 
 Выбери сумму для вывода:"""
@@ -1937,7 +1954,7 @@ async def withdraw_custom_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(
         f"""<b>💸 Своя сумма</b>
 
-💰 Баланс: <b>${user['balance']:.2f}</b>
+💰 Баланс: ${user['balance']:.2f}
 Минимум: <b>${MIN_WITHDRAW:.2f} USDT</b>
 
 Введи сумму для вывода:""",
@@ -2541,7 +2558,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if not user_positions:
         await query.edit_message_text(
-            "<b>📭 Нет позиций</b>\n\nНет открытых сделок",
+            "<b>💼 Нет позиций</b>\n\nНет открытых сделок",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]]),
             parse_mode="HTML"
         )
@@ -2727,9 +2744,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
     if not user_positions:
-        text = f"""<b>📊 Нет позиций</b>
+        text = f"""<b>💼 Нет позиций</b>
 
-Статистика: {wins}/{total_trades} ({winrate}%)
+{wins}/{total_trades} ({winrate}%)
 
 💰 Баланс: ${user['balance']:.2f}"""
         
@@ -2745,7 +2762,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Стакаем одинаковые позиции для отображения
     stacked = stack_positions(user_positions)
     
-    text = "<b>📊 Позиции</b>\n\n"
+    text = "<b>💼 Позиции</b>\n\n"
     
     keyboard = []
     for pos in stacked:
@@ -3796,7 +3813,7 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     text = f"""<b>💵 Своя сумма</b>
 
 Минимум: $1
-Баланс: ${user['balance']:.2f}
+💰 Баланс: ${user['balance']:.2f}
 
 Введи сумму:"""
 
@@ -3888,7 +3905,7 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     if amount > user['balance']:
         await update.message.reply_text(
             f"<b>❌ Недостаточно средств</b>\n\n"
-            f"Баланс: ${user['balance']:.2f}\n"
+            f"💰 Баланс: ${user['balance']:.2f}\n"
             f"Введи другую сумму:",
             parse_mode="HTML"
         )
@@ -4200,7 +4217,7 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                 f"<b>📡 Bybit: позиция закрыта</b>\n\n"
                                 f"{ticker} | {pos['direction']} | {reason}\n"
                                 f"{pnl_emoji} {pnl_sign}${real_pnl:.2f}\n\n"
-                                f"💰 Баланс: ${user['balance']:.0f}",
+                                f"💰 Баланс: ${user['balance']:.2f}",
                                 parse_mode="HTML"
                             )
                             logger.info(f"[BYBIT_SYNC] User {user_id}: {ticker} closed on Bybit, PnL=${real_pnl:.2f}")
@@ -4491,7 +4508,7 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                                 f"{ticker} | {pos['direction']}\n"
                                                 f"Признаки разворота: {', '.join(reversal_signals['signals'][:2])}\n"
                                                 f"<b>+${exit_pnl:.2f}</b>\n\n"
-                                                f"💰 Баланс: ${user['balance']:.0f}",
+                                                f"💰 Баланс: ${user['balance']:.2f}",
                                                 parse_mode="HTML"
                                             )
                                         except:
@@ -5300,7 +5317,7 @@ async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 Статус: {status}
 User ID: {AUTO_TRADE_USER_ID}
-Баланс: <b>${balance:.2f}</b>
+💰 Баланс: ${balance:.2f}
 Открытых позиций: {len(positions)}
 
 Настройки:
@@ -5614,7 +5631,7 @@ async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if target_id in users_cache:
             users_cache[target_id]['balance'] = balance
         
-        await update.message.reply_text(f"✅ Готово!\n\n👤 User: {target_id}\n💰 Баланс: ${balance:.0f}\n📊 Позиции: закрыты")
+        await update.message.reply_text(f"✅ Готово!\n\n👤 User: {target_id}\n💰 Баланс: ${balance:.2f}\n💼 Позиции: закрыты")
         
     except (ValueError, IndexError) as e:
         await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")

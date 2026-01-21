@@ -116,7 +116,7 @@ class RateLimiter:
         if not row:
             # New user - initialize
             now = datetime.now()
-            if USE_POSTGRES:
+            if _USE_POSTGRES:
                 reset_time = now
             else:
                 reset_time = now.isoformat()
