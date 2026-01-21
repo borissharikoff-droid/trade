@@ -18,6 +18,18 @@ from smart_analyzer import (
     TradeSetup, SetupQuality, MarketRegime, get_signal_stats, reset_signal_stats,
     increment_bybit_opened
 )
+# Новые модули для максимизации прибыли
+try:
+    from trailing_stop import trailing_manager
+    from smart_scaling import should_scale_in_smart, calculate_scale_in_size
+    from pyramid_trading import should_pyramid, calculate_pyramid_size
+    from adaptive_exit import detect_reversal_signals, adjust_tp_dynamically, should_exit_early
+    from position_manager import calculate_partial_close_amount
+    ADVANCED_POSITION_MANAGEMENT = True
+    logger.info("[INIT] Advanced position management loaded")
+except ImportError as e:
+    ADVANCED_POSITION_MANAGEMENT = False
+    logger.warning(f"[INIT] Advanced position management disabled: {e}")
 from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
 from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
 from cache_manager import users_cache, positions_cache, price_cache, cleanup_caches
@@ -777,6 +789,32 @@ def db_remove_pending_invoice(invoice_id: int):
     _pending_invoices_db.pop(invoice_id, None)
     logger.info(f"[INVOICE] Removed: #{invoice_id}")
 
+def db_get_all_pending_invoices() -> List[Dict]:
+    """Получить все pending invoices для автоматической проверки"""
+    if USE_POSTGRES:
+        rows = run_sql("""
+            SELECT invoice_id, user_id, amount 
+            FROM pending_invoices 
+            WHERE expires_at > NOW()
+            ORDER BY created_at DESC
+        """, fetch="all")
+    else:
+        rows = run_sql("""
+            SELECT invoice_id, user_id, amount 
+            FROM pending_invoices 
+            WHERE expires_at > datetime('now')
+            ORDER BY created_at DESC
+        """, fetch="all")
+    
+    # Обновляем кэш
+    for row in rows:
+        _pending_invoices_db[row['invoice_id']] = {
+            'user_id': row['user_id'],
+            'amount': row['amount']
+        }
+    
+    return rows if rows else []
+
 def db_cleanup_expired_invoices():
     """Remove expired invoices (older than 1 hour)"""
     if USE_POSTGRES:
@@ -1249,8 +1287,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 Winrate: {wr_text}"""
     
     keyboard = [
-        [InlineKeyboardButton(f"{'🔴 Выкл' if user['trading'] else '🟢 Вкл'}", callback_data="toggle"),
-         InlineKeyboardButton(f"{'🟢' if user.get('auto_trade') else '🔴'} Авто-трейд", callback_data="auto_trade_menu")],
+        [InlineKeyboardButton(f"{'❌ Выкл' if user['trading'] else '✅ Вкл'}", callback_data="toggle"),
+         InlineKeyboardButton(f"{'✅' if user.get('auto_trade') else '❌'} Авто-трейд", callback_data="auto_trade_menu")],
         [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")],
         [InlineKeyboardButton("Дополнительно", callback_data="more_menu")]
     ]
@@ -1477,11 +1515,10 @@ async def handle_crypto_custom_amount(update: Update, context: ContextTypes.DEFA
 
 К оплате: <b>${amount:.2f} USDT</b>
 
-После оплаты нажми "Проверить"."""
+После оплаты средства будут зачислены автоматически."""
             
             keyboard = [
                 [InlineKeyboardButton("💳 Оплатить", url=invoice['bot_invoice_url'])],
-                [InlineKeyboardButton("🔄 Проверить", callback_data=f"check_{invoice['invoice_id']}")],
                 [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
             ]
             
@@ -1553,11 +1590,10 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
 
 К оплате: <b>${amount} USDT</b>
 
-После оплаты нажми "Проверить"."""
+После оплаты средства будут зачислены автоматически."""
         
         keyboard = [
             [InlineKeyboardButton("💳 Оплатить", url=invoice['bot_invoice_url'])],
-            [InlineKeyboardButton("🔄 Проверить", callback_data=f"check_{invoice['invoice_id']}")],
             [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
         ]
         
@@ -1694,6 +1730,322 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode="HTML"
         )
 
+# ==================== АВТОМАТИЧЕСКАЯ ПРОВЕРКА КРИПТО-ПЛАТЕЖЕЙ ====================
+async def check_pending_crypto_payments(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Автоматическая проверка всех pending крипто-платежей"""
+    crypto_token = os.getenv("CRYPTO_BOT_TOKEN")
+    if not crypto_token:
+        return
+    
+    try:
+        # Получаем все pending invoices из БД
+        pending_invoices = db_get_all_pending_invoices()
+        if not pending_invoices:
+            return
+        
+        is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
+        base_url = "https://testnet-pay.crypt.bot/api" if is_testnet else "https://pay.crypt.bot/api"
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {"Crypto-Pay-API-Token": crypto_token}
+            
+            for invoice_info in pending_invoices:
+                invoice_id = invoice_info['invoice_id']
+                user_id = invoice_info['user_id']
+                amount = invoice_info['amount']
+                
+                try:
+                    params = {"invoice_ids": invoice_id}
+                    async with session.get(f"{base_url}/getInvoices", headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                        data = await resp.json()
+                        
+                        if not data.get("ok") or not data.get("result", {}).get("items"):
+                            continue
+                        
+                        invoice = data["result"]["items"][0]
+                        
+                        if invoice.get("status") == "paid":
+                            # Платёж оплачен - зачисляем средства
+                            db_remove_pending_invoice(invoice_id)
+                            
+                            user = get_user(user_id)
+                            is_first_deposit = user['total_deposit'] == 100
+                            
+                            user['balance'] = sanitize_balance(user['balance'] + amount)
+                            user['total_deposit'] += amount
+                            save_user(user_id)
+                            
+                            logger.info(f"[CRYPTO_AUTO] User {user_id} deposited ${amount}")
+                            
+                            # Реферальный бонус
+                            if is_first_deposit:
+                                referrer_id = db_get_referrer(user_id)
+                                if referrer_id:
+                                    bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
+                                    if bonus_added:
+                                        try:
+                                            await context.bot.send_message(
+                                                referrer_id,
+                                                f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
+                                                parse_mode="HTML"
+                                            )
+                                        except:
+                                            pass
+                            
+                            # Уведомляем пользователя
+                            try:
+                                await context.bot.send_message(
+                                    user_id,
+                                    f"""<b>✅ Оплата успешна</b>
+
+Зачислено: <b>${amount:.2f}</b>
+
+💰 Баланс: ${user['balance']:.2f}""",
+                                    parse_mode="HTML"
+                                )
+                            except Exception as e:
+                                logger.warning(f"[CRYPTO_AUTO] Failed to notify user {user_id}: {e}")
+                            
+                            # Небольшая задержка между проверками
+                            await asyncio.sleep(0.5)
+                
+                except Exception as e:
+                    logger.warning(f"[CRYPTO_AUTO] Error checking invoice {invoice_id}: {e}")
+                    continue
+    
+    except Exception as e:
+        logger.error(f"[CRYPTO_AUTO] Error in auto-check: {e}")
+
+# ==================== ВЫВОД СРЕДСТВ ====================
+async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню вывода средств"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    
+    MIN_WITHDRAW = 5.0  # Минимум для вывода
+    
+    text = f"""<b>💸 Вывод средств</b>
+
+💰 Баланс: <b>${user['balance']:.2f}</b>
+Минимум для вывода: <b>${MIN_WITHDRAW:.2f} USDT</b>
+
+Выбери сумму для вывода:"""
+    
+    keyboard = [
+        [InlineKeyboardButton("$10", callback_data="withdraw_10"),
+         InlineKeyboardButton("$25", callback_data="withdraw_25"),
+         InlineKeyboardButton("$50", callback_data="withdraw_50")],
+        [InlineKeyboardButton("$100", callback_data="withdraw_100"),
+         InlineKeyboardButton("$250", callback_data="withdraw_250"),
+         InlineKeyboardButton("Всё", callback_data="withdraw_all")],
+        [InlineKeyboardButton("💵 Своя сумма", callback_data="withdraw_custom")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка вывода средств"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    
+    MIN_WITHDRAW = 5.0
+    WITHDRAW_FEE = 0.0  # Комиссия на вывод (можно настроить)
+    
+    # Определяем сумму
+    if query.data == "withdraw_all":
+        amount = max(0, user['balance'] - WITHDRAW_FEE)
+    elif query.data.startswith("withdraw_"):
+        try:
+            amount = float(query.data.split("_")[1])
+        except:
+            amount = 0
+    else:
+        amount = 0
+    
+    # Валидация
+    if amount < MIN_WITHDRAW:
+        await query.edit_message_text(
+            f"<b>❌ Ошибка</b>\n\nМинимальная сумма для вывода: ${MIN_WITHDRAW:.2f}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
+            parse_mode="HTML"
+        )
+        return
+    
+    if amount > user['balance']:
+        await query.edit_message_text(
+            f"<b>❌ Ошибка</b>\n\nНедостаточно средств.\n\n💰 Баланс: ${user['balance']:.2f}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
+            parse_mode="HTML"
+        )
+        return
+    
+    # Проверяем наличие открытых позиций
+    user_positions = get_positions(user_id)
+    if user_positions:
+        total_in_positions = sum(p['amount'] for p in user_positions)
+        available = user['balance'] - total_in_positions
+        
+        if amount > available:
+            await query.edit_message_text(
+                f"<b>❌ Ошибка</b>\n\nНедостаточно свободных средств.\n\n"
+                f"💰 Баланс: ${user['balance']:.2f}\n"
+                f"📊 В позициях: ${total_in_positions:.2f}\n"
+                f"💵 Доступно: ${available:.2f}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
+                parse_mode="HTML"
+            )
+            return
+    
+    # Запрашиваем адрес для вывода
+    context.user_data['pending_withdraw'] = {
+        'amount': amount,
+        'user_id': user_id
+    }
+    
+    text = f"""<b>💸 Вывод средств</b>
+
+Сумма: <b>${amount:.2f} USDT</b>
+
+Отправь адрес кошелька USDT (TRC20) для получения средств.
+
+Или отправь свой Telegram ID для вывода через CryptoBot."""
+    
+    keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="withdraw_menu")]]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def withdraw_custom_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик для кнопки 'Своя сумма' в выводе"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    MIN_WITHDRAW = 5.0
+    
+    context.user_data['awaiting_withdraw_amount'] = True
+    
+    await query.edit_message_text(
+        f"""<b>💸 Своя сумма</b>
+
+💰 Баланс: <b>${user['balance']:.2f}</b>
+Минимум: <b>${MIN_WITHDRAW:.2f} USDT</b>
+
+Введи сумму для вывода:""",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
+        parse_mode="HTML"
+    )
+
+async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработка адреса для вывода"""
+    user_id = update.effective_user.id
+    
+    if 'pending_withdraw' not in context.user_data:
+        return False
+    
+    pending = context.user_data['pending_withdraw']
+    if pending['user_id'] != user_id:
+        return False
+    
+    amount = pending['amount']
+    address_or_id = update.message.text.strip()
+    
+    # Проверяем формат (может быть адрес или Telegram ID)
+    is_telegram_id = address_or_id.isdigit() and len(address_or_id) >= 8
+    
+    crypto_token = os.getenv("CRYPTO_BOT_TOKEN")
+    if not crypto_token:
+        await update.message.reply_text(
+            "<b>❌ Ошибка</b>\n\nВывод временно недоступен.",
+            parse_mode="HTML"
+        )
+        del context.user_data['pending_withdraw']
+        return True
+    
+    user = get_user(user_id)
+    
+    # Проверяем баланс ещё раз
+    if amount > user['balance']:
+        await update.message.reply_text(
+            "<b>❌ Ошибка</b>\n\nНедостаточно средств.",
+            parse_mode="HTML"
+        )
+        del context.user_data['pending_withdraw']
+        return True
+    
+    # Показываем статус
+    status_msg = await update.message.reply_text(
+        "<b>⏳ Обрабатываем вывод...</b>",
+        parse_mode="HTML"
+    )
+    
+    try:
+        is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
+        base_url = "https://testnet-pay.crypt.bot/api" if is_testnet else "https://pay.crypt.bot/api"
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {"Crypto-Pay-API-Token": crypto_token}
+            
+            if is_telegram_id:
+                # Вывод через CryptoBot на Telegram ID
+                payload = {
+                    "user_id": int(address_or_id),
+                    "asset": "USDT",
+                    "amount": str(amount),
+                    "spend_id": f"{user_id}_{int(datetime.now().timestamp())}"
+                }
+                
+                async with session.post(f"{base_url}/transfer", headers=headers, json=payload) as resp:
+                    data = await resp.json()
+                    
+                    if not data.get("ok"):
+                        error_msg = data.get("error", {}).get("name", "Unknown error")
+                        raise Exception(error_msg)
+                    
+                    transfer = data["result"]
+                    
+                    # Списываем с баланса
+                    user['balance'] = sanitize_balance(user['balance'] - amount)
+                    save_user(user_id)
+                    
+                    await status_msg.edit_text(
+                        f"""<b>✅ Вывод выполнен</b>
+
+Сумма: <b>${amount:.2f} USDT</b>
+Получатель: Telegram ID {address_or_id}
+
+💰 Баланс: ${user['balance']:.2f}""",
+                        parse_mode="HTML"
+                    )
+            else:
+                # Вывод на внешний адрес (через CryptoBot)
+                # CryptoBot не поддерживает прямой вывод на адрес, только через transfer
+                # Поэтому используем transfer на Telegram ID или создаём invoice для получения адреса
+                await status_msg.edit_text(
+                    "<b>❌ Ошибка</b>\n\nВывод на внешний адрес временно недоступен.\n"
+                    "Используй свой Telegram ID для вывода через CryptoBot.",
+                    parse_mode="HTML"
+                )
+                del context.user_data['pending_withdraw']
+                return True
+    
+    except Exception as e:
+        logger.error(f"[WITHDRAW] Error: {e}")
+        await status_msg.edit_text(
+            f"<b>❌ Ошибка вывода</b>\n\n{str(e)}",
+            parse_mode="HTML"
+        )
+    
+    del context.user_data['pending_withdraw']
+    return True
+
 # ==================== ТОРГОВЛЯ ====================
 @rate_limit(max_requests=10, window_seconds=60, action_type="toggle")
 async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1739,9 +2091,9 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     min_wr = user.get('auto_trade_min_winrate', 70)
     today_count = user.get('auto_trade_today', 0)
     
-    status = "🟢 ВКЛ" if auto_enabled else "🔴 ВЫКЛ"
+    status = "✅ ВКЛ" if auto_enabled else "❌ ВЫКЛ"
     
-    text = f"""<b>🤖 Авто-трейд</b>
+    text = f"""<b>Авто-трейд</b>
 
 Статус: {status}
 Сделок сегодня: {today_count}/{max_daily}
@@ -1750,9 +2102,9 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 <i>Бот автоматически входит в сделки по сигналам. Все, что вам нужно — настроить % успешности сделок и ждать, пока YULA войдет в позицию.</i>"""
     
     keyboard = [
-        [InlineKeyboardButton(f"{'🔴 Выключить' if auto_enabled else '🟢 Включить'}", callback_data="auto_trade_toggle")],
+        [InlineKeyboardButton(f"{'❌ Выключить' if auto_enabled else '✅ Включить'}", callback_data="auto_trade_toggle")],
         [InlineKeyboardButton(f"📊 Сделок/день: {max_daily}", callback_data="auto_trade_daily_menu")],
-        [InlineKeyboardButton(f"📈 Успешность: {min_wr}%", callback_data="auto_trade_winrate_menu")],
+        [InlineKeyboardButton(f"📊 Успешность: {min_wr}%", callback_data="auto_trade_winrate_menu")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
@@ -1824,7 +2176,7 @@ async def auto_trade_winrate_menu(update: Update, context: ContextTypes.DEFAULT_
     user = get_user(update.effective_user.id)
     current = user.get('auto_trade_min_winrate', 70)
     
-    text = f"""<b>📈 Успешность</b>
+    text = f"""<b>📊 Успешность</b>
 
 Текущее: {current}%
 
@@ -2160,7 +2512,7 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
     save_user(user_id)
     
     pnl_sign = "+" if total_pnl >= 0 else ""
-    pnl_emoji = "✅" if total_pnl >= 0 else "📉"
+    pnl_emoji = "✅" if total_pnl >= 0 else "❌"
     
     text = f"""<b>{pnl_emoji} {ticker} закрыт</b>
 
@@ -2370,7 +2722,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
     if not user_positions:
-        text = f"""<b>💼 Нет позиций</b>
+        text = f"""<b>📊 Нет позиций</b>
 
 Статистика: {wins}/{total_trades} ({winrate}%)
 
@@ -2388,7 +2740,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Стакаем одинаковые позиции для отображения
     stacked = stack_positions(user_positions)
     
-    text = "<b>💼 Позиции</b>\n\n"
+    text = "<b>📊 Позиции</b>\n\n"
     
     keyboard = []
     for pos in stacked:
@@ -2791,7 +3143,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                         positions_cache[AUTO_TRADE_USER_ID].append(position)
                         
                         # Уведомление
-                        auto_msg = f"""<b>🤖 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
+                        auto_msg = f"""<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
 
 <b>${auto_bet:.2f}</b> открыто
 
@@ -3231,21 +3583,21 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
     
     if pnl > 0:
-        text = f"""<b>📈 Сделка закрыта</b>
+        text = f"""<b>✅ Сделка закрыта</b>
 
 {ticker} | <b>+${pnl_abs:.2f}</b>
 Чистая работа.
 
 💰 Баланс: ${user['balance']:.2f}"""
     elif pnl == 0:
-        text = f"""<b>➖ Безубыток</b>
+        text = f"""<b>📊 Безубыток</b>
 
 {ticker} | $0.00
 Вышли без потерь.
 
 💰 Баланс: ${user['balance']:.2f}"""
     else:
-        text = f"""<b>📉 Сделка закрыта</b>
+        text = f"""<b>❌ Сделка закрыта</b>
 
 {ticker} | <b>-${pnl_abs:.2f}</b>
 Часть стратегии.
@@ -3369,7 +3721,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     pnl_abs = abs(total_pnl)
     
     if total_pnl > 0:
-        text = f"""<b>📈 Сделки закрыты</b>
+        text = f"""<b>✅ Сделки закрыты</b>
 
 {ticker} | <b>+${pnl_abs:.2f}</b>
 Закрыто: {len(to_close)}
@@ -3377,7 +3729,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
 
 💰 Баланс: ${user['balance']:.2f}"""
     elif total_pnl == 0:
-        text = f"""<b>➖ Безубыток</b>
+        text = f"""<b>📊 Безубыток</b>
 
 {ticker} | $0.00
 Закрыто: {len(to_close)}
@@ -3385,7 +3737,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
 
 💰 Баланс: ${user['balance']:.2f}"""
     else:
-        text = f"""<b>📉 Сделки закрыты</b>
+        text = f"""<b>❌ Сделки закрыты</b>
 
 {ticker} | <b>-${pnl_abs:.2f}</b>
 Закрыто: {len(to_close)}
@@ -3454,6 +3806,60 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     # Проверяем crypto custom amount сначала
     if context.user_data.get('awaiting_crypto_amount'):
         handled = await handle_crypto_custom_amount(update, context)
+        if handled:
+            return
+    
+    # Проверяем сумму для вывода
+    if context.user_data.get('awaiting_withdraw_amount'):
+        try:
+            amount = float(update.message.text.replace(",", ".").replace("$", "").strip())
+            user_id = update.effective_user.id
+            user = get_user(user_id)
+            MIN_WITHDRAW = 5.0
+            
+            if amount < MIN_WITHDRAW:
+                await update.message.reply_text(
+                    f"<b>❌ Ошибка</b>\n\nМинимальная сумма: ${MIN_WITHDRAW:.2f}",
+                    parse_mode="HTML"
+                )
+                return True
+            
+            if amount > user['balance']:
+                await update.message.reply_text(
+                    f"<b>❌ Ошибка</b>\n\nНедостаточно средств.\n\n💰 Баланс: ${user['balance']:.2f}",
+                    parse_mode="HTML"
+                )
+                return True
+            
+            # Устанавливаем сумму и запрашиваем адрес
+            context.user_data['awaiting_withdraw_amount'] = False
+            context.user_data['pending_withdraw'] = {
+                'amount': amount,
+                'user_id': user_id
+            }
+            
+            await update.message.reply_text(
+                f"""<b>💸 Вывод средств</b>
+
+Сумма: <b>${amount:.2f} USDT</b>
+
+Отправь адрес кошелька USDT (TRC20) для получения средств.
+
+Или отправь свой Telegram ID для вывода через CryptoBot.""",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Отмена", callback_data="withdraw_menu")]]),
+                parse_mode="HTML"
+            )
+            return True
+        except ValueError:
+            await update.message.reply_text(
+                "<b>❌ Ошибка</b>\n\nВведи число, например: 15 или 25.5",
+                parse_mode="HTML"
+            )
+            return True
+    
+    # Проверяем адрес для вывода
+    if 'pending_withdraw' in context.user_data:
+        handled = await process_withdraw_address(update, context)
         if handled:
             return
     
@@ -3826,9 +4232,285 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
             else:
                 pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
             pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
+            pnl_percent_display = pnl_percent * 100  # Для удобства
             
             # Обновляем в БД
             db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
+            
+            # === ПРОДВИНУТОЕ УПРАВЛЕНИЕ ПОЗИЦИЯМИ ===
+            if ADVANCED_POSITION_MANAGEMENT:
+                try:
+                    # 1. ТРЕЙЛИНГ-СТОПЫ
+                    # Получаем ATR для трейлинг-стопа
+                    try:
+                        klines_1h = await smart.get_klines(pos['symbol'], '1h', 50)
+                        if klines_1h and len(klines_1h) >= 20:
+                            highs = [float(k[2]) for k in klines_1h]
+                            lows = [float(k[3]) for k in klines_1h]
+                            closes = [float(k[4]) for k in klines_1h]
+                            atr = smart.calculate_atr(highs, lows, closes)
+                            
+                            # Добавляем позицию в трейлинг если её там нет
+                            if pos['id'] not in trailing_manager.active_trailing:
+                                trailing_manager.add_position(
+                                    pos['id'],
+                                    pos['entry'],
+                                    pos['direction'],
+                                    atr,
+                                    pos['sl']
+                                )
+                            
+                            # Обновляем трейлинг-стоп
+                            new_sl = trailing_manager.update_position(pos['id'], pos['current'])
+                            if new_sl and new_sl != pos['sl']:
+                                old_sl = pos['sl']
+                                pos['sl'] = new_sl
+                                db_update_position(pos['id'], sl=new_sl)
+                                
+                                # Обновляем SL на Bybit
+                                if await is_hedging_enabled():
+                                    await hedger.set_trading_stop(
+                                        pos['symbol'].replace("/", ""),
+                                        pos['direction'],
+                                        sl=new_sl
+                                    )
+                                logger.info(f"[TRAIL] Position {pos['id']}: SL moved {old_sl:.4f} -> {new_sl:.4f}")
+                    except Exception as e:
+                        logger.warning(f"[TRAIL] Error updating trailing stop: {e}")
+                    
+                    # 2. ЧАСТИЧНОЕ ЗАКРЫТИЕ НА ПОЛПУТИ К TP
+                    if not pos.get('tp1_hit', False) and pnl_percent_display > 0:
+                        partial_close_amount = calculate_partial_close_amount(
+                            pos['entry'],
+                            pos['current'],
+                            pos.get('tp1', pos['tp']),
+                            pos['direction'],
+                            pos['amount']
+                        )
+                        
+                        if partial_close_amount > 0:
+                            # Закрываем 25% на полпути к TP
+                            close_percent = partial_close_amount / pos['amount']
+                            close_qty = pos.get('bybit_qty', 0) * close_percent if pos.get('bybit_qty', 0) > 0 else 0
+                            
+                            if await is_hedging_enabled() and close_qty > 0:
+                                await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
+                            
+                            if pos['direction'] == "LONG":
+                                partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * partial_close_amount * LEVERAGE
+                            else:
+                                partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * partial_close_amount * LEVERAGE
+                            
+                            returned = partial_close_amount + partial_pnl
+                            user['balance'] = sanitize_balance(user['balance'] + returned)
+                            user['total_profit'] += partial_pnl
+                            save_user(user_id)
+                            
+                            pos['amount'] -= partial_close_amount
+                            if pos.get('bybit_qty', 0) > 0:
+                                pos['bybit_qty'] -= close_qty
+                            
+                            current_realized = pos.get('realized_pnl', 0) or 0
+                            pos['realized_pnl'] = current_realized + partial_pnl
+                            
+                            db_update_position(pos['id'], amount=pos['amount'], bybit_qty=pos.get('bybit_qty', 0), realized_pnl=pos['realized_pnl'])
+                            
+                            logger.info(f"[PARTIAL] Position {pos['id']}: Closed 25% at halfway to TP, PnL=${partial_pnl:.2f}")
+                    
+                    # 3. УМНОЕ ДОБАВЛЕНИЕ К ПОЗИЦИЯМ (SCALING IN) - только для позиций в небольшом минусе
+                    if -2.0 < pnl_percent_display < 0.5 and user['balance'] >= 10:
+                        try:
+                            # Получаем данные для анализа
+                            klines_1h = await smart.get_klines(pos['symbol'], '1h', 100)
+                            if klines_1h and len(klines_1h) >= 50:
+                                # Парсим данные
+                                opens = [float(k[1]) for k in klines_1h]
+                                highs = [float(k[2]) for k in klines_1h]
+                                lows = [float(k[3]) for k in klines_1h]
+                                closes = [float(k[4]) for k in klines_1h]
+                                volumes = [float(k[5]) for k in klines_1h]
+                                
+                                # Анализ
+                                swings = smart.find_swing_points(highs, lows, lookback=5)
+                                key_levels = smart.find_key_levels(highs, lows, closes, touches_required=2)
+                                atr = smart.calculate_atr(highs, lows, closes)
+                                rsi = smart.calculate_rsi(closes)
+                                volume_data = smart.calculate_volume_profile(volumes)
+                                
+                                # MTF и SMC (упрощённо)
+                                mtf_aligned = True  # Можно расширить
+                                order_blocks = smart.find_order_blocks(opens, highs, lows, closes)
+                                fvgs = smart.find_fair_value_gaps(highs, lows)
+                                divergence = smart.detect_divergence(closes, highs, lows)
+                                
+                                # Определяем режим рынка
+                                atr_percent = (atr / pos['current']) * 100
+                                price_change_24h = (closes[-1] - closes[-24]) / closes[-24] * 100 if len(closes) >= 24 else 0
+                                market_regime = smart.determine_market_regime(swings, atr_percent, price_change_24h)
+                                
+                                analysis_data = {
+                                    'klines': klines_1h,
+                                    'key_levels': key_levels,
+                                    'swings': swings,
+                                    'market_regime': market_regime.value if hasattr(market_regime, 'value') else str(market_regime),
+                                    'rsi': rsi,
+                                    'volume_data': volume_data,
+                                    'mtf_aligned': mtf_aligned,
+                                    'order_blocks': order_blocks,
+                                    'fvgs': fvgs,
+                                    'divergence': divergence
+                                }
+                                
+                                should_scale, opportunity = should_scale_in_smart(pos, pos['current'], analysis_data)
+                                
+                                if should_scale and opportunity['confidence'] >= 0.6:
+                                    scale_size = calculate_scale_in_size(pos, opportunity, user['balance'])
+                                    
+                                    if scale_size >= 10 and user['balance'] >= scale_size:
+                                        # Добавляем к позиции (упрощённо - можно расширить с полной логикой)
+                                        logger.info(f"[SCALE] Opportunity to scale in: ${scale_size:.2f}, confidence: {opportunity['confidence']:.0%}")
+                                        # Здесь можно добавить автоматическое добавление или уведомление пользователю
+                        except Exception as e:
+                            logger.warning(f"[SCALE] Error analyzing scaling opportunity: {e}")
+                    
+                    # 4. PYRAMID TRADING - для прибыльных позиций
+                    if pnl_percent_display > 2.0 and user['balance'] >= 10:
+                        try:
+                            klines_1h = await smart.get_klines(pos['symbol'], '1h', 50)
+                            if klines_1h and len(klines_1h) >= 20:
+                                highs = [float(k[2]) for k in klines_1h]
+                                lows = [float(k[3]) for k in klines_1h]
+                                closes = [float(k[4]) for k in klines_1h]
+                                volumes = [float(k[5]) for k in klines_1h]
+                                
+                                atr = smart.calculate_atr(highs, lows, closes)
+                                volume_data = smart.calculate_volume_profile(volumes)
+                                
+                                # Определяем режим рынка
+                                swings = smart.find_swing_points(highs, lows, lookback=5)
+                                atr_percent = (atr / pos['current']) * 100
+                                price_change_24h = (closes[-1] - closes[-24]) / closes[-24] * 100 if len(closes) >= 24 else 0
+                                market_regime = smart.determine_market_regime(swings, atr_percent, price_change_24h)
+                                
+                                # Рассчитываем скорость движения
+                                if len(closes) >= 5:
+                                    if pos['direction'] == "LONG":
+                                        movement_speed = (closes[-1] - closes[-5]) / closes[-5] / (atr / closes[-1]) if atr > 0 else 0
+                                    else:
+                                        movement_speed = (closes[-5] - closes[-1]) / closes[-5] / (atr / closes[-1]) if atr > 0 else 0
+                                else:
+                                    movement_speed = 0
+                                
+                                analysis_data = {
+                                    'market_regime': market_regime.value if hasattr(market_regime, 'value') else str(market_regime),
+                                    'mtf_aligned': True,  # Упрощённо
+                                    'volume_data': volume_data,
+                                    'atr': atr,
+                                    'order_blocks': [],
+                                    'exhaustion_signals': []
+                                }
+                                
+                                should_pyr, pyramid_opp = should_pyramid(pos, pos['current'], analysis_data)
+                                
+                                if should_pyr and pyramid_opp['confidence'] >= 0.65:
+                                    pyramid_size = calculate_pyramid_size(pos, pyramid_opp, user['balance'])
+                                    
+                                    if pyramid_size >= 10 and user['balance'] >= pyramid_size:
+                                        logger.info(f"[PYRAMID] Opportunity to pyramid: ${pyramid_size:.2f}, confidence: {pyramid_opp['confidence']:.0%}")
+                                        # Здесь можно добавить автоматическое добавление pyramid позиции
+                        except Exception as e:
+                            logger.warning(f"[PYRAMID] Error analyzing pyramid opportunity: {e}")
+                    
+                    # 5. РАННИЙ ВЫХОД ПРИ РАЗВОРОТЕ
+                    if pnl_percent_display > 0.5:  # Только для позиций в плюсе
+                        try:
+                            klines_1h = await smart.get_klines(pos['symbol'], '1h', 50)
+                            if klines_1h and len(klines_1h) >= 20:
+                                highs = [float(k[2]) for k in klines_1h]
+                                lows = [float(k[3]) for k in klines_1h]
+                                closes = [float(k[4]) for k in klines_1h]
+                                volumes = [float(k[5]) for k in klines_1h]
+                                
+                                key_levels = smart.find_key_levels(highs, lows, closes, touches_required=2)
+                                divergence = smart.detect_divergence(closes, highs, lows)
+                                volume_data = smart.calculate_volume_profile(volumes)
+                                
+                                # Детекция exhaustion patterns (упрощённо)
+                                exhaustion_patterns = []
+                                vsa = smart.analyze_vsa([float(k[1]) for k in klines_1h], highs, lows, closes, volumes)
+                                if vsa.get('pattern') in ['buying_climax', 'selling_climax']:
+                                    exhaustion_patterns.append(vsa['pattern'])
+                                
+                                reversal_signals = detect_reversal_signals(
+                                    pos,
+                                    pos['current'],
+                                    divergence,
+                                    exhaustion_patterns,
+                                    volume_data,
+                                    key_levels,
+                                    pos['direction']
+                                )
+                                
+                                should_exit, action, close_percent = should_exit_early(
+                                    pos,
+                                    pos['current'],
+                                    reversal_signals,
+                                    pnl_percent_display
+                                )
+                                
+                                if should_exit and close_percent > 0:
+                                    close_amount = pos['amount'] * close_percent
+                                    close_qty = pos.get('bybit_qty', 0) * close_percent if pos.get('bybit_qty', 0) > 0 else 0
+                                    
+                                    if await is_hedging_enabled() and close_qty > 0:
+                                        await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
+                                    
+                                    if pos['direction'] == "LONG":
+                                        exit_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
+                                    else:
+                                        exit_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE
+                                    
+                                    returned = close_amount + exit_pnl
+                                    user['balance'] = sanitize_balance(user['balance'] + returned)
+                                    user['total_profit'] += exit_pnl
+                                    save_user(user_id)
+                                    
+                                    if close_percent >= 1.0:
+                                        # Полное закрытие
+                                        db_close_position(pos['id'], pos['current'], exit_pnl, f"EARLY_EXIT_{action}")
+                                        update_positions_cache(user_id, [p for p in user_positions if p.get('id') != pos['id']])
+                                        trailing_manager.remove_position(pos['id'])
+                                        
+                                        try:
+                                            await context.bot.send_message(
+                                                user_id,
+                                                f"<b>⚠️ Ранний выход</b>\n\n"
+                                                f"{ticker} | {pos['direction']}\n"
+                                                f"Признаки разворота: {', '.join(reversal_signals['signals'][:2])}\n"
+                                                f"<b>+${exit_pnl:.2f}</b>\n\n"
+                                                f"💰 Баланс: ${user['balance']:.0f}",
+                                                parse_mode="HTML"
+                                            )
+                                        except:
+                                            pass
+                                        continue
+                                    else:
+                                        # Частичное закрытие
+                                        pos['amount'] -= close_amount
+                                        if pos.get('bybit_qty', 0) > 0:
+                                            pos['bybit_qty'] -= close_qty
+                                        
+                                        current_realized = pos.get('realized_pnl', 0) or 0
+                                        pos['realized_pnl'] = current_realized + exit_pnl
+                                        
+                                        db_update_position(pos['id'], amount=pos['amount'], bybit_qty=pos.get('bybit_qty', 0), realized_pnl=pos['realized_pnl'])
+                                        
+                                        logger.info(f"[EARLY_EXIT] Position {pos['id']}: Closed {close_percent:.0%} early, PnL=${exit_pnl:.2f}")
+                        except Exception as e:
+                            logger.warning(f"[EARLY_EXIT] Error detecting reversal: {e}")
+                
+                except Exception as e:
+                    logger.error(f"[ADVANCED] Error in advanced position management: {e}")
             
             # === ЧАСТИЧНЫЕ ТЕЙКИ TP1, TP2, TP3 ===
             ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
@@ -4039,7 +4721,7 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
 
 💰 Баланс: ${user['balance']:.2f}"""
                 elif real_pnl >= 0:
-                    text = f"""<b>➖ Безубыток</b>
+                    text = f"""<b>📊 Безубыток</b>
 
 {ticker} | ${real_pnl:.2f}
 Защитный стоп сработал.
@@ -5061,6 +5743,7 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [InlineKeyboardButton("🤝 Рефералка", callback_data="referral_menu")],
         [InlineKeyboardButton("📜 История", callback_data="history_menu")],
+        [InlineKeyboardButton("💸 Вывод", callback_data="withdraw_menu")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
@@ -5195,15 +5878,31 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(more_menu, pattern="^more_menu$"))
     app.add_handler(CallbackQueryHandler(referral_menu, pattern="^referral_menu$"))
     app.add_handler(CallbackQueryHandler(history_menu, pattern="^history_menu$"))
+    app.add_handler(CallbackQueryHandler(withdraw_menu, pattern="^withdraw_menu$"))
+    app.add_handler(CallbackQueryHandler(handle_withdraw, pattern="^withdraw_(all|\\d+)$"))
+    app.add_handler(CallbackQueryHandler(withdraw_custom_handler, pattern="^withdraw_custom$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
     
-    # Обработка текста для своей суммы
+    # Обработка текста для своей суммы и адреса вывода
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_amount))
     
     # Catch-all для неизвестных callbacks
     app.add_handler(CallbackQueryHandler(unknown_callback))
     
     # Jobs
+    if app.job_queue:
+        app.job_queue.run_repeating(update_positions, interval=5, first=5)
+        
+        if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
+            app.job_queue.run_repeating(send_smart_signal, interval=120, first=10)  # 2 минуты
+        
+        app.job_queue.run_repeating(lambda ctx: cleanup_caches(), interval=300, first=300)
+        
+        # Автоматическая проверка крипто-платежей каждые 15 секунд
+        app.job_queue.run_repeating(check_pending_crypto_payments, interval=15, first=15)
+        
+        logger.info("[JOBS] All periodic tasks registered")
+    
     # Error handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.error(f"Exception: {context.error}", exc_info=context.error)
@@ -5218,14 +5917,6 @@ def main() -> None:
                 pass
     
     app.add_error_handler(error_handler)
-    
-    if app.job_queue:
-        app.job_queue.run_repeating(update_positions, interval=5, first=5)
-        # Интервал 300 сек (5 минут) - качество важнее количества
-        app.job_queue.run_repeating(send_smart_signal, interval=120, first=10)  # 2 минуты
-        # Cache cleanup job - run every 5 minutes
-        app.job_queue.run_repeating(lambda ctx: cleanup_caches(), interval=300, first=300)
-        logger.info("[JOBS] JobQueue configured (SMART only, interval=300s)")
     else:
         logger.warning("[JOBS] JobQueue NOT available!")
     
