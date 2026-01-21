@@ -127,8 +127,8 @@ def init_db():
         # PostgreSQL синтаксис
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id BIGINT PRIMARY KEY,
-            balance REAL DEFAULT 100.0,
-            total_deposit REAL DEFAULT 100.0,
+            balance REAL DEFAULT 0.0,
+            total_deposit REAL DEFAULT 0.0,
             total_profit REAL DEFAULT 0.0,
             trading INTEGER DEFAULT 0,
             referrer_id BIGINT,
@@ -184,8 +184,8 @@ def init_db():
         # SQLite синтаксис
         c.execute('''CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            balance REAL DEFAULT 100.0,
-            total_deposit REAL DEFAULT 100.0,
+            balance REAL DEFAULT 0.0,
+            total_deposit REAL DEFAULT 0.0,
             total_profit REAL DEFAULT 0.0,
             trading INTEGER DEFAULT 0,
             referrer_id INTEGER,
@@ -376,7 +376,7 @@ def db_get_user(user_id: int) -> Dict:
         run_sql("INSERT INTO users (user_id) VALUES (?)", (user_id,))
         logger.info(f"[DB] New user {user_id} created")
         return {
-            'balance': 100.0, 'total_deposit': 100.0, 'total_profit': 0.0, 'trading': False,
+            'balance': 0.0, 'total_deposit': 0.0, 'total_profit': 0.0, 'trading': False,
             'auto_trade': False, 'auto_trade_max_daily': 10, 'auto_trade_min_winrate': 70,
             'auto_trade_today': 0, 'auto_trade_last_reset': None
         }
@@ -2588,7 +2588,9 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"[SMART] Торговля на паузе до {trading_state['pause_until']}")
         return
     
-    logger.info(f"[SMART] Активных: {len(active_users)}, Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
+    logger.info(f"[SMART] Активных юзеров: {len(active_users)} (trading=1, balance>={MIN_DEPOSIT}), Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
+    if active_users:
+        logger.info(f"[SMART] Активные юзеры: {active_users}")
     logger.info(f"[SMART] Сделок сегодня: {trading_state['daily_trades']}, Убытков подряд: {trading_state['consecutive_losses']}")
     
     try:
@@ -2804,9 +2806,13 @@ R/R: 1:{setup.risk_reward:.1f}
                              InlineKeyboardButton("📊 Сделки", callback_data="trades")]
                         ])
                         
-                        await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
-                        logger.info(f"[SMART] ✓ Авто-сделка: {direction} {ticker} ${auto_bet:.0f}")
-                        auto_trade_executed = True
+                        try:
+                            await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
+                            logger.info(f"[SMART] ✅ Авто-сделка отправлена: {direction} {ticker} ${auto_bet:.2f} пользователю {AUTO_TRADE_USER_ID}")
+                            auto_trade_executed = True
+                        except Exception as e:
+                            logger.error(f"[SMART] ❌ Ошибка отправки авто-сделки пользователю {AUTO_TRADE_USER_ID}: {e}")
+                            auto_trade_executed = True  # Все равно помечаем как выполненную, чтобы не дублировать
                         
                         # Обновляем счётчики
                         auto_user['auto_trade_today'] = user_today_count + 1
@@ -2820,7 +2826,9 @@ R/R: 1:{setup.risk_reward:.1f}
             user = get_user(user_id)
             balance = user['balance']
             
-            if balance < 1:
+            # Отправляем сигналы только пользователям с достаточным балансом
+            if balance < MIN_DEPOSIT:
+                logger.info(f"[SMART] Пропуск {user_id}: баланс ${balance:.2f} < ${MIN_DEPOSIT}")
                 continue
             
             ticker = symbol.split("/")[0]
@@ -2867,9 +2875,9 @@ R/R: 1:{setup.risk_reward:.1f}
             
             try:
                 await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-                logger.info(f"[SMART] Sent to {user_id}")
+                logger.info(f"[SMART] ✅ Сигнал отправлен пользователю {user_id} (баланс: ${balance:.2f})")
             except Exception as e:
-                logger.error(f"[SMART] Error sending to {user_id}: {e}")
+                logger.error(f"[SMART] ❌ Ошибка отправки пользователю {user_id}: {e}")
     
     except Exception as e:
         logger.error(f"[SMART] ❌ Error: {e}")
@@ -3095,7 +3103,7 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             positions_cache[user_id] = []
         positions_cache[user_id].append(position)
         
-        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
+        logger.info(f"[TRADE] ✅ Позиция открыта: User {user_id} {direction} {symbol} ${amount:.2f}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
     
     dir_text = "LONG" if direction == "LONG" else "SHORT"
     tp1_percent = abs(tp1 - entry) / entry * 100
@@ -3117,7 +3125,17 @@ SL: ${sl:,.2f} (-{sl_percent:.1f}%)
 💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    try:
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        logger.info(f"[TRADE] ✅ Уведомление об открытии отправлено пользователю {user_id}")
+    except Exception as e:
+        logger.error(f"[TRADE] ❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
+        # Пытаемся отправить новое сообщение если edit не удался
+        try:
+            await context.bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            logger.info(f"[TRADE] ✅ Уведомление отправлено новым сообщением пользователю {user_id}")
+        except Exception as e2:
+            logger.error(f"[TRADE] ❌ Критическая ошибка отправки пользователю {user_id}: {e2}")
 
 async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
