@@ -250,12 +250,12 @@ class SmartAnalyzer:
         # Динамические пороги R/R по режиму рынка (в сильных трендах можно брать меньший R/R)
         self.RR_THRESHOLDS = {
             MarketRegime.STRONG_UPTREND: 1.0,      # В сильном тренде R/R 1:1 достаточно
-            MarketRegime.UPTREND: 1.2,
-            MarketRegime.RANGING: 1.5,              # В рейндже нужен хороший R/R
-            MarketRegime.DOWNTREND: 1.2,
+            MarketRegime.UPTREND: 1.1,             # Снижено с 1.2
+            MarketRegime.RANGING: 1.3,              # Снижено с 1.5
+            MarketRegime.DOWNTREND: 1.1,            # Снижено с 1.2
             MarketRegime.STRONG_DOWNTREND: 1.0,    # В сильном тренде R/R 1:1 достаточно
             MarketRegime.HIGH_VOLATILITY: 1.8,     # Высокая волатильность - строже
-            MarketRegime.UNKNOWN: 1.5
+            MarketRegime.UNKNOWN: 1.3               # Снижено с 1.5
         }
         
         # Торговые сессии (UTC)
@@ -371,6 +371,9 @@ class SmartAnalyzer:
         # Сила - сколько TF в одном направлении
         strength = max(bullish_count, bearish_count)
         
+        # Частичное выравнивание: 2 из 3 таймфреймов согласны
+        partially_aligned = strength >= 2
+        
         result = MTFAnalysis(
             trend_4h=trend_4h,
             trend_1h=trend_1h,
@@ -378,6 +381,9 @@ class SmartAnalyzer:
             aligned=aligned,
             strength=strength
         )
+        
+        # Добавляем атрибут частичного выравнивания
+        result.partially_aligned = partially_aligned
         
         if aligned:
             direction = 'BULLISH' if bullish_count == 3 else 'BEARISH'
@@ -1145,8 +1151,8 @@ class SmartAnalyzer:
         HIGH_VOLATILITY: ATR > 3%
         """
         
-        # Высокая волатильность - не торгуем
-        if atr_percent > 3.0:
+        # Высокая волатильность - не торгуем (повышен порог с 3% до 4%)
+        if atr_percent > 4.0:
             return MarketRegime.HIGH_VOLATILITY
         
         if len(swings) < 4:
@@ -2416,6 +2422,14 @@ class SmartAnalyzer:
             elif mtf.trend_4h == 'BEARISH':
                 bearish_signals += 3
                 reasoning.append("MTF: все таймфреймы медвежьи")
+        elif hasattr(mtf, 'partially_aligned') and mtf.partially_aligned:
+            # Частичное выравнивание: 2 из 3 таймфреймов согласны
+            if mtf.trend_4h == 'BULLISH' or (mtf.trend_4h == 'NEUTRAL' and mtf.trend_1h == 'BULLISH'):
+                bullish_signals += 2
+                reasoning.append("MTF: частичное выравнивание (бычье)")
+            elif mtf.trend_4h == 'BEARISH' or (mtf.trend_4h == 'NEUTRAL' and mtf.trend_1h == 'BEARISH'):
+                bearish_signals += 2
+                reasoning.append("MTF: частичное выравнивание (медвежье)")
         
         # === ЛОГИКА СИГНАЛА ===
         
@@ -2520,7 +2534,8 @@ class SmartAnalyzer:
         # === LONG SETUP === (менее строгие условия)
         if market_regime in [MarketRegime.STRONG_UPTREND, MarketRegime.UPTREND]:
             # Восходящий тренд - вход без строгих условий уровня
-            if at_support or current_price > ema_50[-1] or rsi < 50:
+            # Разрешить если цена выше EMA20 или RSI < 55 (было ema_50 и rsi < 50)
+            if at_support or current_price > ema_20[-1] or rsi < 55:
                 direction = "LONG"
                 signal_type = SignalType.PULLBACK
                 reasoning.insert(0, "Восходящий тренд")
@@ -2537,7 +2552,8 @@ class SmartAnalyzer:
         
         elif market_regime == MarketRegime.RANGING:
             # В рейндже - ТРЕБУЕМ оба условия: уровень + паттерн/RSI
-            if at_support and (bullish_pattern or rsi < 35):
+            # Снижен порог RSI с 35 до 40
+            if at_support and (bullish_pattern or rsi < 40):
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
                 reasoning.insert(0, "Рейндж: покупка от поддержки")
@@ -2548,7 +2564,8 @@ class SmartAnalyzer:
         if direction is None:  # Если ещё не определили направление
             if market_regime in [MarketRegime.STRONG_DOWNTREND, MarketRegime.DOWNTREND]:
                 # Нисходящий тренд - вход без строгих условий уровня
-                if at_resistance or current_price < ema_50[-1] or rsi > 50:
+                # Разрешить если цена ниже EMA20 или RSI > 45 (было ema_50 и rsi > 50)
+                if at_resistance or current_price < ema_20[-1] or rsi > 45:
                     direction = "SHORT"
                     signal_type = SignalType.PULLBACK
                     reasoning.insert(0, "Нисходящий тренд")
@@ -2573,14 +2590,15 @@ class SmartAnalyzer:
                     bearish_signals += 2
         
         # === ДИСБАЛАНС-ЛОГИКА: Если нет сигнала по тренду, но есть сильный дисбаланс ===
-        if direction is None and (bullish_signals >= 3 or bearish_signals >= 3):
-            # Дисбаланс может создать сигнал - НО нужен СИЛЬНЫЙ дисбаланс (минимум 3)
-            if bullish_signals >= 3 and bullish_signals > bearish_signals + 1:
+        # Снижен порог с 3 до 2 сигналов
+        if direction is None and (bullish_signals >= 2 or bearish_signals >= 2):
+            # Дисбаланс может создать сигнал
+            if bullish_signals >= 2 and bullish_signals > bearish_signals:
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
                 reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перепроданность")
                 logger.info(f"[SMART] IMBALANCE LONG: {bullish_signals} vs {bearish_signals}")
-            elif bearish_signals >= 3 and bearish_signals > bullish_signals + 1:
+            elif bearish_signals >= 2 and bearish_signals > bullish_signals:
                 direction = "SHORT"
                 signal_type = SignalType.TREND_REVERSAL
                 reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перекупленность")
@@ -2609,8 +2627,10 @@ class SmartAnalyzer:
         # === ПРОВЕРКА ЛИКВИДНОСТИ: Избегаем зон охоты на стопы ===
         if LIQUIDITY_ANALYSIS_ENABLED:
             liquidity_zones = liquidity_analyzer.find_liquidity_zones(klines_1h, direction, symbol)
+            # Динамическое расстояние: минимум 0.3% или 0.5 ATR (вместо 1 ATR)
+            min_distance_pct = max(0.3, (atr / current_price) * 50)  # 0.5 ATR в процентах
             should_avoid, reason = liquidity_analyzer.should_avoid_entry(
-                current_price, liquidity_zones, atr, min_distance_percent=0.5
+                current_price, liquidity_zones, atr, min_distance_percent=min_distance_pct
             )
             
             if should_avoid:
