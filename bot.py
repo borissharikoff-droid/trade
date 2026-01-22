@@ -461,11 +461,12 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
         return
     
     # Переносим в историю
+    closed_at = datetime.now().isoformat()
     run_sql("""INSERT INTO history 
-        (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at, closed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (pos['user_id'], pos['symbol'], pos['direction'], pos['entry'], exit_price, 
-         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pnl, reason, pos['opened_at']))
+         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pnl, reason, pos['opened_at'], closed_at))
     
     # Удаляем из активных
     run_sql("DELETE FROM positions WHERE id = ?", (pos_id,))
@@ -1154,26 +1155,42 @@ async def add_commission(amount: float, user_id: Optional[int] = None):
     # Распределяем комиссию между рефералами и админом
     if user_id:
         referrer_chain = db_get_referrer_chain(user_id, MAX_REFERRAL_LEVELS)
+        
+        # Добавить логирование и проверку
+        if not referrer_chain:
+            logger.info(f"[REF_COMMISSION] No referrer chain for user {user_id}, all commission to admin")
+            pending_commission += amount
+            save_pending_commission()
+            return
+        
+        logger.info(f"[REF_COMMISSION] Chain for user {user_id}: {referrer_chain}")
         total_referral_share = 0.0
         
         # Начисляем комиссию рефералам по уровням
         for level, referrer_id in enumerate(referrer_chain):
             if level < len(REFERRAL_COMMISSION_LEVELS):
+                # Проверяем, что реферер существует
+                referrer = run_sql("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,), fetch="one")
+                if not referrer:
+                    logger.warning(f"[REF_COMMISSION] Referrer {referrer_id} not found, skipping")
+                    continue
+                
                 # Процент от комиссии для этого уровня
                 level_percent = REFERRAL_COMMISSION_LEVELS[level]
                 referral_commission = amount * (level_percent / 100)
                 
-                # Начисляем рефереру
-                run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (referral_commission, referrer_id))
-                
-                # Обновляем кэш
-                if referrer_id in users_cache:
-                    users_cache[referrer_id]['balance'] = sanitize_balance(
-                        users_cache[referrer_id]['balance'] + referral_commission
-                    )
-                
-                total_referral_share += referral_commission
-                logger.info(f"[REF_COMMISSION] Level {level+1}: ${referral_commission:.2f} to user {referrer_id} ({level_percent}% of ${amount:.2f})")
+                if referral_commission > 0:  # Начисляем только если комиссия > 0
+                    # Начисляем рефереру
+                    run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (referral_commission, referrer_id))
+                    
+                    # Обновляем кэш
+                    if referrer_id in users_cache:
+                        users_cache[referrer_id]['balance'] = sanitize_balance(
+                            users_cache[referrer_id]['balance'] + referral_commission
+                        )
+                    
+                    total_referral_share += referral_commission
+                    logger.info(f"[REF_COMMISSION] Level {level+1}: ${referral_commission:.2f} to user {referrer_id} ({level_percent}% of ${amount:.2f})")
         
         # Остаток идет админу
         admin_commission = amount - total_referral_share
@@ -2163,6 +2180,10 @@ async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT
 💰 Баланс: ${user['balance']:.2f}""",
                         parse_mode="HTML"
                     )
+                    # Удаляем pending_withdraw после успешного вывода
+                    if 'pending_withdraw' in context.user_data:
+                        del context.user_data['pending_withdraw']
+                    return True  # Явный возврат при успехе
             else:
                 # Вывод на внешний адрес (через CryptoBot)
                 # CryptoBot не поддерживает прямой вывод на адрес, только через transfer
@@ -2177,12 +2198,22 @@ async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT
     
     except Exception as e:
         logger.error(f"[WITHDRAW] Error: {e}")
-        await status_msg.edit_text(
-            f"<b>❌ Ошибка вывода</b>\n\n{str(e)}",
-            parse_mode="HTML"
-        )
+        # Проверяем, что status_msg существует
+        if 'status_msg' in locals():
+            await status_msg.edit_text(
+                f"<b>❌ Ошибка вывода</b>\n\n{str(e)}",
+                parse_mode="HTML"
+            )
+        else:
+            # Если status_msg не был создан, отправляем новое сообщение
+            await update.message.reply_text(
+                f"<b>❌ Ошибка вывода</b>\n\n{str(e)}",
+                parse_mode="HTML"
+            )
     
-    del context.user_data['pending_withdraw']
+    # Удаляем pending_withdraw только если он еще существует
+    if 'pending_withdraw' in context.user_data:
+        del context.user_data['pending_withdraw']
     return True
 
 # ==================== ТОРГОВЛЯ ====================
