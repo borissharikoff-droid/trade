@@ -1449,15 +1449,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     trading_status = "ВКЛ" if user['trading'] else "ВЫКЛ"
     auto_trade_status = "ВКЛ" if user.get('auto_trade') else "ВЫКЛ"
     
-    # Получаем реальный winrate
-    real_wr = db_get_real_winrate(min_trades=10)
-    wr_text = f"{real_wr['winrate']:.1f}%" if real_wr['reliable'] else "~75%"
+    # Получаем статистику пользователя
+    stats = db_get_user_stats(user_id)
+    wins = stats['wins']
+    total_trades = stats['total']
+    winrate = stats['winrate']
+    total_profit = user.get('total_profit', 0)
+    profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
-    text = f"""<b>💰 Главное меню</b>
+    text = f"""<b>🏠 YULA Меню</b>
 
 Торговля: {trading_status}
 Авто-трейд: {auto_trade_status}
-Winrate: {wr_text}
+
+📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}
 
 💰 Баланс: <b>${balance:.2f}</b>"""
     
