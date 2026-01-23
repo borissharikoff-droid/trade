@@ -44,8 +44,8 @@ class TrailingStop:
             if self.lowest_price is None or current_price < self.lowest_price:
                 self.lowest_price = current_price
         
-        # 1. Breakeven при +0.5% прибыли
-        if pnl_percent >= 0.5 and not self.breakeven_triggered:
+        # 1. Breakeven при +1% прибыли (изменено с 0.5%)
+        if pnl_percent >= 1.0 and not self.breakeven_triggered:
             self.stop_loss = self.entry
             self.breakeven_triggered = True
             logger.info(f"[TRAIL] Position {self.pos_id}: Breakeven activated at {current_price:.4f}")

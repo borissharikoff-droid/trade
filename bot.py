@@ -37,7 +37,7 @@ try:
     from smart_scaling import should_scale_in_smart, calculate_scale_in_size
     from pyramid_trading import should_pyramid, calculate_pyramid_size
     from adaptive_exit import detect_reversal_signals, adjust_tp_dynamically, should_exit_early
-    from position_manager import calculate_partial_close_amount
+    from position_manager import calculate_partial_close_amount, check_correlation_risk
     ADVANCED_POSITION_MANAGEMENT = True
     logger.info("[INIT] Advanced position management loaded")
 except ImportError as e:
@@ -564,6 +564,33 @@ def db_sync_all_profits() -> int:
     logger.info(f"[SYNC] Synced total_profit for {updated} users")
     return updated
 
+def db_get_loss_streak(user_id: int) -> int:
+    """
+    Получить текущую серию убытков пользователя.
+    Считает последовательные убыточные сделки с конца истории.
+    
+    Returns:
+        Количество убытков подряд (0 если последняя сделка прибыльная)
+    """
+    rows = run_sql("""
+        SELECT pnl FROM history 
+        WHERE user_id = ? 
+        ORDER BY closed_at DESC 
+        LIMIT 10
+    """, (user_id,), fetch="all")
+    
+    if not rows:
+        return 0
+    
+    streak = 0
+    for row in rows:
+        if row['pnl'] < 0:
+            streak += 1
+        else:
+            break  # Прерываем при первой прибыльной сделке
+    
+    return streak
+
 def db_get_real_winrate(min_trades: int = 20) -> Dict:
     """
     Получить РЕАЛЬНЫЙ win rate из истории всех сделок.
@@ -1024,7 +1051,7 @@ async def get_recent_audit_logs(limit: int = 20) -> list:
     return logs
 
 # ==================== SECURITY LIMITS ====================
-MAX_POSITIONS_PER_USER = 10  # Maximum open positions per user
+MAX_POSITIONS_PER_USER = 5  # Maximum open positions per user (снижено с 10)
 MIN_BALANCE_RESERVE = 5.0    # Minimum balance to keep after trade
 MAX_SINGLE_TRADE = 10000.0   # Maximum single trade amount
 MAX_BALANCE = 1000000.0      # Maximum user balance (sanity check)
@@ -3176,13 +3203,14 @@ AUTO_TRADE_MIN_BET = 10  # Минимальная ставка $
 AUTO_TRADE_MAX_BET = 500  # Максимальная ставка $
 AUTO_TRADE_START_BALANCE = 1500  # Стартовый баланс для авто-трейда
 
-def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0) -> tuple:
+def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0, user_id: int = None) -> tuple:
     """
     Рассчитать размер ставки и плечо на основе уверенности и волатильности (ATR)
     
     Стратегия: 
     - Базовый размер от уверенности
     - Корректировка на волатильность (высокий ATR = меньше позиция)
+    - Уменьшение после серии убытков
     - Профессиональный риск-менеджмент
     
     Returns:
@@ -3190,6 +3218,19 @@ def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0
     """
     # Базовое плечо (фиксированное для предсказуемости)
     leverage = LEVERAGE  # Используем глобальное плечо
+    
+    # === ДИНАМИЧЕСКИЙ РАЗМЕР ПОСЛЕ УБЫТКОВ ===
+    loss_streak_multiplier = 1.0
+    if user_id:
+        loss_streak = db_get_loss_streak(user_id)
+        if loss_streak >= 3:
+            # После 3+ убытков подряд: -50% от ставки
+            loss_streak_multiplier = 0.5
+            logger.info(f"[BET] User {user_id}: {loss_streak} losses in a row - reducing bet by 50%")
+        elif loss_streak >= 2:
+            # После 2 убытков подряд: -25% от ставки
+            loss_streak_multiplier = 0.75
+            logger.info(f"[BET] User {user_id}: {loss_streak} losses in a row - reducing bet by 25%")
     
     # Уверенность от 28% до 95% (после фильтров)
     # Чем выше уверенность - тем больше ставка
@@ -3239,8 +3280,8 @@ def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0
             # Низкая-нормальная волатильность - увеличить на 10%
             volatility_multiplier = 1.1
     
-    # Применяем корректировку
-    bet_percent = bet_percent * volatility_multiplier
+    # Применяем корректировки: волатильность и серия убытков
+    bet_percent = bet_percent * volatility_multiplier * loss_streak_multiplier
     
     bet = balance * bet_percent
     
@@ -3250,7 +3291,7 @@ def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0
     # Не ставить больше 20% баланса за раз (защита от слива)
     bet = min(bet, balance * 0.20)
     
-    logger.info(f"[BET] Confidence={confidence}%, ATR={atr_percent:.2f}%, vol_mult={volatility_multiplier}, bet=${bet:.0f}")
+    logger.info(f"[BET] Confidence={confidence}%, ATR={atr_percent:.2f}%, vol_mult={volatility_multiplier}, loss_mult={loss_streak_multiplier}, bet=${bet:.0f}")
     
     return round(bet, 0), leverage
 
@@ -3405,6 +3446,19 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.info(f"[SMART] Авто-трейд пропущен: лимит позиций ({len(auto_positions)})")
                     skip_reason = f"лимит позиций {len(auto_positions)}/{MAX_POSITIONS_PER_USER}"
                 
+                # Check correlation risk
+                if not skip_reason and ADVANCED_POSITION_MANAGEMENT:
+                    try:
+                        is_safe, corr_reason = check_correlation_risk(
+                            auto_positions, symbol, direction, auto_balance,
+                            correlation_threshold=0.7, max_exposure_percent=30.0
+                        )
+                        if not is_safe:
+                            logger.info(f"[SMART] Авто-трейд пропущен: корреляция - {corr_reason}")
+                            skip_reason = f"correlation: {corr_reason}"
+                    except Exception as e:
+                        logger.warning(f"[SMART] Error checking correlation: {e}")
+                
                 # Validate symbol
                 valid, error = validate_symbol(symbol)
                 if not valid:
@@ -3415,13 +3469,24 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.info(f"[SMART] Авто-трейд пропущен (validation): {skip_reason}")
                 
                 if not skip_reason:
-                    # Расчёт ставки на основе качества сетапа (только A+ и A)
+                    # Расчёт ставки на основе качества сетапа
                     quality_mult = {
                         SetupQuality.A_PLUS: 0.12,  # 12% баланса для идеального сетапа
                         SetupQuality.A: 0.10,        # 10% для отличного сетапа
-                    }.get(setup.quality, 0.08)
+                        SetupQuality.B: 0.08,        # 8% для хорошего сетапа
+                    }.get(setup.quality, 0.06)
                     
-                    auto_bet = min(AUTO_TRADE_MAX_BET, max(AUTO_TRADE_MIN_BET, auto_balance * quality_mult))
+                    # === ДИНАМИЧЕСКИЙ РАЗМЕР ПОСЛЕ УБЫТКОВ ===
+                    loss_streak = db_get_loss_streak(AUTO_TRADE_USER_ID)
+                    loss_multiplier = 1.0
+                    if loss_streak >= 3:
+                        loss_multiplier = 0.5  # -50% после 3+ убытков
+                        logger.info(f"[SMART] Loss streak {loss_streak}: reducing bet by 50%")
+                    elif loss_streak >= 2:
+                        loss_multiplier = 0.75  # -25% после 2 убытков
+                        logger.info(f"[SMART] Loss streak {loss_streak}: reducing bet by 25%")
+                    
+                    auto_bet = min(AUTO_TRADE_MAX_BET, max(AUTO_TRADE_MIN_BET, auto_balance * quality_mult * loss_multiplier))
                     auto_bet = min(auto_bet, auto_balance * 0.15)  # Не более 15% баланса
                     
                     # Ensure minimum balance reserve
@@ -3706,6 +3771,26 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         logger.info(f"[LIMIT] User {user_id}: Max positions reached ({len(user_positions)})")
         return
+
+    # === ПРОВЕРКА КОРРЕЛЯЦИИ ===
+    try:
+        if ADVANCED_POSITION_MANAGEMENT:
+            is_safe, corr_reason = check_correlation_risk(
+                user_positions, symbol, direction, user['balance'],
+                correlation_threshold=0.7,  # 70% корреляция
+                max_exposure_percent=30.0   # Макс. 30% в одном направлении
+            )
+            if not is_safe:
+                await query.edit_message_text(
+                    f"<b>⚠️ Риск корреляции</b>\n\n"
+                    f"{corr_reason}\n\n"
+                    f"Закройте часть позиций перед открытием новых.",
+                    parse_mode="HTML"
+                )
+                logger.info(f"[CORR] User {user_id}: Blocked due to correlation risk: {corr_reason}")
+                return
+    except Exception as e:
+        logger.warning(f"[CORR] Error checking correlation: {e}")
 
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_emoji = "🟢" if direction == "LONG" else "🔴"

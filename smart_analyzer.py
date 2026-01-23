@@ -2042,9 +2042,12 @@ class SmartAnalyzer:
         if pattern_confirmation:
             score += 15
         
-        # 4. Объём (10 баллов)
+        # 4. Объём (10 баллов или -10 штраф за низкий объём)
         if volume_confirmation:
             score += 10
+        else:
+            score -= 10  # Штраф за низкий объём
+            logger.info(f"[QUALITY] Low volume penalty -10")
         
         # 5. Моментум (10 баллов)
         if momentum_aligned:
@@ -2239,6 +2242,14 @@ class SmartAnalyzer:
             logger.info("[SMART] Skip: Outside trading hours")
             _signal_stats['rejected'] += 1
             _signal_stats['reasons']['outside_hours'] += 1
+            return None
+        
+        # 2.5. Проверка новостного времени (FOMC, NFP, CPI)
+        is_news, news_event = self._is_news_time()
+        if is_news:
+            logger.info(f"[SMART] Skip: News event window ({news_event})")
+            _signal_stats['rejected'] += 1
+            _signal_stats['reasons']['news_event'] = _signal_stats['reasons'].get('news_event', 0) + 1
             return None
         
         # 3. Загружаем данные
@@ -2448,7 +2459,7 @@ class SmartAnalyzer:
         bearish_momentum = rsi < 60 and rsi > 30 and current_price < ema_20[-1]
         
         # Объём подтверждает
-        volume_confirms = volume_data['ratio'] > 1.2 or volume_data['trend'] == 'INCREASING'
+        volume_confirms = volume_data['ratio'] > 1.5 or volume_data['trend'] == 'INCREASING'  # Требование объёма повышено с 1.2
         
         # === НОВАЯ ЛОГИКА: ЭКСТРЕМАЛЬНЫЕ ДВИЖЕНИЯ И ДИСБАЛАНС ===
         
@@ -2760,6 +2771,40 @@ class SmartAnalyzer:
             # Всё равно разрешаем, но логируем
         
         return True  # Крипта 24/7
+    
+    def _is_news_time(self) -> tuple:
+        """
+        Проверка на время важных экономических новостей.
+        Избегаем торговли за 30 минут до и после важных событий.
+        
+        Returns:
+            (is_news, event_name) - флаг и название события
+        """
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+        weekday = now.weekday()  # 0=Monday, 6=Sunday
+        day = now.day
+        
+        # === FOMC MEETINGS ===
+        # FOMC обычно в среду в 18:00-19:00 UTC (раз в 6 недель)
+        # Упрощённо: избегаем каждую среду 17:30-20:00 UTC
+        if weekday == 2 and 17 <= hour <= 19:  # Wednesday
+            logger.info(f"[NEWS] Possible FOMC window (Wed {hour}:00 UTC)")
+            return True, "FOMC"
+        
+        # === NFP (Non-Farm Payrolls) ===
+        # Первая пятница месяца в 12:30 UTC
+        if weekday == 4 and day <= 7 and 12 <= hour <= 14:  # First Friday
+            logger.info(f"[NEWS] NFP window (1st Friday {hour}:00 UTC)")
+            return True, "NFP"
+        
+        # === CPI (Consumer Price Index) ===
+        # Обычно ~10-15 число месяца в 12:30 UTC
+        if 10 <= day <= 15 and 12 <= hour <= 14:
+            logger.info(f"[NEWS] Possible CPI window (day {day}, {hour}:00 UTC)")
+            return True, "CPI"
+        
+        return False, None
     
     # ==================== COIN SELECTION ====================
     
