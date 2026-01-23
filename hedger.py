@@ -184,8 +184,18 @@ class BybitHedger:
         
         return headers
     
-    async def _request(self, method: str, endpoint: str, params: dict = None) -> Optional[dict]:
-        """Выполнить запрос к Bybit API"""
+    async def _request(self, method: str, endpoint: str, params: dict = None, 
+                       max_retries: int = 3, retry_delay: float = 1.0) -> Optional[dict]:
+        """
+        Выполнить запрос к Bybit API с retry логикой
+        
+        Args:
+            method: HTTP метод (GET, POST)
+            endpoint: API endpoint
+            params: Параметры запроса
+            max_retries: Максимальное число попыток
+            retry_delay: Задержка между попытками (секунды)
+        """
         if not self.enabled:
             logger.warning("[BYBIT] Request skipped - not enabled")
             return None
@@ -193,51 +203,104 @@ class BybitHedger:
         params = params or {}
         url = f"{self.base_url}{endpoint}"
         is_post = method.upper() == "POST"
-        headers = self._sign(params, is_post=is_post)
-        headers["Content-Type"] = "application/json"
         
-        logger.info(f"[BYBIT] {method} {endpoint} params={params}")
+        # Ошибки, которые не стоит повторять
+        non_retryable_codes = {
+            10003,  # API KEY INVALID
+            10004,  # Неверная подпись
+            110007, # Недостаточно баланса
+            110017, # Слишком маленький размер
+            110073, # TP/SL слишком близко
+        }
         
-        try:
-            session = await self._get_session()
-            
-            if method == "GET":
-                async with session.get(url, headers=headers, params=params) as resp:
-                    data = await resp.json()
-            else:
-                # POST с JSON body
-                async with session.post(url, headers=headers, data=json.dumps(params)) as resp:
-                    data = await resp.json()
-            
-            ret_code = data.get('retCode')
-            ret_msg = data.get('retMsg')
-            logger.info(f"[BYBIT] Response: retCode={ret_code}, retMsg={ret_msg}")
-            
-            if ret_code == 0:
-                return data.get("result")
-            elif ret_code == 10003:
-                logger.error(f"[BYBIT] ❌ API KEY INVALID!")
-                return None
-            elif ret_code == 10004:
-                logger.error(f"[BYBIT] ❌ Неверная подпись!")
-                return None
-            elif ret_code == 110007:
-                logger.error(f"[BYBIT] ❌ Недостаточно баланса!")
-                return None
-            elif ret_code == 110073:
-                logger.error(f"[BYBIT] ❌ TP/SL слишком близко к цене! Пробуем без TP/SL...")
-                return None
-            elif ret_code == 110017:
-                logger.error(f"[BYBIT] ❌ Слишком маленький размер ордера!")
-                return None
-            else:
+        # Ошибки, которые стоит повторить
+        retryable_codes = {
+            10001,  # Request timeout
+            10002,  # Request parameter error (может быть временная)
+            10006,  # Too many requests
+            10016,  # Server error
+        }
+        
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Пересчитываем подпись для каждой попытки (timestamp меняется)
+                headers = self._sign(params, is_post=is_post)
+                headers["Content-Type"] = "application/json"
+                
+                if attempt == 0:
+                    logger.info(f"[BYBIT] {method} {endpoint} params={params}")
+                else:
+                    logger.info(f"[BYBIT] {method} {endpoint} (retry {attempt + 1}/{max_retries})")
+                
+                session = await self._get_session()
+                
+                # Set timeout for request
+                timeout = aiohttp.ClientTimeout(total=10)
+                
+                if method == "GET":
+                    async with session.get(url, headers=headers, params=params, timeout=timeout) as resp:
+                        data = await resp.json()
+                else:
+                    # POST с JSON body
+                    async with session.post(url, headers=headers, data=json.dumps(params), timeout=timeout) as resp:
+                        data = await resp.json()
+                
+                ret_code = data.get('retCode')
+                ret_msg = data.get('retMsg', 'Unknown error')
+                logger.info(f"[BYBIT] Response: retCode={ret_code}, retMsg={ret_msg}")
+                
+                if ret_code == 0:
+                    return data.get("result")
+                
+                # Non-retryable errors
+                if ret_code in non_retryable_codes:
+                    if ret_code == 10003:
+                        logger.error(f"[BYBIT] ❌ API KEY INVALID!")
+                    elif ret_code == 10004:
+                        logger.error(f"[BYBIT] ❌ Неверная подпись!")
+                    elif ret_code == 110007:
+                        logger.error(f"[BYBIT] ❌ Недостаточно баланса!")
+                    elif ret_code == 110073:
+                        logger.error(f"[BYBIT] ❌ TP/SL слишком близко к цене!")
+                    elif ret_code == 110017:
+                        logger.error(f"[BYBIT] ❌ Слишком маленький размер ордера!")
+                    return None
+                
+                # Retryable errors
+                if ret_code in retryable_codes and attempt < max_retries - 1:
+                    logger.warning(f"[BYBIT] Retryable error {ret_code}: {ret_msg}, retrying in {retry_delay}s...")
+                    await asyncio.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+                    continue
+                
+                # Other errors - log and return None
                 logger.error(f"[BYBIT] API Error: {ret_msg} (code: {ret_code})")
                 logger.error(f"[BYBIT] Full response: {data}")
                 return None
                 
-        except Exception as e:
-            logger.error(f"[BYBIT] Request error: {e}")
-            return None
+            except asyncio.TimeoutError:
+                last_error = "Request timeout"
+                logger.warning(f"[BYBIT] Request timeout on attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+            except aiohttp.ClientError as e:
+                last_error = str(e)
+                logger.warning(f"[BYBIT] Client error on attempt {attempt + 1}/{max_retries}: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"[BYBIT] Request error: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                break
+        
+        logger.error(f"[BYBIT] All {max_retries} attempts failed. Last error: {last_error}")
+        return None
     
     def _to_bybit_symbol(self, symbol: str) -> str:
         """Конвертация символа в формат Bybit"""

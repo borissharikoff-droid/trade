@@ -195,12 +195,12 @@ class RateLimiter:
             )
         logger.warning(f"[SPAM] User {user_id}: {violation_type} - {details}")
     
-    def _send_spam_alert(self, user_id: int, context: ContextTypes.DEFAULT_TYPE, 
+    async def _send_spam_alert(self, user_id: int, context: ContextTypes.DEFAULT_TYPE, 
                         penalty_level: int, violation_count: int):
         """Send alert to admins about spam"""
         try:
             # Check if we should alert (max once per 5 minutes per user)
-            last_alert = run_sql(
+            last_alert = _run_sql(
                 "SELECT last_alert_time FROM rate_limits WHERE user_id = ?",
                 (user_id,),
                 fetch="one"
@@ -215,16 +215,16 @@ class RateLimiter:
                 if (datetime.now() - last_time).total_seconds() < 300:  # 5 minutes
                     should_alert = False
             
-            if should_alert and ADMIN_IDS:
+            if should_alert and _ADMIN_IDS:
                 alert_text = f"⚠️ <b>SPAM DETECTED</b>\n\n"
                 alert_text += f"User ID: <code>{user_id}</code>\n"
                 alert_text += f"Penalty Level: {penalty_level}\n"
                 alert_text += f"Total Violations: {violation_count}\n"
                 alert_text += f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                 
-                for admin_id in ADMIN_IDS:
+                for admin_id in _ADMIN_IDS:
                     try:
-                        context.bot.send_message(admin_id, alert_text, parse_mode="HTML")
+                        await context.bot.send_message(admin_id, alert_text, parse_mode="HTML")
                     except Exception as e:
                         logger.error(f"[SPAM_ALERT] Failed to send to admin {admin_id}: {e}")
                 
@@ -242,7 +242,7 @@ class RateLimiter:
         except Exception as e:
             logger.error(f"[SPAM_ALERT] Error: {e}")
     
-    def check_rate_limit(self, user_id: int, max_requests: int = 30, 
+    async def check_rate_limit(self, user_id: int, max_requests: int = 30, 
                         window_seconds: int = 60, context: ContextTypes.DEFAULT_TYPE = None) -> Tuple[bool, Optional[str]]:
         """
         Check if user exceeded rate limit
@@ -303,7 +303,7 @@ class RateLimiter:
             
             # Send alert
             if context:
-                self._send_spam_alert(user_id, context, penalty_level + 1, user_limit['total_violations'] + 1)
+                await self._send_spam_alert(user_id, context, penalty_level + 1, user_limit['total_violations'] + 1)
             
             # Calculate cooldown
             remaining = window_seconds - time_since_reset
@@ -352,7 +352,7 @@ def rate_limit(max_requests: int = 30, window_seconds: int = 60,
             user_id = update.effective_user.id
             
             # Check rate limit
-            is_blocked, reason = rate_limiter.check_rate_limit(
+            is_blocked, reason = await rate_limiter.check_rate_limit(
                 user_id, max_requests, window_seconds, context
             )
             

@@ -77,11 +77,14 @@ def get_connection():
     # Try to use pool first
     try:
         return get_pooled_connection()
-    except:
+    except Exception as e:
+        logger.warning(f"[DB] Pool connection failed, using fallback: {e}")
         # Fallback to direct connection
         if USE_POSTGRES:
+            logger.debug("[DB] Creating direct PostgreSQL connection")
             return psycopg2.connect(DATABASE_URL)
         else:
+            logger.debug(f"[DB] Creating direct SQLite connection to {DB_PATH}")
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             return conn
@@ -93,6 +96,7 @@ def run_sql(query: str, params: tuple = (), fetch: str = None):
     Uses connection pool for better performance
     """
     conn = None
+    c = None
     try:
         conn = get_pooled_connection()
         
@@ -117,7 +121,8 @@ def run_sql(query: str, params: tuple = (), fetch: str = None):
         elif fetch == "id":
             if USE_POSTGRES:
                 # Для PostgreSQL используем RETURNING id
-                result = c.fetchone()[0] if 'RETURNING' in query.upper() else None
+                row = c.fetchone()
+                result = row[0] if row and 'RETURNING' in query.upper() else None
             else:
                 result = c.lastrowid
         
@@ -125,10 +130,20 @@ def run_sql(query: str, params: tuple = (), fetch: str = None):
         return result
     except Exception as e:
         if conn:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                pass
         logger.error(f"[DB] SQL error: {e}, query: {query[:100]}")
         raise
     finally:
+        # Always close cursor first
+        if c:
+            try:
+                c.close()
+            except Exception:
+                pass
+        # Return connection to pool
         if conn:
             return_pooled_connection(conn)
 
@@ -342,16 +357,7 @@ def init_db():
     except Exception as e:
         logger.warning(f"[DB] Migration warning (system_settings): {e}")
     
-    conn.close()
-    
-    # Initialize connection pool
-    init_connection_pool(DATABASE_URL, DB_PATH, min_connections=2, max_connections=10)
-    logger.info("[DB] Connection pool initialized")
-    
-    # Initialize rate limiter tables
-    init_rate_limiter()
-    
-    # Add database indexes for performance
+    # Add database indexes for performance BEFORE closing connection
     try:
         if USE_POSTGRES:
             # PostgreSQL indexes
@@ -373,6 +379,20 @@ def init_db():
         logger.info("[DB] Indexes created/verified")
     except Exception as e:
         logger.warning(f"[DB] Index creation warning: {e}")
+    
+    # Close cursor and connection
+    try:
+        c.close()
+    except Exception:
+        pass
+    conn.close()
+    
+    # Initialize connection pool
+    init_connection_pool(DATABASE_URL, DB_PATH, min_connections=2, max_connections=10)
+    logger.info("[DB] Connection pool initialized")
+    
+    # Initialize rate limiter tables
+    init_rate_limiter()
     
     db_type = "PostgreSQL" if USE_POSTGRES else f"SQLite ({DB_PATH})"
     logger.info(f"[DB] Initialized: {db_type}")
@@ -1531,46 +1551,72 @@ async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
-    user = get_user(user_id)
     
-    payment = update.message.successful_payment
-    stars = payment.total_amount
-    usd = stars // STARS_RATE
-    
-    # Проверяем первый депозит для реферального бонуса
-    # Первый депозит = когда total_deposit был 0 до этого депозита
-    old_total_deposit = user['total_deposit'] - usd
-    is_first_deposit = old_total_deposit == 0.0
-    
-    user['balance'] += usd
-    user['total_deposit'] += usd
-    save_user(user_id)
-    
-    logger.info(f"[PAYMENT] User {user_id} deposited ${usd} via Stars")
-    
-    # Реферальный бонус при первом депозите
-    if is_first_deposit:
-        referrer_id = db_get_referrer(user_id)
-        if referrer_id:
-            bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
-            if bonus_added:
-                try:
-                    await context.bot.send_message(
-                        referrer_id,
-                        f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
-                        parse_mode="HTML"
-                    )
-                except:
-                    pass
+    try:
+        user = get_user(user_id)
         
-    text = f"""<b>✅ Оплата успешна</b>
+        payment = update.message.successful_payment
+        stars = payment.total_amount
+        usd = stars // STARS_RATE
+        
+        if usd <= 0:
+            logger.error(f"[PAYMENT] User {user_id}: Invalid payment amount {stars} stars")
+            await update.message.reply_text(
+                "<b>❌ Ошибка</b>\n\nНекорректная сумма платежа.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Проверяем первый депозит для реферального бонуса
+        # Первый депозит = когда total_deposit был 0 до этого депозита
+        old_total_deposit = user.get('total_deposit', 0) or 0
+        is_first_deposit = old_total_deposit == 0.0
+        
+        # Atomic balance update with lock
+        async with get_user_lock(user_id):
+            user = get_user(user_id)  # Re-read with lock
+            user['balance'] += usd
+            user['total_deposit'] = (user.get('total_deposit', 0) or 0) + usd
+            save_user(user_id)
+        
+        logger.info(f"[PAYMENT] User {user_id} deposited ${usd} via Stars (balance: ${user['balance']:.2f})")
+        
+        # Реферальный бонус при первом депозите
+        if is_first_deposit:
+            try:
+                referrer_id = db_get_referrer(user_id)
+                if referrer_id:
+                    bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
+                    if bonus_added:
+                        try:
+                            await context.bot.send_message(
+                                referrer_id,
+                                f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
+                                parse_mode="HTML"
+                            )
+                        except Exception as e:
+                            logger.warning(f"[PAYMENT] Failed to notify referrer {referrer_id}: {e}")
+            except Exception as e:
+                logger.error(f"[PAYMENT] Referral bonus error for user {user_id}: {e}")
+            
+        text = f"""<b>✅ Оплата успешна</b>
 
 Зачислено: <b>${usd:.2f}</b>
 
 💰 Баланс: ${user['balance']:.2f}"""
-    
-    keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"[PAYMENT] Critical error for user {user_id}: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(
+                "<b>❌ Ошибка обработки платежа</b>\n\nОбратитесь в поддержку.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
 
 # ==================== CRYPTO ПОПОЛНЕНИЕ ====================
 async def pay_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2014,55 +2060,69 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     
     user_id = update.effective_user.id
-    user = get_user(user_id)
     
-    MIN_WITHDRAW = 5.0
-    WITHDRAW_FEE = 0.0  # Комиссия на вывод (можно настроить)
-    
-    # Определяем сумму
-    if query.data == "withdraw_all":
-        amount = max(0, user['balance'] - WITHDRAW_FEE)
-    elif query.data.startswith("withdraw_"):
-        try:
-            amount = float(query.data.split("_")[1])
-        except:
-            amount = 0
-    else:
-        amount = 0
-    
-    # Валидация
-    if amount < MIN_WITHDRAW:
-        await query.edit_message_text(
-            f"<b>❌ Ошибка</b>\n\nМинимальная сумма для вывода: ${MIN_WITHDRAW:.2f}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
-            parse_mode="HTML"
-        )
-        return
-    
-    if amount > user['balance']:
-        await query.edit_message_text(
-            f"<b>❌ Ошибка</b>\n\nНедостаточно средств.\n\n💰 Баланс: ${user['balance']:.2f}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
-            parse_mode="HTML"
-        )
-        return
-    
-    # Проверяем наличие открытых позиций
-    user_positions = get_positions(user_id)
-    if user_positions:
-        total_in_positions = sum(p['amount'] for p in user_positions)
-        available = user['balance'] - total_in_positions
+    try:
+        user = get_user(user_id)
         
-        if amount > available:
+        MIN_WITHDRAW = 5.0
+        WITHDRAW_FEE = 0.0  # Комиссия на вывод (можно настроить)
+        
+        # Определяем сумму
+        if query.data == "withdraw_all":
+            amount = max(0, (user.get('balance', 0) or 0) - WITHDRAW_FEE)
+        elif query.data.startswith("withdraw_"):
+            try:
+                amount = float(query.data.split("_")[1])
+            except (ValueError, IndexError):
+                amount = 0
+        else:
+            amount = 0
+        
+        # Валидация
+        if amount < MIN_WITHDRAW:
             await query.edit_message_text(
-                f"<b>❌ Ошибка</b>\n\nНедостаточно свободных средств.\n\n"
-                f"💰 Баланс: ${user['balance']:.2f}\n"
-                f"📊 В позициях: ${total_in_positions:.2f}\n"
-                f"💵 Доступно: ${available:.2f}",
+                f"<b>❌ Ошибка</b>\n\nМинимальная сумма для вывода: ${MIN_WITHDRAW:.2f}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
                 parse_mode="HTML"
             )
             return
+        
+        balance = user.get('balance', 0) or 0
+        if amount > balance:
+            await query.edit_message_text(
+                f"<b>❌ Ошибка</b>\n\nНедостаточно средств.\n\n💰 Баланс: ${balance:.2f}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
+                parse_mode="HTML"
+            )
+            return
+        
+        # Проверяем наличие открытых позиций
+        user_positions = get_positions(user_id)
+        if user_positions:
+            total_in_positions = sum(p.get('amount', 0) or 0 for p in user_positions)
+            available = balance - total_in_positions
+            
+            if amount > available:
+                await query.edit_message_text(
+                    f"<b>❌ Ошибка</b>\n\nНедостаточно свободных средств.\n\n"
+                    f"💰 Баланс: ${balance:.2f}\n"
+                    f"📊 В позициях: ${total_in_positions:.2f}\n"
+                    f"💵 Доступно: ${available:.2f}",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
+                    parse_mode="HTML"
+                )
+                return
+    except Exception as e:
+        logger.error(f"[WITHDRAW] Error handling withdraw for user {user_id}: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(
+                "<b>❌ Ошибка</b>\n\nНе удалось обработать запрос на вывод.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]]),
+                parse_mode="HTML"
+            )
+        except:
+            pass
+        return
     
     # Запрашиваем адрес для вывода
     context.user_data['pending_withdraw'] = {
@@ -2172,9 +2232,23 @@ async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT
                     
                     transfer = data["result"]
                     
-                    # Списываем с баланса
-                    user['balance'] = sanitize_balance(user['balance'] - amount)
-                    save_user(user_id)
+                    # Списываем с баланса (с блокировкой)
+                    async with get_user_lock(user_id):
+                        user = get_user(user_id)  # Re-read with lock
+                        # Double-check balance
+                        if user.get('balance', 0) < amount:
+                            await status_msg.edit_text(
+                                "<b>❌ Ошибка</b>\n\nНедостаточно средств на балансе.",
+                                parse_mode="HTML"
+                            )
+                            if 'pending_withdraw' in context.user_data:
+                                del context.user_data['pending_withdraw']
+                            return True
+                        
+                        user['balance'] = sanitize_balance(user['balance'] - amount)
+                        save_user(user_id)
+                    
+                    logger.info(f"[WITHDRAW] User {user_id} withdrew ${amount:.2f} to Telegram ID {address_or_id}")
                     
                     await status_msg.edit_text(
                         f"""<b>✅ Вывод выполнен</b>
@@ -3731,8 +3805,6 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await query.answer()
     
     user_id = update.effective_user.id
-    user = get_user(user_id)
-    user_positions = get_positions(user_id)
     
     try:
         pos_id = int(query.data.split("_")[1])
@@ -3740,101 +3812,148 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.answer("Ошибка данных", show_alert=True)
         return
     
-    pos = next((p for p in user_positions if p['id'] == pos_id), None)
-    
-    if not pos:
-        await query.answer("❌ Позиция не найдена", show_alert=True)
-        return
-    
-    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-    
-    # Показываем статус
-    await query.edit_message_text(f"<b>⏳ Закрываем {ticker}...</b>", parse_mode="HTML")
-    
-    # === ХЕДЖИРОВАНИЕ: СНАЧАЛА закрываем на Bybit ===
-    close_price = pos.get('current', pos['entry'])
-    hedging_enabled = await is_hedging_enabled()
-    
-    if hedging_enabled:
-        bybit_qty = pos.get('bybit_qty', 0)
-        if bybit_qty > 0:
-            hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], bybit_qty)
-            if hedge_result:
-                logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit (qty={bybit_qty})")
-                
-                # Верификация: проверяем что позиция реально закрылась
-                await asyncio.sleep(0.5)
-                bybit_pos = await hedger.get_position_data(pos['symbol'])
-                
-                # Получаем реальную цену закрытия с Bybit
-                close_side = "Sell" if pos['direction'] == "LONG" else "Buy"
-                order_info = await hedger.get_last_order_price(pos['symbol'], close_side)
-                if order_info and order_info.get('price'):
-                    close_price = order_info['price']
-                    logger.info(f"[HEDGE] Real close price: ${close_price:.4f}")
-                
-                # Если позиция ещё есть на Bybit - возможно частичное закрытие
-                if bybit_pos and bybit_pos.get('size', 0) > 0:
-                    remaining = bybit_pos['size']
-                    logger.warning(f"[HEDGE] ⚠️ Position partially closed, remaining: {remaining}")
-            else:
-                # Bybit не закрыл - НЕ закрываем в боте
-                logger.error(f"[HEDGE] ❌ Failed to close on Bybit - position kept open")
-                await query.edit_message_text(
-                    f"<b>❌ Ошибка закрытия</b>\n\n"
-                    f"Не удалось закрыть позицию на Bybit.\n"
-                    f"Позиция сохранена. Попробуйте ещё раз.",
-                    parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
-                )
-                return
-    
-    # Пересчитываем PnL с реальной ценой закрытия
-    if pos['direction'] == "LONG":
-        pnl_percent = (close_price - pos['entry']) / pos['entry']
-    else:
-        pnl_percent = (pos['entry'] - close_price) / pos['entry']
-    pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
-    
-    returned = pos['amount'] + pnl
-    
-    user['balance'] = sanitize_balance(user['balance'] + returned)
-    user['total_profit'] += pnl
-    save_user(user_id)  # Сохраняем в БД
-    
-    # Закрываем в БД и удаляем из кэша
-    db_close_position(pos_id, pos['current'], pnl, 'MANUAL')
-    # Явно удаляем из кэша по ID
-    if user_id in positions_cache:
-        positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id]
-    
-    pnl_abs = abs(pnl)
-    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-    
-    if pnl > 0:
-        text = f"""<b>✅ Сделка закрыта</b>
+    try:
+        user = get_user(user_id)
+        user_positions = get_positions(user_id)
+        
+        pos = next((p for p in user_positions if p['id'] == pos_id), None)
+        
+        if not pos:
+            await query.answer("❌ Позиция не найдена", show_alert=True)
+            return
+        
+        ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+        
+        # Показываем статус
+        await query.edit_message_text(f"<b>⏳ Закрываем {ticker}...</b>", parse_mode="HTML")
+        
+        # === ХЕДЖИРОВАНИЕ: СНАЧАЛА закрываем на Bybit ===
+        close_price = pos.get('current') or pos.get('entry', 0)
+        if close_price <= 0:
+            logger.error(f"[CLOSE] Invalid close price for position {pos_id}")
+            close_price = pos.get('entry', 0)
+        
+        hedging_enabled = await is_hedging_enabled()
+        
+        if hedging_enabled:
+            bybit_qty = pos.get('bybit_qty', 0)
+            if bybit_qty > 0:
+                try:
+                    hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], bybit_qty)
+                    if hedge_result:
+                        logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit (qty={bybit_qty})")
+                        
+                        # Верификация: проверяем что позиция реально закрылась
+                        await asyncio.sleep(0.5)
+                        bybit_pos = await hedger.get_position_data(pos['symbol'])
+                        
+                        # Получаем реальную цену закрытия с Bybit
+                        close_side = "Sell" if pos['direction'] == "LONG" else "Buy"
+                        order_info = await hedger.get_last_order_price(pos['symbol'], close_side)
+                        if order_info and order_info.get('price'):
+                            close_price = order_info['price']
+                            logger.info(f"[HEDGE] Real close price: ${close_price:.4f}")
+                        
+                        # Если позиция ещё есть на Bybit - возможно частичное закрытие
+                        if bybit_pos and bybit_pos.get('size', 0) > 0:
+                            remaining = bybit_pos['size']
+                            logger.warning(f"[HEDGE] ⚠️ Position partially closed, remaining: {remaining}")
+                    else:
+                        # Bybit не закрыл - НЕ закрываем в боте
+                        logger.error(f"[HEDGE] ❌ Failed to close on Bybit - position kept open")
+                        await query.edit_message_text(
+                            f"<b>❌ Ошибка закрытия</b>\n\n"
+                            f"Не удалось закрыть позицию на Bybit.\n"
+                            f"Позиция сохранена. Попробуйте ещё раз.",
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                        )
+                        return
+                except Exception as e:
+                    logger.error(f"[HEDGE] Error closing position {pos_id} on Bybit: {e}")
+                    await query.edit_message_text(
+                        f"<b>❌ Ошибка Bybit</b>\n\n"
+                        f"Ошибка при закрытии на Bybit: {str(e)[:50]}\n"
+                        f"Позиция сохранена.",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                    )
+                    return
+        
+        # Пересчитываем PnL с реальной ценой закрытия
+        entry_price = pos.get('entry', 0)
+        if entry_price <= 0:
+            logger.error(f"[CLOSE] Invalid entry price for position {pos_id}")
+            entry_price = close_price  # Fallback
+        
+        if pos['direction'] == "LONG":
+            pnl_percent = (close_price - entry_price) / entry_price if entry_price > 0 else 0
+        else:
+            pnl_percent = (entry_price - close_price) / entry_price if entry_price > 0 else 0
+        
+        amount = pos.get('amount', 0)
+        commission = pos.get('commission', 0)
+        pnl = amount * LEVERAGE * pnl_percent - commission
+        
+        returned = amount + pnl
+        
+        # Use lock for balance update
+        async with get_user_lock(user_id):
+            user = get_user(user_id)  # Re-read with lock
+            user['balance'] = sanitize_balance(user['balance'] + returned)
+            user['total_profit'] = (user.get('total_profit', 0) or 0) + pnl
+            save_user(user_id)
+        
+        # Закрываем в БД и удаляем из кэша
+        db_close_position(pos_id, close_price, pnl, 'MANUAL')
+        
+        # Явно удаляем из кэша по ID
+        try:
+            cached_positions = positions_cache.get(user_id)
+            if cached_positions:
+                positions_cache.set(user_id, [p for p in cached_positions if p.get('id') != pos_id])
+        except Exception as e:
+            logger.warning(f"[CLOSE] Cache update error: {e}")
+        
+        pnl_abs = abs(pnl)
+        
+        if pnl > 0:
+            text = f"""<b>✅ Сделка закрыта</b>
 
 {ticker} | <b>+${pnl_abs:.2f}</b>
 Чистая работа.
 
 💰 Баланс: ${user['balance']:.2f}"""
-    elif pnl == 0:
-        text = f"""<b>📊 Безубыток</b>
+        elif pnl == 0:
+            text = f"""<b>📊 Безубыток</b>
 
 {ticker} | $0.00
 Вышли без потерь.
 
 💰 Баланс: ${user['balance']:.2f}"""
-    else:
-        text = f"""<b>❌ Сделка закрыта</b>
+        else:
+            text = f"""<b>❌ Сделка закрыта</b>
 
 {ticker} | <b>-${pnl_abs:.2f}</b>
 Часть стратегии.
 
 💰 Баланс: ${user['balance']:.2f}"""
-    
-    keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        
+        keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        
+        logger.info(f"[CLOSE] User {user_id} closed {ticker} position {pos_id}, PnL: ${pnl:.2f}")
+        
+    except Exception as e:
+        logger.error(f"[CLOSE] Critical error closing position {pos_id} for user {user_id}: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(
+                "<b>❌ Ошибка</b>\n\nНе удалось закрыть позицию. Попробуйте позже.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+            )
+        except:
+            pass
 
 
 async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3982,40 +4101,71 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    # custom|SYM|D|ENTRY|SL|TP1|TP2|TP3|WINRATE (новый формат)
-    # custom|SYM|D|ENTRY|SL|TP|WINRATE (старый формат)
-    data = query.data.split("|")
-    if len(data) < 6:
-        await query.edit_message_text("<b>❌ Ошибка</b>", parse_mode="HTML")
+    user_id = update.effective_user.id
+    
+    try:
+        # custom|SYM|D|ENTRY|SL|TP1|TP2|TP3|WINRATE (новый формат)
+        # custom|SYM|D|ENTRY|SL|TP|WINRATE (старый формат)
+        data = query.data.split("|")
+        if len(data) < 6:
+            await query.edit_message_text("<b>❌ Ошибка</b>\n\nНекорректные данные сигнала.", parse_mode="HTML")
+            return
+        
+        # Validate symbol
+        symbol = data[1] if len(data) > 1 else ''
+        if not symbol:
+            await query.edit_message_text("<b>❌ Ошибка</b>\n\nПустой символ.", parse_mode="HTML")
+            return
+        
+        # Validate direction
+        direction = data[2] if len(data) > 2 else ''
+        if direction not in ['L', 'S', 'LONG', 'SHORT']:
+            await query.edit_message_text("<b>❌ Ошибка</b>\n\nНекорректное направление.", parse_mode="HTML")
+            return
+        
+        # Validate numeric values
+        try:
+            entry = float(data[3]) if len(data) > 3 else 0
+            sl = float(data[4]) if len(data) > 4 else 0
+            if entry <= 0 or sl <= 0:
+                await query.edit_message_text("<b>❌ Ошибка</b>\n\nНекорректные цены.", parse_mode="HTML")
+                return
+        except (ValueError, IndexError):
+            await query.edit_message_text("<b>❌ Ошибка</b>\n\nНекорректные числовые данные.", parse_mode="HTML")
+            return
+        
+        # Сохраняем данные сигнала
+        if len(data) >= 9:
+            # Новый формат с тремя TP
+            context.user_data['pending_trade'] = {
+                'symbol': data[1],
+                'direction': data[2],
+                'entry': data[3],
+                'sl': data[4],
+                'tp1': data[5],
+                'tp2': data[6],
+                'tp3': data[7],
+                'tp': data[5],  # для совместимости
+                'winrate': data[8] if len(data) > 8 else '75'
+            }
+        else:
+            # Старый формат
+            context.user_data['pending_trade'] = {
+                'symbol': data[1],
+                'direction': data[2],
+                'entry': data[3],
+                'sl': data[4],
+                'tp': data[5],
+                'tp1': data[5],
+                'winrate': data[6] if len(data) > 6 else '75'
+            }
+        
+        user = get_user(user_id)
+        
+    except Exception as e:
+        logger.error(f"[CUSTOM_PROMPT] Error parsing data for user {user_id}: {e}")
+        await query.edit_message_text("<b>❌ Ошибка</b>\n\nОшибка обработки данных.", parse_mode="HTML")
         return
-    
-    # Сохраняем данные сигнала
-    if len(data) >= 9:
-        # Новый формат с тремя TP
-        context.user_data['pending_trade'] = {
-            'symbol': data[1],
-            'direction': data[2],
-            'entry': data[3],
-            'sl': data[4],
-            'tp1': data[5],
-            'tp2': data[6],
-            'tp3': data[7],
-            'tp': data[5],  # для совместимости
-            'winrate': data[8] if len(data) > 8 else '75'
-        }
-    else:
-        # Старый формат
-        context.user_data['pending_trade'] = {
-            'symbol': data[1],
-            'direction': data[2],
-            'entry': data[3],
-            'sl': data[4],
-            'tp': data[5],
-            'tp1': data[5],
-            'winrate': data[6] if len(data) > 6 else '75'
-        }
-    
-    user = get_user(update.effective_user.id)
     
     text = f"""<b>💵 Своя сумма</b>
 
@@ -4120,16 +4270,54 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
 
     trade = context.user_data.pop('pending_trade')
 
-    # Выполняем сделку
-    symbol = trade['symbol']
-    direction = "LONG" if trade['direction'] == 'L' else "SHORT"
-    entry = float(trade['entry'])
-    sl = float(trade['sl'])
-    tp1 = float(trade.get('tp1', trade['tp']))
-    tp2 = float(trade.get('tp2', entry + (tp1 - entry) * 2 if direction == "LONG" else entry - (entry - tp1) * 2))
-    tp3 = float(trade.get('tp3', entry + (tp1 - entry) * 3.5 if direction == "LONG" else entry - (entry - tp1) * 3.5))
-    tp = tp1  # для совместимости
-    winrate = int(trade.get('winrate', 75))
+    # Выполняем сделку с валидацией
+    try:
+        symbol = trade.get('symbol', '')
+        if not symbol:
+            await update.message.reply_text("<b>❌ Ошибка</b>\n\nНекорректный символ.", parse_mode="HTML")
+            return
+        
+        # Validate symbol
+        valid, error = validate_symbol(symbol)
+        if not valid:
+            await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{error}", parse_mode="HTML")
+            return
+        
+        direction = "LONG" if trade.get('direction', '') == 'L' else "SHORT"
+        
+        # Validate direction
+        valid, error = validate_direction(direction)
+        if not valid:
+            await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{error}", parse_mode="HTML")
+            return
+        
+        entry_str = trade.get('entry', '0')
+        sl_str = trade.get('sl', '0')
+        tp_str = trade.get('tp', trade.get('tp1', '0'))
+        
+        entry = float(entry_str) if entry_str else 0
+        sl = float(sl_str) if sl_str else 0
+        
+        if entry <= 0 or sl <= 0:
+            await update.message.reply_text("<b>❌ Ошибка</b>\n\nНекорректные цены входа/стопа.", parse_mode="HTML")
+            return
+        
+        tp1 = float(trade.get('tp1', tp_str)) if trade.get('tp1', tp_str) else entry
+        tp2_default = entry + (tp1 - entry) * 2 if direction == "LONG" else entry - (entry - tp1) * 2
+        tp3_default = entry + (tp1 - entry) * 3.5 if direction == "LONG" else entry - (entry - tp1) * 3.5
+        tp2 = float(trade.get('tp2', tp2_default)) if trade.get('tp2') else tp2_default
+        tp3 = float(trade.get('tp3', tp3_default)) if trade.get('tp3') else tp3_default
+        tp = tp1  # для совместимости
+        
+        winrate_str = trade.get('winrate', '75')
+        winrate = int(winrate_str) if winrate_str and winrate_str.isdigit() else 75
+        winrate = max(0, min(100, winrate))  # Clamp between 0-100
+        
+    except (ValueError, TypeError) as e:
+        logger.warning(f"[CUSTOM_AMOUNT] Invalid trade data for user {user_id}: {e}")
+        await update.message.reply_text("<b>❌ Ошибка</b>\n\nНекорректные данные сделки.", parse_mode="HTML")
+        return
+    
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
 
     # === ЗАЩИТА: Не добавлять к убыточной позиции ===
@@ -4362,8 +4550,11 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
             # Проверяем если данные с Bybit получены успешно (даже если там 0 позиций)
             if bybit_sync_available:
                 for pos in user_positions[:]:
-                    if pos.get('bybit_qty', 0) > 0:
-                        bybit_symbol = pos['symbol'].replace('/', '')
+                    # Пропускаем позиции без bybit_qty
+                    if pos.get('bybit_qty', 0) <= 0:
+                        continue
+                    
+                    bybit_symbol = pos['symbol'].replace('/', '')
                     
                     # Если позиция была на Bybit но её больше нет - закрылась по TP/SL
                     if bybit_symbol not in bybit_open_symbols:
@@ -6155,18 +6346,35 @@ def main() -> None:
     else:
         logger.warning("[JOBS] JobQueue NOT available!")
     
-    # Error handler
+    # Error handler with detailed logging
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        logger.error(f"Exception: {context.error}", exc_info=context.error)
-        if update and hasattr(update, 'effective_user'):
+        # Log detailed error information
+        error_details = {
+            'error': str(context.error),
+            'error_type': type(context.error).__name__,
+        }
+        
+        if update:
+            if hasattr(update, 'effective_user') and update.effective_user:
+                error_details['user_id'] = update.effective_user.id
+                error_details['username'] = update.effective_user.username
+            if hasattr(update, 'callback_query') and update.callback_query:
+                error_details['callback_data'] = update.callback_query.data
+            if hasattr(update, 'message') and update.message:
+                error_details['message_text'] = update.message.text[:100] if update.message.text else None
+        
+        logger.error(f"[ERROR_HANDLER] Details: {error_details}", exc_info=context.error)
+        
+        # Notify user
+        if update and hasattr(update, 'effective_user') and update.effective_user:
             try:
                 await context.bot.send_message(
                     update.effective_user.id, 
                     "<b>❌ Ошибка</b>\n\nПроизошла ошибка. Попробуйте позже.",
                     parse_mode="HTML"
                 )
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"[ERROR_HANDLER] Could not notify user: {e}")
     
     app.add_error_handler(error_handler)
     
@@ -6181,9 +6389,23 @@ def main() -> None:
     
     app.post_init = post_init
     
-    logger.info("=" * 40)
-    logger.info("BOT STARTED")
-    logger.info("=" * 40)
+    # Log startup configuration summary
+    logger.info("=" * 50)
+    logger.info("BOT STARTING")
+    logger.info("=" * 50)
+    logger.info(f"[CONFIG] Database: {'PostgreSQL' if USE_POSTGRES else 'SQLite'}")
+    logger.info(f"[CONFIG] Admin IDs: {ADMIN_IDS if ADMIN_IDS else 'Not configured'}")
+    logger.info(f"[CONFIG] Auto-trade user: {AUTO_TRADE_USER_ID if AUTO_TRADE_USER_ID else 'Not configured'}")
+    logger.info(f"[CONFIG] Commission: {COMMISSION_PERCENT}%")
+    logger.info(f"[CONFIG] Leverage: x{LEVERAGE}")
+    logger.info(f"[CONFIG] Min deposit: ${MIN_DEPOSIT}")
+    logger.info(f"[CONFIG] Advanced features: {'Enabled' if ADVANCED_FEATURES else 'Disabled'}")
+    logger.info(f"[CONFIG] Advanced position management: {'Enabled' if ADVANCED_POSITION_MANAGEMENT else 'Disabled'}")
+    logger.info(f"[CONFIG] Crypto token: {'Configured' if os.getenv('CRYPTO_BOT_TOKEN') else 'Not configured'}")
+    logger.info(f"[CONFIG] Bybit API: {'Configured' if os.getenv('BYBIT_API_KEY') else 'Not configured'}")
+    logger.info("=" * 50)
+    logger.info("BOT STARTED SUCCESSFULLY")
+    logger.info("=" * 50)
     
     # Graceful shutdown
     import signal as sig

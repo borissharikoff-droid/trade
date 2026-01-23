@@ -169,11 +169,20 @@ class ConnectionPool:
 # Global pool instance (will be initialized in bot.py)
 _connection_pool: Optional[ConnectionPool] = None
 
+# Store database configuration for fallback connections (avoids circular import)
+_database_url: Optional[str] = None
+_db_path: str = "bot_data.db"
+
 
 def init_connection_pool(database_url: Optional[str] = None, db_path: str = "bot_data.db",
                         min_connections: int = 2, max_connections: int = 10):
     """Initialize the global connection pool"""
-    global _connection_pool
+    global _connection_pool, _database_url, _db_path
+    
+    # Store configuration for fallback use
+    _database_url = database_url
+    _db_path = db_path
+    
     _connection_pool = ConnectionPool(database_url, db_path, min_connections, max_connections)
     _connection_pool.initialize()
     return _connection_pool
@@ -184,9 +193,15 @@ def get_pooled_connection():
     if _connection_pool:
         return _connection_pool.get_connection()
     else:
-        # Fallback to direct connection
-        from bot import get_connection
-        return get_connection()
+        # Fallback to direct connection (no circular import)
+        if _database_url and PSYCOPG2_AVAILABLE:
+            return psycopg2.connect(_database_url)
+        elif SQLITE3_AVAILABLE:
+            conn = sqlite3.connect(_db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            return conn
+        else:
+            raise RuntimeError("No database driver available and connection pool not initialized")
 
 
 def return_pooled_connection(conn):
@@ -197,5 +212,5 @@ def return_pooled_connection(conn):
         # Fallback - just close it
         try:
             conn.close()
-        except:
+        except Exception:
             pass
