@@ -1739,8 +1739,9 @@ async def handle_crypto_custom_amount(update: Update, context: ContextTypes.DEFA
         
     except ValueError:
         await update.message.reply_text(
-            "❌ Введи число, например: 15 или 25.5",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="pay_crypto")]])
+            "<b>❌ Ошибка</b>\n\nВведи число, например: 15 или 25.5",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="pay_crypto")]]),
+            parse_mode="HTML"
         )
         return True
 
@@ -1756,8 +1757,9 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     
     if not crypto_token:
         await query.edit_message_text(
-            "❌ Crypto временно недоступен",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]])
+            "<b>❌ Временно недоступно</b>\n\nCrypto-платежи временно недоступны. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]]),
+            parse_mode="HTML"
         )
         return
     
@@ -1805,8 +1807,9 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     except Exception as e:
         logger.error(f"[CRYPTO] Error: {e}")
         await query.edit_message_text(
-            "❌ Ошибка создания платежа",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]])
+            "<b>❌ Ошибка</b>\n\nНе удалось создать платёж. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]]),
+            parse_mode="HTML"
         )
 
 async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2342,7 +2345,7 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     status = "✅ ВКЛ" if auto_enabled else "❌ ВЫКЛ"
     
-    text = f"""<b>Авто-трейд</b>
+    text = f"""<b>🤖 Авто-трейд</b>
 
 Статус: {status}
 Сделок сегодня: {today_count}/{max_daily}
@@ -2689,12 +2692,13 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if not positions_to_close:
         await query.edit_message_text(
-            f"📭 Нет открытых позиций по {ticker}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
+            f"<b>📭 Нет открытых позиций</b>\n\nПо {ticker}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]]),
+            parse_mode="HTML"
         )
         return
     
-    await query.edit_message_text(f"⏳ Закрываем {ticker}...")
+    await query.edit_message_text(f"<b>⏳ Закрываем {ticker}...</b>", parse_mode="HTML")
     
     # СНАЧАЛА закрываем на Bybit
     hedging_enabled = await is_hedging_enabled()
@@ -2794,7 +2798,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         return
     
-    await query.edit_message_text("⏳ Закрываем позиции...")
+    await query.edit_message_text("<b>⏳ Закрываем позиции...</b>", parse_mode="HTML")
     
     # === ГРУППИРУЕМ ПОЗИЦИИ ПО СИМВОЛУ ДЛЯ ЗАКРЫТИЯ НА BYBIT ===
     # Bybit хранит одну позицию на символ, поэтому закрываем один раз за группу
@@ -3984,7 +3988,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Позиции не найдены", show_alert=True)
         return
     
-    await query.edit_message_text("⏳ Закрываем позиции...")
+    await query.edit_message_text("<b>⏳ Закрываем позиции...</b>", parse_mode="HTML")
     
     ticker = to_close[0]['symbol'].split("/")[0] if "/" in to_close[0]['symbol'] else to_close[0]['symbol']
     
@@ -4612,8 +4616,9 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                         try:
                             await context.bot.send_message(
                                 user_id,
-                                f"<b>📡 Bybit: позиция закрыта</b>\n\n"
-                                f"{ticker} | {pos['direction']} | {reason}\n"
+                                f"<b>📡 Bybit</b>\n\n"
+                                f"{ticker} закрыт\n"
+                                f"{pos['direction']} | {reason}\n"
                                 f"{pnl_emoji} {pnl_sign}${real_pnl:.2f}\n\n"
                                 f"💰 Баланс: ${user['balance']:.2f}",
                                 parse_mode="HTML"
@@ -5384,7 +5389,7 @@ async def test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
         return
     
-    await update.message.reply_text("🔄 Ищу качественный SMART сетап...")
+    await update.message.reply_text("<b>⏳ Ищу качественный SMART сетап...</b>", parse_mode="HTML")
     
     try:
         # Получаем баланс для расчёта
@@ -5442,7 +5447,7 @@ R/R: 1:{setup.risk_reward:.1f}
         await update.message.reply_text(text, parse_mode="HTML")
     
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
     finally:
         await smart.close()
 
@@ -5461,7 +5466,7 @@ async def whale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     coin = context.args[0].upper() if context.args else "BTC"
     
-    await update.message.reply_text(f"⏳ Анализирую китов для {coin}...")
+    await update.message.reply_text(f"<b>⏳ Анализирую китов для {coin}...</b>", parse_mode="HTML")
     
     try:
         analysis = await get_combined_whale_analysis(coin)
@@ -5493,7 +5498,7 @@ async def whale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
     except Exception as e:
         logger.error(f"[WHALE] Error: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
 
 
 async def memes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5508,13 +5513,13 @@ async def memes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("<b>❌ Ошибка</b>\n\nMeme scanner не загружен", parse_mode="HTML")
         return
     
-    await update.message.reply_text("⏳ Сканирую мемкоины...")
+    await update.message.reply_text("<b>⏳ Сканирую мемкоины...</b>", parse_mode="HTML")
     
     try:
         opportunities = await get_meme_opportunities()
         
         if not opportunities:
-            await update.message.reply_text("😴 Нет активных сигналов по мемам")
+            await update.message.reply_text("<b>📊 Мем-сканер</b>\n\nНет активных сигналов по мемам", parse_mode="HTML")
             return
         
         text = "<b>🎰 Мем-сканер</b>\n\n"
@@ -5536,7 +5541,7 @@ async def memes_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
     except Exception as e:
         logger.error(f"[MEMES] Error: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
 
 
 async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5551,7 +5556,7 @@ async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("<b>❌ Ошибка</b>\n\nMarket analyzer не загружен", parse_mode="HTML")
         return
     
-    await update.message.reply_text("⏳ Анализирую рынок...")
+    await update.message.reply_text("<b>⏳ Анализирую рынок...</b>", parse_mode="HTML")
     
     try:
         context_data = await get_market_context()
@@ -5605,7 +5610,7 @@ async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         
     except Exception as e:
         logger.error(f"[MARKET] Error: {e}")
-        await update.message.reply_text(f"❌ Ошибка: {e}")
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
 
 
 async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5620,7 +5625,7 @@ async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     
     if args and args[0].lower() == "reset":
         reset_signal_stats()
-        await update.message.reply_text("✅ Статистика сброшена")
+        await update.message.reply_text("<b>✅ Статистика сброшена</b>", parse_mode="HTML")
         return
     
     stats = get_signal_stats()
@@ -5738,11 +5743,11 @@ User ID: {AUTO_TRADE_USER_ID}
     if cmd == "on":
         AUTO_TRADE_ENABLED = True
         audit_log(user_id, "AUTO_TRADE_TOGGLE", "enabled=True")
-        await update.message.reply_text("✅ Авто-торговля ВКЛЮЧЕНА")
+        await update.message.reply_text("<b>✅ Авто-торговля включена</b>", parse_mode="HTML")
     elif cmd == "off":
         AUTO_TRADE_ENABLED = False
         audit_log(user_id, "AUTO_TRADE_TOGGLE", "enabled=False")
-        await update.message.reply_text("❌ Авто-торговля ВЫКЛЮЧЕНА")
+        await update.message.reply_text("<b>❌ Авто-торговля выключена</b>", parse_mode="HTML")
     elif cmd == "balance" and len(args) > 1:
         try:
             new_balance = float(args[1])
@@ -5753,7 +5758,7 @@ User ID: {AUTO_TRADE_USER_ID}
             audit_log(user_id, "SET_AUTO_TRADE_BALANCE", f"balance=${new_balance:.0f}", target_user=AUTO_TRADE_USER_ID)
             await update.message.reply_text(f"<b>✅ Баланс установлен</b>\n\n<b>${new_balance:.2f}</b>", parse_mode="HTML")
         except ValueError:
-            await update.message.reply_text("❌ Неверная сумма")
+            await update.message.reply_text("<b>❌ Ошибка</b>\n\nНеверная сумма", parse_mode="HTML")
     elif cmd == "clear":
         # Очистить ВСЕ данные во всей БД
         run_sql("DELETE FROM positions")
@@ -5768,7 +5773,7 @@ User ID: {AUTO_TRADE_USER_ID}
         users_cache.clear()
         
         audit_log(user_id, "CLEAR_DATABASE", "Cleared all positions, history, alerts, stats")
-        await update.message.reply_text("✅ ВСЯ БД очищена:\n• Позиции\n• История\n• Алерты\n• Статистика")
+        await update.message.reply_text("<b>✅ База данных очищена</b>\n\n• Позиции\n• История\n• Алерты\n• Статистика", parse_mode="HTML")
         logger.info(f"[ADMIN] User {user_id} cleared ALL database")
     else:
         await update.message.reply_text("<b>❌ Ошибка</b>\n\nНеизвестная команда. Используй: on, off, balance AMOUNT, clear", parse_mode="HTML")
@@ -5859,7 +5864,7 @@ async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     
     from hedger import hedger
     
-    await update.message.reply_text("🔄 Проверяю Bybit...")
+    await update.message.reply_text("<b>⏳ Проверяю Bybit...</b>", parse_mode="HTML")
     
     # Проверка настроек
     api_key = os.getenv("BYBIT_API_KEY", "")
@@ -5934,7 +5939,7 @@ async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         status.append(f"❌ Ошибка цены: {e}")
     
-    await update.message.reply_text("🔧 BYBIT TEST\n\n" + "\n".join(status))
+    await update.message.reply_text("<b>🔧 BYBIT TEST</b>\n\n" + "\n".join(status), parse_mode="HTML")
 
 async def test_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест открытия/закрытия хеджа"""
@@ -5944,23 +5949,23 @@ async def test_hedge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
         return
     
-    await update.message.reply_text("⏳ Тестирую хеджирование на BTC...")
+    await update.message.reply_text("<b>⏳ Тестирую хеджирование на BTC...</b>", parse_mode="HTML")
     
     # Пробуем открыть минимальную позицию
     result = await hedge_open(999999, "BTC/USDT", "LONG", 10.0)
     
     if result:
         qty = result.get('qty', 0)
-        await update.message.reply_text(f"✅ Хедж ОТКРЫТ!\nOrder ID: {result.get('order_id')}\nQty: {qty}\n\n⏳ Закрываю через 5 сек...")
+        await update.message.reply_text(f"<b>✅ Хедж открыт</b>\n\nOrder ID: {result.get('order_id')}\nQty: {qty}\n\n⏳ Закрываю через 5 сек...", parse_mode="HTML")
         await asyncio.sleep(5)
         # Тест: закрываем используя qty из открытия
         close_result = await hedge_close(999999, "BTC/USDT", "LONG", qty if qty > 0 else None)
         if close_result:
             await update.message.reply_text("<b>✅ Хедж закрыт</b>", parse_mode="HTML")
         else:
-            await update.message.reply_text("❌ Ошибка закрытия")
+            await update.message.reply_text("<b>❌ Ошибка закрытия</b>", parse_mode="HTML")
     else:
-        await update.message.reply_text("❌ Не удалось открыть хедж. Проверь логи Railway.")
+        await update.message.reply_text("<b>❌ Ошибка</b>\n\nНе удалось открыть хедж. Проверь логи Railway.", parse_mode="HTML")
 
 @rate_limit(max_requests=5, window_seconds=300, action_type="admin_broadcast")
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -5972,7 +5977,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     
     if not context.args:
-        await update.message.reply_text("Использование: /broadcast <сообщение>")
+        await update.message.reply_text("<b>📋 Использование</b>\n\n/broadcast <сообщение>", parse_mode="HTML")
         return
     
     message = " ".join(context.args)
@@ -5985,12 +5990,12 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     for uid in all_users:
         try:
-            await context.bot.send_message(uid, f"📢 {message}")
+            await context.bot.send_message(uid, f"<b>📢 Рассылка</b>\n\n{message}", parse_mode="HTML")
             sent += 1
         except:
             failed += 1
     
-    await update.message.reply_text(f"<b>📢 Рассылка</b>\n\n✅ {sent} | ❌ {failed}", parse_mode="HTML")
+            await update.message.reply_text(f"<b>📢 Рассылка</b>\n\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}", parse_mode="HTML")
 
 async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Сброс: закрыть все позиции и установить баланс"""
@@ -6002,7 +6007,7 @@ async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # /reset [user_id] [balance] или /reset [balance]
     if not context.args:
-        await update.message.reply_text("Использование:\n/reset 1500 — себе\n/reset 123456 1500 — юзеру\n/reset all 0 — всем закрыть позиции")
+        await update.message.reply_text("<b>📋 Использование</b>\n\n/reset 1500 — себе\n/reset 123456 1500 — юзеру\n/reset all 0 — всем закрыть позиции", parse_mode="HTML")
         return
     
     try:
@@ -6010,7 +6015,7 @@ async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             # Закрыть все позиции у всех
             run_sql("DELETE FROM positions")
             positions_cache.clear()
-            await update.message.reply_text("✅ Все позиции закрыты у всех пользователей")
+            await update.message.reply_text("<b>✅ Все позиции закрыты</b>\n\nУ всех пользователей", parse_mode="HTML")
             return
         
         if len(context.args) == 1:
@@ -6030,7 +6035,7 @@ async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if target_id in users_cache:
             users_cache[target_id]['balance'] = balance
         
-        await update.message.reply_text(f"✅ Готово!\n\n👤 User: {target_id}\n💰 Баланс: ${balance:.2f}\n💼 Позиции: закрыты")
+        await update.message.reply_text(f"<b>✅ Готово</b>\n\n👤 User: {target_id}\n💰 Баланс: <b>${balance:.2f}</b>\n📊 Позиции: закрыты", parse_mode="HTML")
         
     except (ValueError, IndexError) as e:
         await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
@@ -6067,7 +6072,7 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         failed_count = 0
         
         if hedging_enabled:
-            await update.message.reply_text("⏳ Закрываю позиции на Bybit...", parse_mode="HTML")
+            await update.message.reply_text("<b>⏳ Закрываю позиции на Bybit...</b>", parse_mode="HTML")
             
             # Получаем все позиции из БД
             all_positions = run_sql("SELECT * FROM positions", fetch="all")
