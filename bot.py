@@ -524,6 +524,46 @@ def db_get_user_stats(user_id: int) -> Dict:
     
     return {'total': total, 'wins': wins, 'losses': losses, 'winrate': winrate, 'total_pnl': total_pnl}
 
+def db_sync_user_profit(user_id: int) -> float:
+    """
+    Синхронизирует total_profit пользователя с суммой PnL из истории.
+    Возвращает новое значение total_profit.
+    """
+    stats = db_get_user_stats(user_id)
+    total_pnl = stats['total_pnl']
+    
+    run_sql("""
+        UPDATE users SET total_profit = ? WHERE id = ?
+    """, (total_pnl, user_id))
+    
+    # Очищаем кэш пользователя
+    users_cache.pop(user_id, None)
+    
+    logger.info(f"[SYNC] User {user_id} total_profit synced to ${total_pnl:.2f}")
+    return total_pnl
+
+def db_sync_all_profits() -> int:
+    """
+    Синхронизирует total_profit для ВСЕХ пользователей с историей сделок.
+    Возвращает количество обновленных пользователей.
+    """
+    # Получаем всех пользователей с историей
+    rows = run_sql("""
+        SELECT DISTINCT user_id FROM history
+    """, fetch="all")
+    
+    if not rows:
+        return 0
+    
+    updated = 0
+    for row in rows:
+        user_id = row['user_id']
+        db_sync_user_profit(user_id)
+        updated += 1
+    
+    logger.info(f"[SYNC] Synced total_profit for {updated} users")
+    return updated
+
 def db_get_real_winrate(min_trades: int = 20) -> Dict:
     """
     Получить РЕАЛЬНЫЙ win rate из истории всех сделок.
@@ -1454,7 +1494,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     wins = stats['wins']
     total_trades = stats['total']
     winrate = stats['winrate']
-    total_profit = user.get('total_profit', 0)
+    total_profit = stats['total_pnl']  # Используем сумму PnL из истории вместо users.total_profit
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
     text = f"""<b>🏠 YULA Меню</b>
@@ -1532,30 +1572,46 @@ async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
+    user_id = update.effective_user.id
     stars_map = {"stars_50": 50, "stars_250": 250, "stars_500": 500, "stars_1250": 1250, "stars_2500": 2500, "stars_5000": 5000}
     stars = stars_map.get(query.data, 50)
     usd = stars // STARS_RATE
+    
+    logger.info(f"[STARS] User {user_id} requested invoice: {stars} stars = ${usd}")
     
     try:
         await query.message.delete()
     except Exception:
         pass
     
-    await context.bot.send_invoice(
-        chat_id=update.effective_user.id,
-        title=f"Пополнение ${usd}",
-        description=f"Пополнение баланса на ${usd}",
-        payload=f"deposit_{usd}",
-        currency="XTR",
-        prices=[LabeledPrice(label=f"${usd}", amount=stars)]
-    )
+    try:
+        await context.bot.send_invoice(
+            chat_id=user_id,
+            title=f"Пополнение ${usd}",
+            description=f"Пополнение баланса на ${usd}",
+            payload=f"deposit_{usd}",
+            currency="XTR",
+            prices=[LabeledPrice(label=f"${usd}", amount=stars)]
+        )
+        logger.info(f"[STARS] Invoice sent successfully to user {user_id}: {stars} stars")
+    except Exception as e:
+        logger.error(f"[STARS] Failed to send invoice to user {user_id}: {e}", exc_info=True)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="<b>❌ Ошибка</b>\n\nНе удалось создать счёт для оплаты Stars.\nПопробуйте позже или используйте другой способ пополнения.",
+            parse_mode="HTML"
+        )
 
 async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.pre_checkout_query
+    user_id = query.from_user.id
+    logger.info(f"[STARS] PreCheckout received from user {user_id}: payload={query.invoice_payload}, amount={query.total_amount}")
     await query.answer(ok=True)
+    logger.info(f"[STARS] PreCheckout approved for user {user_id}")
 
 async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    logger.info(f"[STARS] Successful payment received from user {user_id}")
     
     try:
         user = get_user(user_id)
@@ -1563,6 +1619,8 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         payment = update.message.successful_payment
         stars = payment.total_amount
         usd = stars // STARS_RATE
+        
+        logger.info(f"[STARS] Payment details - user {user_id}: {stars} stars = ${usd}, payload={payment.invoice_payload}")
         
         if usd <= 0:
             logger.error(f"[PAYMENT] User {user_id}: Invalid payment amount {stars} stars")
@@ -2286,17 +2344,32 @@ async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT
                 return True
     
     except Exception as e:
-        logger.error(f"[WITHDRAW] Error: {e}")
+        error_str = str(e).upper()
+        logger.error(f"[WITHDRAW] Error for user {user_id}: {e}")
+        
+        # Определяем понятное сообщение в зависимости от ошибки
+        if "METHOD_DISABLED" in error_str:
+            error_message = "Вывод временно недоступен. Метод transfer отключен в настройках CryptoBot.\n\nОбратитесь к администратору."
+            logger.error(f"[WITHDRAW] METHOD_DISABLED: Transfer method is disabled in CryptoBot settings")
+        elif "INSUFFICIENT" in error_str or "NOT_ENOUGH" in error_str:
+            error_message = "Недостаточно средств на балансе бота для вывода."
+        elif "USER_NOT_FOUND" in error_str:
+            error_message = "Пользователь с таким Telegram ID не найден в CryptoBot."
+        elif "INVALID" in error_str:
+            error_message = "Неверные данные для вывода. Проверьте Telegram ID."
+        else:
+            error_message = f"Произошла ошибка: {e}"
+        
         # Проверяем, что status_msg существует
         if 'status_msg' in locals():
             await status_msg.edit_text(
-                f"<b>❌ Ошибка вывода</b>\n\n{str(e)}",
+                f"<b>❌ Ошибка вывода</b>\n\n{error_message}",
                 parse_mode="HTML"
             )
         else:
             # Если status_msg не был создан, отправляем новое сообщение
             await update.message.reply_text(
-                f"<b>❌ Ошибка вывода</b>\n\n{str(e)}",
+                f"<b>❌ Ошибка вывода</b>\n\n{error_message}",
                 parse_mode="HTML"
             )
     
@@ -2358,7 +2431,7 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 Сделок сегодня: {today_count}/{max_daily}
 Успешность от: {min_wr}%
 
-<i>Бот автоматически входит в сделки по сигналам. Все, что вам нужно — настроить % успешности сделок и ждать, пока YULA войдет в позицию.</i>"""
+<blockquote>Бот автоматически входит в сделки по сигналам. Все, что вам нужно — настроить % успешности сделок и ждать, пока YULA войдет в позицию.</blockquote>"""
     
     keyboard = [
         [InlineKeyboardButton(f"{'❌ Выключить' if auto_enabled else '✅ Включить'}", callback_data="auto_trade_toggle")],
@@ -2984,7 +3057,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     wins = stats['wins']
     total_trades = stats['total']
     winrate = stats['winrate']
-    total_profit = user.get('total_profit', 0)
+    total_profit = stats['total_pnl']  # Используем сумму PnL из истории вместо users.total_profit
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
     logger.info(f"[TRADES] User {user_id}: stats - wins={wins}, total={total_trades}, winrate={winrate}%")
@@ -3068,8 +3141,8 @@ Winrate: <b>{winrate}%</b>
         
         keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=close_data)])
     
-    # Общий профит
-    total_profit = user.get('total_profit', 0)
+    # Общий профит - используем сумму PnL из истории
+    total_profit = stats['total_pnl']
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
     # Баланс и статистика всегда показываются внизу
@@ -5244,6 +5317,29 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     await update.message.reply_text(text, parse_mode="HTML")
 
+async def sync_profits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Синхронизация total_profit всех пользователей с историей сделок (админ)"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    await update.message.reply_text("<b>⏳ Синхронизация профитов...</b>", parse_mode="HTML")
+    
+    try:
+        updated = db_sync_all_profits()
+        await update.message.reply_text(
+            f"<b>✅ Синхронизация завершена</b>\n\nОбновлено пользователей: {updated}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"[SYNC] Error syncing profits: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"<b>❌ Ошибка синхронизации</b>\n\n{str(e)}",
+            parse_mode="HTML"
+        )
+
 async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Статус и вывод комиссий (админ)"""
     admin_id = update.effective_user.id
@@ -6288,6 +6384,7 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("health", health_check))
     app.add_handler(CommandHandler("commission", commission_cmd))
+    app.add_handler(CommandHandler("syncprofits", sync_profits_cmd))
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))

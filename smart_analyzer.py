@@ -242,20 +242,20 @@ class SmartAnalyzer:
         self.cache_ttl = 30  # секунд
         self.state = TradingState()
         
-        # Настройки качества - СБАЛАНСИРОВАННЫЕ (не слишком строго, не слишком мягко)
-        self.MIN_QUALITY = SetupQuality.C  # Минимум C-сетап (A+, A, B, C)
-        self.MIN_RISK_REWARD = 1.5         # Минимальное соотношение R/R 1:1.5 (было 1.3 - слишком низко)
-        self.MIN_CONFIDENCE = 0.50         # Минимальная уверенность 50% (было 0.40 - слишком низко)
+        # Настройки качества - СТРОГИЕ (для высокого winrate)
+        self.MIN_QUALITY = SetupQuality.A  # Минимум A-сетап (только A+ и A)
+        self.MIN_RISK_REWARD = 2.0         # Минимальное соотношение R/R 1:2.0 (строже для лучшего winrate)
+        self.MIN_CONFIDENCE = 0.70         # Минимальная уверенность 70% (строже для качественных сигналов)
         
-        # Динамические пороги R/R по режиму рынка (в сильных трендах можно брать меньший R/R)
+        # Динамические пороги R/R по режиму рынка (строже для лучшего winrate)
         self.RR_THRESHOLDS = {
-            MarketRegime.STRONG_UPTREND: 1.0,      # В сильном тренде R/R 1:1 достаточно
-            MarketRegime.UPTREND: 1.1,             # Снижено с 1.2
-            MarketRegime.RANGING: 1.3,              # Снижено с 1.5
-            MarketRegime.DOWNTREND: 1.1,            # Снижено с 1.2
-            MarketRegime.STRONG_DOWNTREND: 1.0,    # В сильном тренде R/R 1:1 достаточно
-            MarketRegime.HIGH_VOLATILITY: 1.8,     # Высокая волатильность - строже
-            MarketRegime.UNKNOWN: 1.3               # Снижено с 1.5
+            MarketRegime.STRONG_UPTREND: 1.5,      # В сильном тренде R/R минимум 1:1.5
+            MarketRegime.UPTREND: 1.8,             # Обычный тренд - строже
+            MarketRegime.RANGING: 2.5,              # В рейндже требуем высокий R/R
+            MarketRegime.DOWNTREND: 1.8,            # Обычный тренд - строже
+            MarketRegime.STRONG_DOWNTREND: 1.5,    # В сильном тренде R/R минимум 1:1.5
+            MarketRegime.HIGH_VOLATILITY: 2.5,     # Высокая волатильность - очень строго
+            MarketRegime.UNKNOWN: 2.0               # Неизвестный режим - строго
         }
         
         # Торговые сессии (UTC)
