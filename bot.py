@@ -429,7 +429,9 @@ def db_update_user(user_id: int, **kwargs):
 
 def db_get_positions(user_id: int) -> List[Dict]:
     """Получить открытые позиции"""
-    return run_sql("SELECT * FROM positions WHERE user_id = ?", (user_id,), fetch="all")
+    positions = run_sql("SELECT * FROM positions WHERE user_id = ?", (user_id,), fetch="all")
+    logger.debug(f"[DB] User {user_id}: {len(positions)} positions from DB")
+    return positions
 
 def db_add_position(user_id: int, pos: Dict) -> int:
     """Добавить позицию"""
@@ -1377,6 +1379,9 @@ def get_positions(user_id: int) -> List[Dict]:
     if positions is None:
         positions = db_get_positions(user_id)
         positions_cache.set(user_id, positions)
+        logger.debug(f"[CACHE] User {user_id}: loaded {len(positions)} positions from DB into cache")
+    else:
+        logger.debug(f"[CACHE] User {user_id}: {len(positions)} positions from cache")
     return positions
 
 def update_positions_cache(user_id: int, positions: List[Dict]):
@@ -2886,6 +2891,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     user_positions = get_positions(user_id)
     
+    # Логируем количество позиций
+    logger.info(f"[TRADES] User {user_id}: {len(user_positions)} positions from get_positions")
+    
     # Статистика побед - по ВСЕМ сделкам, не только последним 20
     stats = db_get_user_stats(user_id)
     wins = stats['wins']
@@ -2894,12 +2902,19 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     total_profit = user.get('total_profit', 0)
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
+    logger.info(f"[TRADES] User {user_id}: stats - wins={wins}, total={total_trades}, winrate={winrate}%")
+    
     if not user_positions:
-        text = f"""<b>💼 Нет позиций</b>
+        # Показываем статистику даже когда нет позиций
+        text = f"""<b>💼 Нет открытых позиций</b>
 
-{wins}/{total_trades} ({winrate}%)
+📊 Статистика:
+Сделок: <b>{total_trades}</b>
+Побед: <b>{wins}</b>
+Winrate: <b>{winrate}%</b>
 
-💰 Баланс: ${user['balance']:.2f}"""
+💰 Баланс: ${user['balance']:.2f}
+💵 Профит: {profit_str}"""
         
         keyboard = [
             [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
@@ -2912,6 +2927,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     # Стакаем одинаковые позиции для отображения
     stacked = stack_positions(user_positions)
+    logger.info(f"[TRADES] User {user_id}: {len(stacked)} stacked positions after grouping")
     
     text = "<b>💼 Позиции</b>\n\n"
     
@@ -2971,7 +2987,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     total_profit = user.get('total_profit', 0)
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
-    text += f"\n💰 Баланс: ${user['balance']:.2f} | {wins}/{total_trades} ({winrate}%) | {profit_str}"
+    # Статистика всегда показывается внизу
+    text += f"\n\n📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}"
+    text += f"\n💰 Баланс: ${user['balance']:.2f}"
     
     # Кнопка закрыть все (если больше 1 позиции)
     if len(user_positions) > 0:
