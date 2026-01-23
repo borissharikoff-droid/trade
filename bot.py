@@ -1453,7 +1453,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     real_wr = db_get_real_winrate(min_trades=10)
     wr_text = f"{real_wr['winrate']:.1f}%" if real_wr['reliable'] else "~75%"
     
-    text = f"""<b>💰 Баланс</b>
+    text = f"""<b>💰 Главное меню</b>
 
 Торговля: {trading_status}
 Авто-трейд: {auto_trade_status}
@@ -3050,9 +3050,9 @@ Winrate: <b>{winrate}%</b>
         pnl_indicator = "+" if pnl >= 0 else "-"
         text += f"{ticker} | {dir_text} | <b>${pos['amount']:.2f}</b> | x{LEVERAGE}{stack_info} {pnl_indicator}\n"
         text += f"${current:,.2f} → {tp_status}: ${current_tp:,.2f} | SL: ${pos['sl']:,.2f}\n"
-        text += f"PnL: <b>{pnl_str}</b> ({pnl_pct_str})\n"
+        text += f"\nPnL: <b>{pnl_str}</b> ({pnl_pct_str})"
         if realized_pnl != 0:
-            text += f"Реализованный P%L: {realized_pnl_str}\n"
+            text += f" | Реализованный: {realized_pnl_str}"
         text += "\n"
         
         # Для стакнутых позиций передаём все ID через запятую
@@ -3067,9 +3067,11 @@ Winrate: <b>{winrate}%</b>
     total_profit = user.get('total_profit', 0)
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
-    # Статистика всегда показывается внизу
-    text += f"\n\n📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}"
-    text += f"\n💰 Баланс: ${user['balance']:.2f}"
+    # Баланс и статистика всегда показываются внизу
+    if text.endswith("\n"):
+        text = text[:-1]  # Убираем последний \n от позиции
+    text += f"\n\n💰 Баланс: ${user['balance']:.2f}\n"
+    text += f"📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}"
     
     # Кнопка закрыть все (если больше 1 позиции)
     if len(user_positions) > 0:
