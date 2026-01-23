@@ -1455,11 +1455,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     text = f"""<b>💰 Баланс</b>
 
-<b>${balance:.2f}</b>
-
 Торговля: {trading_status}
 Авто-трейд: {auto_trade_status}
-Winrate: {wr_text}"""
+Winrate: {wr_text}
+
+💰 Баланс: <b>${balance:.2f}</b>"""
     
     keyboard = [
         [InlineKeyboardButton(f"{'❌ Выкл' if user['trading'] else '✅ Вкл'}", callback_data="toggle"),
@@ -2039,10 +2039,11 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     text = f"""<b>💸 Вывод средств</b>
 
-💰 Баланс: ${user['balance']:.2f}
 Минимум для вывода: <b>${MIN_WITHDRAW:.2f} USDT</b>
 
-Выбери сумму для вывода:"""
+Выбери сумму для вывода:
+
+💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [
         [InlineKeyboardButton("$10", callback_data="withdraw_10"),
@@ -2108,9 +2109,9 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if amount > available:
                 await query.edit_message_text(
                     f"<b>❌ Ошибка</b>\n\nНедостаточно свободных средств.\n\n"
-                    f"💰 Баланс: ${balance:.2f}\n"
                     f"📊 В позициях: ${total_in_positions:.2f}\n"
-                    f"💵 Доступно: ${available:.2f}",
+                    f"💵 Доступно: ${available:.2f}\n\n"
+                    f"💰 Баланс: ${balance:.2f}",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
                     parse_mode="HTML"
                 )
@@ -2159,10 +2160,11 @@ async def withdraw_custom_handler(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text(
         f"""<b>💸 Своя сумма</b>
 
-💰 Баланс: ${user['balance']:.2f}
 Минимум: <b>${MIN_WITHDRAW:.2f} USDT</b>
 
-Введи сумму для вывода:""",
+Введи сумму для вывода:
+
+💰 Баланс: ${user['balance']:.2f}""",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
         parse_mode="HTML"
     )
@@ -2990,9 +2992,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 Сделок: <b>{total_trades}</b>
 Побед: <b>{wins}</b>
 Winrate: <b>{winrate}%</b>
+💵 Профит: {profit_str}
 
-💰 Баланс: ${user['balance']:.2f}
-💵 Профит: {profit_str}"""
+💰 Баланс: ${user['balance']:.2f}"""
         
         keyboard = [
             [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
@@ -4174,9 +4176,10 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
     text = f"""<b>💵 Своя сумма</b>
 
 Минимум: $1
-💰 Баланс: ${user['balance']:.2f}
 
-Введи сумму:"""
+Введи сумму:
+
+💰 Баланс: ${user['balance']:.2f}"""
 
     keyboard = [
         [InlineKeyboardButton("❌ Отмена", callback_data="skip")],
@@ -4266,8 +4269,8 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     if amount > user['balance']:
         await update.message.reply_text(
             f"<b>❌ Недостаточно средств</b>\n\n"
-            f"💰 Баланс: ${user['balance']:.2f}\n"
-            f"Введи другую сумму:",
+            f"Введи другую сумму:\n\n"
+            f"💰 Баланс: ${user['balance']:.2f}",
             parse_mode="HTML"
         )
         return  # pending_trade сохраняется, можно ввести снова
