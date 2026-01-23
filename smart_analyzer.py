@@ -242,20 +242,20 @@ class SmartAnalyzer:
         self.cache_ttl = 30  # секунд
         self.state = TradingState()
         
-        # Настройки качества - СТРОГИЕ (для высокого winrate)
-        self.MIN_QUALITY = SetupQuality.A  # Минимум A-сетап (только A+ и A)
-        self.MIN_RISK_REWARD = 2.0         # Минимальное соотношение R/R 1:2.0 (строже для лучшего winrate)
-        self.MIN_CONFIDENCE = 0.70         # Минимальная уверенность 70% (строже для качественных сигналов)
+        # Настройки качества - СБАЛАНСИРОВАННЫЕ (больше сделок + меньше выбитых стопов)
+        self.MIN_QUALITY = SetupQuality.B  # Минимум B-сетап (B, A, A+)
+        self.MIN_RISK_REWARD = 1.3         # Минимальное соотношение R/R 1:1.3 (больше возможностей)
+        self.MIN_CONFIDENCE = 0.50         # Минимальная уверенность 50% (больше сделок)
         
-        # Динамические пороги R/R по режиму рынка (строже для лучшего winrate)
+        # Динамические пороги R/R по режиму рынка (сниженные для большего количества сделок)
         self.RR_THRESHOLDS = {
-            MarketRegime.STRONG_UPTREND: 1.5,      # В сильном тренде R/R минимум 1:1.5
-            MarketRegime.UPTREND: 1.8,             # Обычный тренд - строже
-            MarketRegime.RANGING: 2.5,              # В рейндже требуем высокий R/R
-            MarketRegime.DOWNTREND: 1.8,            # Обычный тренд - строже
-            MarketRegime.STRONG_DOWNTREND: 1.5,    # В сильном тренде R/R минимум 1:1.5
-            MarketRegime.HIGH_VOLATILITY: 2.5,     # Высокая волатильность - очень строго
-            MarketRegime.UNKNOWN: 2.0               # Неизвестный режим - строго
+            MarketRegime.STRONG_UPTREND: 1.0,      # В сильном тренде R/R минимум 1:1.0
+            MarketRegime.UPTREND: 1.2,             # Обычный тренд
+            MarketRegime.RANGING: 1.5,              # В рейндже чуть строже
+            MarketRegime.DOWNTREND: 1.2,            # Обычный тренд
+            MarketRegime.STRONG_DOWNTREND: 1.0,    # В сильном тренде R/R минимум 1:1.0
+            MarketRegime.HIGH_VOLATILITY: 1.8,     # Высокая волатильность - строже
+            MarketRegime.UNKNOWN: 1.3               # Неизвестный режим
         }
         
         # Торговые сессии (UTC)
@@ -2097,24 +2097,24 @@ class SmartAnalyzer:
         В сильных трендах используем ATR-based уровни для лучшего R/R
         """
         
-        # Буфер = 0.5 ATR
-        buffer = atr * 0.5
+        # Буфер = 1.0 ATR (увеличен для меньшего количества выбитых стопов)
+        buffer = atr * 1.0
         
         # В сильных трендах используем ATR-based уровни (гарантирует хороший R/R)
         is_strong_trend = market_regime in [MarketRegime.STRONG_UPTREND, MarketRegime.STRONG_DOWNTREND]
         
         if is_strong_trend:
-            # ATR-based уровни для сильных трендов
+            # ATR-based уровни для сильных трендов (расширены для меньшего количества выбитых стопов)
             if direction == "LONG":
-                sl = entry - atr * 1.5      # SL: 1.5 ATR
-                tp1 = entry + atr * 2.0     # TP1: 2 ATR (R/R = 1.33)
-                tp2 = entry + atr * 3.0     # TP2: 3 ATR
-                tp3 = entry + atr * 4.5     # TP3: 4.5 ATR
+                sl = entry - atr * 2.5      # SL: 2.5 ATR (расширен с 1.5)
+                tp1 = entry + atr * 3.5     # TP1: 3.5 ATR (R/R = 1.4)
+                tp2 = entry + atr * 5.0     # TP2: 5 ATR
+                tp3 = entry + atr * 7.0     # TP3: 7 ATR
             else:  # SHORT
-                sl = entry + atr * 1.5      # SL: 1.5 ATR
-                tp1 = entry - atr * 2.0     # TP1: 2 ATR (R/R = 1.33)
-                tp2 = entry - atr * 3.0     # TP2: 3 ATR
-                tp3 = entry - atr * 4.5     # TP3: 4.5 ATR
+                sl = entry + atr * 2.5      # SL: 2.5 ATR (расширен с 1.5)
+                tp1 = entry - atr * 3.5     # TP1: 3.5 ATR (R/R = 1.4)
+                tp2 = entry - atr * 5.0     # TP2: 5 ATR
+                tp3 = entry - atr * 7.0     # TP3: 7 ATR
             
             logger.info(f"[LEVELS] Using ATR-based levels for {market_regime.value}")
         else:
@@ -2125,7 +2125,7 @@ class SmartAnalyzer:
                 if recent_lows:
                     sl = min(recent_lows) - buffer
                 else:
-                    sl = entry - atr * 1.5
+                    sl = entry - atr * 2.0  # Fallback SL расширен с 1.5
                 
                 # TP: ближайшие уровни сопротивления
                 resistances = sorted([l.price for l in key_levels 
@@ -2137,12 +2137,12 @@ class SmartAnalyzer:
                     tp3 = resistances[2]
                 elif len(resistances) >= 1:
                     tp1 = resistances[0]
-                    tp2 = entry + atr * 2.5
-                    tp3 = entry + atr * 4
+                    tp2 = entry + atr * 5.0   # Увеличено с 2.5
+                    tp3 = entry + atr * 7.0   # Увеличено с 4
                 else:
-                    tp1 = entry + atr * 1.5
-                    tp2 = entry + atr * 2.5
-                    tp3 = entry + atr * 4
+                    tp1 = entry + atr * 3.5   # Увеличено с 1.5
+                    tp2 = entry + atr * 5.0   # Увеличено с 2.5
+                    tp3 = entry + atr * 7.0   # Увеличено с 4
                     
             else:  # SHORT
                 # SL: над последним swing high
@@ -2150,7 +2150,7 @@ class SmartAnalyzer:
                 if recent_highs:
                     sl = max(recent_highs) + buffer
                 else:
-                    sl = entry + atr * 1.5
+                    sl = entry + atr * 2.0  # Fallback SL расширен с 1.5
                 
                 # TP: ближайшие уровни поддержки
                 supports = sorted([l.price for l in key_levels 
@@ -2162,15 +2162,15 @@ class SmartAnalyzer:
                     tp3 = supports[2]
                 elif len(supports) >= 1:
                     tp1 = supports[0]
-                    tp2 = entry - atr * 2.5
-                    tp3 = entry - atr * 4
+                    tp2 = entry - atr * 5.0   # Увеличено с 2.5
+                    tp3 = entry - atr * 7.0   # Увеличено с 4
                 else:
-                    tp1 = entry - atr * 1.5
-                    tp2 = entry - atr * 2.5
-                    tp3 = entry - atr * 4
+                    tp1 = entry - atr * 3.5   # Увеличено с 1.5
+                    tp2 = entry - atr * 5.0   # Увеличено с 2.5
+                    tp3 = entry - atr * 7.0   # Увеличено с 4
             
-            # Ограничение максимального расстояния SL (2.5 ATR) для не-трендовых режимов тоже
-            max_sl_distance = atr * 2.5
+            # Ограничение максимального расстояния SL (4.0 ATR) для не-трендовых режимов тоже
+            max_sl_distance = atr * 4.0
             sl_distance = abs(entry - sl)
             if sl_distance > max_sl_distance:
                 old_sl = sl
