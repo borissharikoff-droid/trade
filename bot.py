@@ -3848,16 +3848,23 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     rows = run_sql("SELECT user_id, balance FROM users WHERE balance >= ?", (MIN_DEPOSIT,), fetch="all")
     active_users = [row['user_id'] for row in rows] if rows else []
     
-    # Проверяем авто-трейд
-    has_auto_trade = False
-    auto_balance = 0
-    if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
-        auto_user_check = get_user(AUTO_TRADE_USER_ID)
-        has_auto_trade = auto_user_check.get('auto_trade', False)
-        auto_balance = auto_user_check.get('balance', 0)
+    # Считаем пользователей с включенным авто-трейдом
+    auto_trade_count_row = run_sql(
+        "SELECT COUNT(*) as cnt FROM users WHERE auto_trade = 1 AND balance >= ?",
+        (AUTO_TRADE_MIN_BET,), fetch="one"
+    )
+    auto_trade_users_count = auto_trade_count_row['cnt'] if auto_trade_count_row else 0
+    has_auto_trade = auto_trade_users_count > 0
+    
+    # Баланс для расчёта сетапа (берём максимальный среди авто-трейд юзеров)
+    max_balance_row = run_sql(
+        "SELECT MAX(balance) as max_bal FROM users WHERE auto_trade = 1 AND balance >= ?",
+        (AUTO_TRADE_MIN_BET,), fetch="one"
+    )
+    auto_balance = max_balance_row['max_bal'] if max_balance_row and max_balance_row['max_bal'] else 0
     
     if not active_users and not has_auto_trade:
-        logger.info("[SMART] Нет активных юзеров")
+        logger.info("[SMART] Нет активных юзеров и авто-трейд юзеров")
         return
     
     # Проверяем состояние торговли
@@ -3866,7 +3873,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"[SMART] Торговля на паузе до {trading_state['pause_until']}")
         return
     
-    logger.info(f"[SMART] Активных юзеров: {len(active_users)} (balance>={MIN_DEPOSIT}), Авто-трейд: {'ВКЛ' if has_auto_trade else 'ВЫКЛ'}")
+    logger.info(f"[SMART] Активных юзеров: {len(active_users)}, Авто-трейд юзеров: {auto_trade_users_count}")
     if active_users:
         logger.info(f"[SMART] Активные юзеры: {active_users}")
     logger.info(f"[SMART] Сделок сегодня: {trading_state['daily_trades']}, Убытков подряд: {trading_state['consecutive_losses']}")
@@ -3928,197 +3935,180 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         
         last_signals[symbol] = {'direction': direction, 'price': entry, 'time': now}
         
-        # === АВТО-ТОРГОВЛЯ ===
-        auto_trade_executed = False
+        # === АВТО-ТОРГОВЛЯ ДЛЯ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ ===
+        # Список пользователей, для которых авто-трейд выполнен
+        auto_trade_executed_users = set()
         
-        if has_auto_trade and AUTO_TRADE_USER_ID:
-            auto_user = get_user(AUTO_TRADE_USER_ID)
-            auto_balance = auto_user.get('balance', 0)
+        # Получаем ВСЕХ пользователей с включенным auto_trade
+        all_auto_trade_users = run_sql(
+            "SELECT user_id FROM users WHERE auto_trade = 1 AND balance >= ?",
+            (AUTO_TRADE_MIN_BET,), fetch="all"
+        )
+        
+        logger.info(f"[AUTO_TRADE] Найдено {len(all_auto_trade_users)} пользователей с авто-трейдом")
+        
+        # Проверяем каждого пользователя с auto_trade
+        for auto_user_row in all_auto_trade_users:
+            auto_user_id = auto_user_row['user_id']
             
-            # Проверяем настройки пользователя
-            user_auto_enabled = auto_user.get('auto_trade', False)
-            user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
-            user_max_daily = auto_user.get('auto_trade_max_daily', 20)  # УВЕЛИЧЕНО с 10 до 20
-            user_today_count = auto_user.get('auto_trade_today', 0)
-            
-            # === АДАПТИВНЫЙ MIN_WINRATE на основе режима рынка ===
-            # В сильном тренде снижаем требования, в рейндже повышаем
-            adaptive_winrate_map = {
-                MarketRegime.STRONG_UPTREND: 55,    # В сильном тренде достаточно 55%
-                MarketRegime.STRONG_DOWNTREND: 55,
-                MarketRegime.UPTREND: 60,           # В тренде 60%
-                MarketRegime.DOWNTREND: 60,
-                MarketRegime.RANGING: 70,           # В рейндже строже - 70%
-                MarketRegime.HIGH_VOLATILITY: 75,   # В волатильности ещё строже - 75%
-            }
-            adaptive_min_winrate = adaptive_winrate_map.get(setup.market_regime, user_min_winrate)
-            # Используем минимум из адаптивного и пользовательского
-            effective_min_winrate = min(adaptive_min_winrate, user_min_winrate)
-            
-            logger.info(f"[SMART] Adaptive winrate: {effective_min_winrate}% (regime={setup.market_regime.value}, user={user_min_winrate}%)")
-            
-            # === АДАПТИВНЫЙ MAX_DAILY на основе режима рынка ===
-            adaptive_max_daily_map = {
-                MarketRegime.STRONG_UPTREND: 25,
-                MarketRegime.STRONG_DOWNTREND: 25,
-                MarketRegime.UPTREND: 20,
-                MarketRegime.DOWNTREND: 20,
-                MarketRegime.RANGING: 15,
-                MarketRegime.HIGH_VOLATILITY: 10,
-            }
-            adaptive_max_daily = adaptive_max_daily_map.get(setup.market_regime, user_max_daily)
-            effective_max_daily = max(adaptive_max_daily, user_max_daily)
-            
-            # Сброс счётчика
-            from datetime import date as dt_date
-            today = dt_date.today().isoformat()
-            last_reset = auto_user.get('auto_trade_last_reset')
-            if last_reset != today:
-                user_today_count = 0
-                auto_user['auto_trade_today'] = 0
-                auto_user['auto_trade_last_reset'] = today
-                db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0, auto_trade_last_reset=today)
-            
-            # Проверки с АДАПТИВНЫМИ параметрами
-            skip_reason = None
-            if not user_auto_enabled:
-                skip_reason = "выключен"
-            elif confidence_percent < effective_min_winrate:
-                skip_reason = f"confidence {confidence_percent}% < {effective_min_winrate}% (adaptive)"
-            elif user_today_count >= effective_max_daily:
-                skip_reason = f"лимит {user_today_count}/{effective_max_daily}"
-            elif auto_balance < AUTO_TRADE_MIN_BET:
-                skip_reason = f"баланс ${auto_balance:.0f}"
-            
-            if skip_reason:
-                logger.info(f"[SMART] Авто-трейд пропущен: {skip_reason}")
-            else:
-                # === VALIDATION FOR AUTO-TRADE ===
-                auto_positions = get_positions(AUTO_TRADE_USER_ID)
+            try:
+                auto_user = get_user(auto_user_id)
+                auto_balance = auto_user.get('balance', 0)
                 
-                # Check max positions - ДИНАМИЧЕСКИЙ лимит на основе баланса
+                # Проверяем настройки ЭТОГО пользователя
+                user_auto_enabled = auto_user.get('auto_trade', False)
+                user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
+                user_max_daily = auto_user.get('auto_trade_max_daily', 20)
+                user_today_count = auto_user.get('auto_trade_today', 0)
+                
+                # Сброс счётчика сделок за день
+                from datetime import date as dt_date
+                today = dt_date.today().isoformat()
+                last_reset = auto_user.get('auto_trade_last_reset')
+                if last_reset != today:
+                    user_today_count = 0
+                    auto_user['auto_trade_today'] = 0
+                    auto_user['auto_trade_last_reset'] = today
+                    db_update_user(auto_user_id, auto_trade_today=0, auto_trade_last_reset=today)
+                
+                # === ПРОВЕРКИ ДЛЯ ВХОДА ===
+                skip_reason = None
+                
+                if not user_auto_enabled:
+                    skip_reason = "выключен"
+                elif confidence_percent < user_min_winrate:
+                    skip_reason = f"confidence {confidence_percent}% < {user_min_winrate}%"
+                elif user_today_count >= user_max_daily:
+                    skip_reason = f"лимит сделок {user_today_count}/{user_max_daily}"
+                elif auto_balance < AUTO_TRADE_MIN_BET:
+                    skip_reason = f"баланс ${auto_balance:.0f} < ${AUTO_TRADE_MIN_BET}"
+                
+                if skip_reason:
+                    logger.info(f"[AUTO_TRADE] User {auto_user_id}: пропуск - {skip_reason}")
+                    continue
+                
+                # === ВАЛИДАЦИЯ ===
+                auto_positions = get_positions(auto_user_id)
+                
+                # Лимит позиций
                 dynamic_max_positions = get_max_positions_for_user(auto_balance)
                 if len(auto_positions) >= dynamic_max_positions:
-                    logger.info(f"[SMART] Авто-трейд пропущен: лимит позиций ({len(auto_positions)}/{dynamic_max_positions})")
-                    skip_reason = f"лимит позиций {len(auto_positions)}/{dynamic_max_positions}"
+                    logger.info(f"[AUTO_TRADE] User {auto_user_id}: лимит позиций ({len(auto_positions)}/{dynamic_max_positions})")
+                    continue
                 
-                # Check correlation risk
-                if not skip_reason and ADVANCED_POSITION_MANAGEMENT:
+                # Проверка корреляции
+                if ADVANCED_POSITION_MANAGEMENT:
                     try:
                         is_safe, corr_reason = check_correlation_risk(
                             auto_positions, symbol, direction, auto_balance,
                             correlation_threshold=0.7, max_exposure_percent=30.0
                         )
                         if not is_safe:
-                            logger.info(f"[SMART] Авто-трейд пропущен: корреляция - {corr_reason}")
-                            skip_reason = f"correlation: {corr_reason}"
+                            logger.info(f"[AUTO_TRADE] User {auto_user_id}: корреляция - {corr_reason}")
+                            continue
                     except Exception as e:
-                        logger.warning(f"[SMART] Error checking correlation: {e}")
+                        logger.warning(f"[AUTO_TRADE] User {auto_user_id}: ошибка корреляции: {e}")
                 
-                # Validate symbol
+                # Проверка символа
                 valid, error = validate_symbol(symbol)
                 if not valid:
-                    logger.warning(f"[SMART] Invalid symbol for auto-trade: {symbol}")
-                    skip_reason = f"invalid symbol: {error}"
+                    logger.warning(f"[AUTO_TRADE] User {auto_user_id}: невалидный символ: {error}")
+                    continue
                 
-                if skip_reason:
-                    logger.info(f"[SMART] Авто-трейд пропущен (validation): {skip_reason}")
+                # === РАСЧЁТ СТАВКИ ===
+                loss_streak = db_get_loss_streak(auto_user_id)
+                auto_bet = calculate_smart_bet_size(
+                    balance=auto_balance,
+                    symbol=symbol,
+                    quality=setup.quality,
+                    loss_streak=loss_streak
+                )
                 
-                if not skip_reason:
-                    # === УМНОЕ РАСПРЕДЕЛЕНИЕ КАПИТАЛА v2.0 ===
-                    # Расчёт ставки на основе:
-                    # - Категории монеты (BTC/ETH=20%, Layer1=15%, мемы=6%, etc.)
-                    # - Качества сетапа
-                    # - Серии убытков
+                # Проверяем резерв баланса
+                if auto_balance - auto_bet < MIN_BALANCE_RESERVE:
+                    auto_bet = max(0, auto_balance - MIN_BALANCE_RESERVE)
+                    if auto_bet < AUTO_TRADE_MIN_BET:
+                        logger.info(f"[AUTO_TRADE] User {auto_user_id}: недостаточно с резервом")
+                        continue
+                
+                ticker = symbol.split("/")[0]
+                
+                # === BYBIT ХЕДЖИРОВАНИЕ (только для первого пользователя) ===
+                bybit_qty = 0
+                hedging_enabled = await is_hedging_enabled()
+                bybit_success = True
+                
+                # Bybit хедж открываем только если это первый авто-трейд по этому сигналу
+                # и только для AUTO_TRADE_USER_ID (админ)
+                if hedging_enabled and auto_user_id == AUTO_TRADE_USER_ID and len(auto_trade_executed_users) == 0:
+                    hedge_amount = float(auto_bet * LEVERAGE)
+                    hedge_result = await hedge_open(0, symbol, direction, hedge_amount, 
+                                                   sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
                     
-                    loss_streak = db_get_loss_streak(AUTO_TRADE_USER_ID)
-                    
-                    # Используем умный расчёт размера ставки
-                    auto_bet = calculate_smart_bet_size(
-                        balance=auto_balance,
-                        symbol=symbol,
-                        quality=setup.quality,
-                        loss_streak=loss_streak
-                    )
-                    
-                    coin_category = get_coin_category(symbol)
-                    max_percent = get_max_position_percent(symbol)
-                    logger.info(f"[SMART] Bet calculation: {symbol} ({coin_category}), max={max_percent:.0%}, bet=${auto_bet:.2f}")
-                    
-                    # Ensure minimum balance reserve
-                    if auto_balance - auto_bet < MIN_BALANCE_RESERVE:
-                        auto_bet = max(0, auto_balance - MIN_BALANCE_RESERVE)
-                        if auto_bet < AUTO_TRADE_MIN_BET:
-                            logger.info(f"[SMART] Авто-трейд пропущен: недостаточно для минимальной ставки с резервом")
-                            skip_reason = "недостаточно баланса с учётом резерва"
-                    
-                    ticker = symbol.split("/")[0]
-                    
-                    # === ОТКРЫТИЕ НА BYBIT ===
-                    bybit_qty = 0
-                    hedging_enabled = await is_hedging_enabled()
-                    bybit_success = True
-                    
-                    if hedging_enabled:
-                        hedge_amount = float(auto_bet * LEVERAGE)
-                        hedge_result = await hedge_open(0, symbol, direction, hedge_amount, 
-                                                       sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
+                    if hedge_result:
+                        bybit_qty = hedge_result.get('qty', 0)
+                        logger.info(f"[AUTO_TRADE] ✓ Bybit открыт: qty={bybit_qty}")
                         
-                        if hedge_result:
-                            bybit_qty = hedge_result.get('qty', 0)
-                            logger.info(f"[SMART] ✓ Bybit открыт: qty={bybit_qty}")
-                            
-                            # Верификация
-                            await asyncio.sleep(0.5)
-                            bybit_pos = await hedger.get_position_data(symbol)
-                            if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                                logger.error("[SMART] ❌ Bybit не подтвердил позицию")
-                                bybit_success = False
-                            else:
-                                increment_bybit_opened()
-                        else:
-                            logger.error("[SMART] ❌ Bybit ошибка")
+                        await asyncio.sleep(0.5)
+                        bybit_pos = await hedger.get_position_data(symbol)
+                        if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                            logger.error("[AUTO_TRADE] ❌ Bybit не подтвердил позицию")
                             bybit_success = False
-                    
-                    if bybit_success:
-                        # Комиссия
-                        commission = auto_bet * (COMMISSION_PERCENT / 100)
-                        auto_user['balance'] -= auto_bet
-                        auto_user['balance'] = sanitize_balance(auto_user['balance'])  # Security: ensure valid balance
-                        new_balance = auto_user['balance']
-                        save_user(AUTO_TRADE_USER_ID)
-                        await add_commission(commission, user_id=AUTO_TRADE_USER_ID)
-                        
-                        # Создаём позицию
-                        position = {
-                            'symbol': symbol,
-                            'direction': direction,
-                            'entry': float(entry),
-                            'current': float(entry),
-                            'amount': float(auto_bet),
-                            'tp': float(tp1),
-                            'tp1': float(tp1),
-                            'tp2': float(tp2),
-                            'tp3': float(tp3),
-                            'tp1_hit': False,
-                            'tp2_hit': False,
-                            'sl': float(sl),
-                            'commission': float(commission),
-                            'pnl': float(-commission),
-                            'bybit_qty': bybit_qty,
-                            'original_amount': float(auto_bet)
-                        }
-                        
-                        pos_id = db_add_position(AUTO_TRADE_USER_ID, position)
-                        position['id'] = pos_id
-                        
-                        # Обновляем кэш - загружаем все позиции из БД
-                        positions_cache.set(AUTO_TRADE_USER_ID, db_get_positions(AUTO_TRADE_USER_ID))
-                        
-                        # Уведомление
-                        auto_msg = f"""<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
+                        else:
+                            increment_bybit_opened()
+                    else:
+                        logger.error("[AUTO_TRADE] ❌ Bybit ошибка")
+                        bybit_success = False
+                
+                if not bybit_success and auto_user_id == AUTO_TRADE_USER_ID:
+                    logger.warning(f"[AUTO_TRADE] User {auto_user_id}: Bybit failed, skipping")
+                    continue
+                
+                # === ОТКРЫТИЕ ПОЗИЦИИ ===
+                commission = auto_bet * (COMMISSION_PERCENT / 100)
+                
+                # Обновляем баланс
+                async with get_user_lock(auto_user_id):
+                    auto_user = get_user(auto_user_id)
+                    auto_user['balance'] -= auto_bet
+                    auto_user['balance'] = sanitize_balance(auto_user['balance'])
+                    new_balance = auto_user['balance']
+                    save_user(auto_user_id)
+                
+                await add_commission(commission, user_id=auto_user_id)
+                
+                # Создаём позицию
+                position = {
+                    'symbol': symbol,
+                    'direction': direction,
+                    'entry': float(entry),
+                    'current': float(entry),
+                    'amount': float(auto_bet),
+                    'tp': float(tp1),
+                    'tp1': float(tp1),
+                    'tp2': float(tp2),
+                    'tp3': float(tp3),
+                    'tp1_hit': False,
+                    'tp2_hit': False,
+                    'sl': float(sl),
+                    'commission': float(commission),
+                    'pnl': float(-commission),
+                    'bybit_qty': bybit_qty if auto_user_id == AUTO_TRADE_USER_ID else 0,
+                    'original_amount': float(auto_bet)
+                }
+                
+                pos_id = db_add_position(auto_user_id, position)
+                position['id'] = pos_id
+                
+                # Обновляем кэш
+                positions_cache.set(auto_user_id, db_get_positions(auto_user_id))
+                
+                # Отправляем уведомление
+                auto_msg = f"""<b>🤖 АВТО-ТРЕЙД</b>
 
-<b>${auto_bet:.2f}</b> открыто
+<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
+
+<b>${auto_bet:.2f}</b> открыто автоматически
 
 Вход: <b>${entry:,.2f}</b>
 
@@ -4130,29 +4120,36 @@ SL: ${sl:,.2f} (-{sl_percent:.1f}%)
 R/R: 1:{setup.risk_reward:.1f}
 
 💰 Баланс: ${new_balance:.2f}"""
-                        
-                        auto_keyboard = InlineKeyboardMarkup([
-                            [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
-                             InlineKeyboardButton("📊 Сделки", callback_data="trades")]
-                        ])
-                        
-                        try:
-                            await context.bot.send_message(AUTO_TRADE_USER_ID, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
-                            logger.info(f"[SMART] ✅ Авто-сделка отправлена: {direction} {ticker} ${auto_bet:.2f} пользователю {AUTO_TRADE_USER_ID}")
-                            auto_trade_executed = True
-                        except Exception as e:
-                            logger.error(f"[SMART] ❌ Ошибка отправки авто-сделки пользователю {AUTO_TRADE_USER_ID}: {e}")
-                            auto_trade_executed = True  # Все равно помечаем как выполненную, чтобы не дублировать
-                        
-                        # Обновляем счётчики
-                        auto_user['auto_trade_today'] = user_today_count + 1
-                        db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=user_today_count + 1)
+                
+                auto_keyboard = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=f"close_symbol|{symbol}"),
+                     InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                ])
+                
+                try:
+                    await context.bot.send_message(auto_user_id, auto_msg, parse_mode="HTML", reply_markup=auto_keyboard)
+                    logger.info(f"[AUTO_TRADE] ✅ User {auto_user_id}: {direction} {ticker} ${auto_bet:.2f}")
+                    auto_trade_executed_users.add(auto_user_id)
+                except Exception as e:
+                    logger.error(f"[AUTO_TRADE] ❌ User {auto_user_id}: ошибка отправки: {e}")
+                    auto_trade_executed_users.add(auto_user_id)  # Всё равно помечаем
+                
+                # Обновляем счётчик сделок
+                auto_user['auto_trade_today'] = user_today_count + 1
+                db_update_user(auto_user_id, auto_trade_today=user_today_count + 1)
+                
+            except Exception as e:
+                logger.error(f"[AUTO_TRADE] User {auto_user_id}: критическая ошибка: {e}")
+                continue
         
-        # === ОТПРАВКА АКТИВНЫМ ЮЗЕРАМ ===
-        signal_sent_to_users = False  # Флаг что сигнал был отправлен хотя бы одному пользователю
+        logger.info(f"[AUTO_TRADE] Выполнено для {len(auto_trade_executed_users)} пользователей")
+        
+        # === ОТПРАВКА СИГНАЛОВ ОСТАЛЬНЫМ ЮЗЕРАМ ===
+        signal_sent_to_users = False
         
         for user_id in active_users:
-            if user_id == AUTO_TRADE_USER_ID and auto_trade_executed:
+            # Пропускаем тех, для кого авто-трейд уже выполнен
+            if user_id in auto_trade_executed_users:
                 continue
             
             user = get_user(user_id)
@@ -4168,31 +4165,13 @@ R/R: 1:{setup.risk_reward:.1f}
             ticker = symbol.split("/")[0]
             d = 'L' if direction == "LONG" else 'S'
             
-            # Если ручной трейд выключен, отправляем только уведомление об автотрейде (если он зашел)
+            # Если ручной трейд выключен - пропускаем (авто-трейд уже обработан выше)
             if not trading_enabled:
-                if auto_trade_executed:
-                    # Отправляем уведомление о том, что автотрейд зашел в сделку
-                    notification_text = f"""<b>🤖 Авто-трейд зашел в сделку</b>
-
-<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
-
-Вход: <b>${entry:,.2f}</b>
-
-TP1: ${tp1:,.2f} (<b>+{tp1_percent:.1f}%</b>) — 50%
-TP2: ${tp2:,.2f} (+{tp2_percent:.1f}%) — 30%
-TP3: ${tp3:,.2f} (+{tp3_percent:.1f}%) — 20%
-SL: ${sl:,.2f} (-{sl_percent:.1f}%)
-
-R/R: 1:{setup.risk_reward:.1f}
-
-<i>Ручной трейд выключен. Включите его, чтобы получать сигналы для входа.</i>"""
-                    
-                    try:
-                        await context.bot.send_message(user_id, notification_text, parse_mode="HTML")
-                        logger.info(f"[SMART] ✅ Уведомление об автотрейде отправлено пользователю {user_id}")
-                    except Exception as e:
-                        logger.error(f"[SMART] ❌ Ошибка отправки уведомления пользователю {user_id}: {e}")
-                continue  # Пропускаем отправку сигнала для входа
+                # Если для этого пользователя авто-трейд сработал - уже получил уведомление
+                if user_id in auto_trade_executed_users:
+                    continue
+                # Если авто-трейд не сработал, но trading выключен - просто пропускаем
+                continue
             
             # Если ручной трейд включен - отправляем обычный сигнал для входа
             text = f"""<b>📡 {confidence_percent}%</b> | {ticker} | {direction} | x{LEVERAGE}
@@ -4242,7 +4221,7 @@ R/R: 1:{setup.risk_reward:.1f}
                 logger.error(f"[SMART] ❌ Ошибка отправки пользователю {user_id}: {e}")
         
         # Увеличиваем accepted один раз на сигнал, если он был отправлен пользователям или открыт через автотрейд
-        if signal_sent_to_users or auto_trade_executed:
+        if signal_sent_to_users or len(auto_trade_executed_users) > 0:
             increment_accepted()
     
     except Exception as e:
@@ -7219,7 +7198,8 @@ def main() -> None:
     logger.info("=" * 50)
     logger.info(f"[CONFIG] Database: {'PostgreSQL' if USE_POSTGRES else 'SQLite'}")
     logger.info(f"[CONFIG] Admin IDs: {ADMIN_IDS if ADMIN_IDS else 'Not configured'}")
-    logger.info(f"[CONFIG] Auto-trade user: {AUTO_TRADE_USER_ID if AUTO_TRADE_USER_ID else 'Not configured'}")
+    logger.info(f"[CONFIG] Bybit hedge user: {AUTO_TRADE_USER_ID if AUTO_TRADE_USER_ID else 'Not configured'}")
+    logger.info(f"[CONFIG] Auto-trade: Enabled for ALL users with auto_trade=1")
     logger.info(f"[CONFIG] Commission: {COMMISSION_PERCENT}%")
     logger.info(f"[CONFIG] Leverage: x{LEVERAGE}")
     logger.info(f"[CONFIG] Min deposit: ${MIN_DEPOSIT}")
