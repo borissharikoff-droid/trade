@@ -339,6 +339,16 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 expires_at TIMESTAMP
             )''')
+            # Таблица для отслеживания реферальных начислений
+            c.execute('''CREATE TABLE IF NOT EXISTS referral_earnings (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                from_user_id BIGINT NOT NULL,
+                amount REAL NOT NULL,
+                level INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
         else:
             c.execute('''CREATE TABLE IF NOT EXISTS system_settings (
                 key TEXT PRIMARY KEY,
@@ -352,8 +362,18 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 expires_at TEXT
             )''')
+            # Таблица для отслеживания реферальных начислений
+            c.execute('''CREATE TABLE IF NOT EXISTS referral_earnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                from_user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                level INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )''')
         conn.commit()
-        logger.info("[DB] Migration: system_settings and pending_invoices tables ensured")
+        logger.info("[DB] Migration: system_settings, pending_invoices, referral_earnings tables ensured")
     except Exception as e:
         logger.warning(f"[DB] Migration warning (system_settings): {e}")
     
@@ -367,6 +387,9 @@ def init_db():
             c.execute("CREATE INDEX IF NOT EXISTS idx_history_closed_at ON history(closed_at)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON alerts(triggered)")
+            # Indexes for referral_earnings
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ref_earn_user ON referral_earnings(user_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ref_earn_from ON referral_earnings(from_user_id)")
         else:
             # SQLite indexes
             c.execute("CREATE INDEX IF NOT EXISTS idx_positions_user_id ON positions(user_id)")
@@ -375,6 +398,9 @@ def init_db():
             c.execute("CREATE INDEX IF NOT EXISTS idx_history_closed_at ON history(closed_at)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON alerts(triggered)")
+            # Indexes for referral_earnings
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ref_earn_user ON referral_earnings(user_id)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_ref_earn_from ON referral_earnings(from_user_id)")
         conn.commit()
         logger.info("[DB] Indexes created/verified")
     except Exception as e:
@@ -683,34 +709,114 @@ REFERRAL_COMMISSION_LEVELS = [
 ]
 MAX_REFERRAL_LEVELS = len(REFERRAL_COMMISSION_LEVELS)  # Максимум уровней
 
+# ==================== РАСШИРЕННЫЕ ФУНКЦИИ РЕФЕРАЛЬНОЙ СИСТЕМЫ ====================
+
+def db_save_referral_earning(user_id: int, from_user_id: int, amount: float, level: int, source: str):
+    """Сохранить запись о реферальном заработке"""
+    if USE_POSTGRES:
+        run_sql("""
+            INSERT INTO referral_earnings (user_id, from_user_id, amount, level, source, created_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (user_id, from_user_id, amount, level, source))
+    else:
+        run_sql("""
+            INSERT INTO referral_earnings (user_id, from_user_id, amount, level, source, created_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """, (user_id, from_user_id, amount, level, source))
+    logger.info(f"[REF_EARN] Saved: user {user_id} earned ${amount:.2f} from {from_user_id} (level {level}, source: {source})")
+
 def db_get_referral_commission_earned(user_id: int) -> float:
     """
-    Подсчитать сколько комиссий заработано с рефералов
-    Считает на основе истории сделок всех рефералов
+    Получить общую сумму заработка с рефералов из таблицы referral_earnings
     """
-    # Получаем всех рефералов пользователя
-    referrals = run_sql("SELECT user_id FROM users WHERE referrer_id = ?", (user_id,), fetch="all")
-    if not referrals:
-        return 0.0
+    row = run_sql("SELECT COALESCE(SUM(amount), 0) as total FROM referral_earnings WHERE user_id = ?", (user_id,), fetch="one")
+    return round(row['total'] if row else 0.0, 2)
+
+def db_get_referral_earnings_by_level(user_id: int) -> Dict[int, float]:
+    """
+    Получить заработок по каждому уровню реферальной системы
+    """
+    rows = run_sql("""
+        SELECT level, COALESCE(SUM(amount), 0) as total 
+        FROM referral_earnings 
+        WHERE user_id = ?
+        GROUP BY level
+        ORDER BY level
+    """, (user_id,), fetch="all")
     
-    total_earned = 0.0
+    result = {1: 0.0, 2: 0.0, 3: 0.0}
+    for row in rows:
+        level = row.get('level', 1)
+        if 1 <= level <= 3:
+            result[level] = round(row['total'], 2)
+    return result
+
+def db_get_referrals_list(user_id: int, level: int = 1) -> List[Dict]:
+    """
+    Получить список рефералов пользователя с их статистикой
+    level=1: прямые рефералы
+    """
+    if level == 1:
+        # Прямые рефералы
+        referrals = run_sql("""
+            SELECT u.user_id, u.balance, u.total_deposit,
+                   COALESCE((SELECT SUM(amount) FROM referral_earnings WHERE user_id = ? AND from_user_id = u.user_id), 0) as earned
+            FROM users u
+            WHERE u.referrer_id = ?
+            ORDER BY u.total_deposit DESC
+        """, (user_id, user_id), fetch="all")
+    else:
+        # Для уровней 2 и 3 - сложнее, пока возвращаем пустой список
+        referrals = []
     
-    # Для каждого реферала считаем его комиссии
-    for ref in referrals:
+    return referrals
+
+def db_get_referrals_stats(user_id: int) -> Dict:
+    """
+    Получить полную статистику реферальной программы пользователя
+    """
+    # Количество рефералов по уровням
+    level1_count = db_get_referrals_count(user_id)
+    
+    # Рефералы 2-го уровня (рефералы моих рефералов)
+    level1_refs = run_sql("SELECT user_id FROM users WHERE referrer_id = ?", (user_id,), fetch="all")
+    level2_count = 0
+    level3_count = 0
+    
+    for ref in level1_refs:
         ref_id = ref['user_id']
+        # Рефералы моего реферала = уровень 2
+        level2_refs = run_sql("SELECT user_id FROM users WHERE referrer_id = ?", (ref_id,), fetch="all")
+        level2_count += len(level2_refs)
         
-        # Получаем все сделки реферала из истории
-        ref_trades = run_sql("SELECT commission FROM history WHERE user_id = ?", (ref_id,), fetch="all")
-        
-        for trade in ref_trades:
-            commission = trade.get('commission', 0) or 0
-            if commission > 0:
-                # Уровень 1 получает REFERRAL_COMMISSION_LEVELS[0]% от комиссии
-                level_percent = REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0
-                earned = commission * (level_percent / 100)
-                total_earned += earned
+        # Рефералы уровня 3
+        for ref2 in level2_refs:
+            ref2_id = ref2['user_id']
+            level3_refs_count = run_sql("SELECT COUNT(*) as cnt FROM users WHERE referrer_id = ?", (ref2_id,), fetch="one")
+            level3_count += level3_refs_count['cnt'] if level3_refs_count else 0
     
-    return round(total_earned, 2)
+    # Заработок по уровням
+    earnings_by_level = db_get_referral_earnings_by_level(user_id)
+    total_earned = sum(earnings_by_level.values())
+    
+    # Общий депозит рефералов (только уровень 1)
+    total_referral_deposits = run_sql("""
+        SELECT COALESCE(SUM(total_deposit), 0) as total 
+        FROM users 
+        WHERE referrer_id = ?
+    """, (user_id,), fetch="one")
+    
+    return {
+        'level1_count': level1_count,
+        'level2_count': level2_count,
+        'level3_count': level3_count,
+        'total_count': level1_count + level2_count + level3_count,
+        'earnings_level1': earnings_by_level.get(1, 0.0),
+        'earnings_level2': earnings_by_level.get(2, 0.0),
+        'earnings_level3': earnings_by_level.get(3, 0.0),
+        'total_earned': round(total_earned, 2),
+        'referral_deposits': round(total_referral_deposits['total'] if total_referral_deposits else 0, 2)
+    }
 
 def db_get_referrer_chain(user_id: int, max_levels: int = MAX_REFERRAL_LEVELS) -> List[int]:
     """
@@ -788,10 +894,16 @@ def db_increment_daily_referral_bonus(referrer_id: int):
     current = db_get_daily_referral_bonus_count(referrer_id)
     db_set_setting(key, str(current + 1))
 
-def db_add_referral_bonus(referrer_id: int, amount: float, from_user_id: int = 0) -> bool:
+def db_add_referral_bonus(referrer_id: int, amount: float, from_user_id: int = 0, level: int = 1) -> bool:
     """
     Добавить реферальный бонус с защитой от злоупотреблений
     Returns: True if bonus was added, False if blocked
+    
+    Args:
+        referrer_id: ID реферера
+        amount: Сумма бонуса
+        from_user_id: ID пользователя, который принёс бонус
+        level: Уровень реферала (1, 2 или 3)
     """
     # Check if bonus already given for this user
     if from_user_id and db_check_referral_bonus_given(referrer_id, from_user_id):
@@ -811,13 +923,104 @@ def db_add_referral_bonus(referrer_id: int, amount: float, from_user_id: int = 0
     if referrer_id in users_cache:
         users_cache[referrer_id]['balance'] = sanitize_balance(users_cache[referrer_id]['balance'] + amount)
     
+    # СОХРАНЯЕМ запись о заработке в таблицу referral_earnings
+    if from_user_id:
+        db_save_referral_earning(
+            user_id=referrer_id,
+            from_user_id=from_user_id,
+            amount=amount,
+            level=level,
+            source='first_deposit_bonus'
+        )
+    
     # Mark as given
     if from_user_id:
         db_mark_referral_bonus_given(referrer_id, from_user_id)
     db_increment_daily_referral_bonus(referrer_id)
     
-    logger.info(f"[REF] Bonus ${amount} added to {referrer_id} (from user {from_user_id})")
+    logger.info(f"[REF] Bonus ${amount} added to {referrer_id} (from user {from_user_id}, level {level})")
     return True
+
+async def process_multilevel_deposit_bonus(user_id: int, bot=None) -> List[Dict]:
+    """
+    Обработать многоуровневые бонусы при первом депозите пользователя.
+    Начисляет бонусы всем рефералам в цепочке (3 уровня).
+    
+    Args:
+        user_id: ID пользователя, который сделал депозит
+        bot: Telegram bot instance для отправки уведомлений
+    
+    Returns:
+        Список начисленных бонусов [{referrer_id, amount, level}]
+    """
+    bonuses_given = []
+    
+    # Получаем цепочку рефералов
+    referrer_chain = db_get_referrer_chain(user_id, MAX_REFERRAL_LEVELS)
+    
+    if not referrer_chain:
+        logger.info(f"[REF_DEPOSIT] No referrer chain for user {user_id}")
+        return bonuses_given
+    
+    logger.info(f"[REF_DEPOSIT] Processing deposit bonus for user {user_id}, chain: {referrer_chain}")
+    
+    # Начисляем бонусы по уровням
+    for level, referrer_id in enumerate(referrer_chain):
+        if level >= len(REFERRAL_BONUS_LEVELS):
+            break
+        
+        bonus_amount = REFERRAL_BONUS_LEVELS[level]
+        
+        if bonus_amount > 0:
+            # Для уровня 1 используем стандартную проверку на дубликаты
+            # Для уровней 2 и 3 - проверяем отдельно
+            bonus_key = f"deposit_bonus_l{level+1}_{referrer_id}_{user_id}"
+            if db_get_setting(bonus_key) == "1":
+                logger.info(f"[REF_DEPOSIT] Skipping duplicate bonus for level {level+1}")
+                continue
+            
+            # Начисляем бонус
+            run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (bonus_amount, referrer_id))
+            
+            # Обновляем кэш
+            if referrer_id in users_cache:
+                users_cache[referrer_id]['balance'] = sanitize_balance(users_cache[referrer_id]['balance'] + bonus_amount)
+            
+            # Сохраняем в referral_earnings
+            db_save_referral_earning(
+                user_id=referrer_id,
+                from_user_id=user_id,
+                amount=bonus_amount,
+                level=level + 1,
+                source='first_deposit_bonus'
+            )
+            
+            # Помечаем как выплаченный
+            db_set_setting(bonus_key, "1")
+            
+            bonuses_given.append({
+                'referrer_id': referrer_id,
+                'amount': bonus_amount,
+                'level': level + 1
+            })
+            
+            logger.info(f"[REF_DEPOSIT] Level {level+1}: ${bonus_amount} to user {referrer_id}")
+            
+            # Отправляем уведомление
+            if bot:
+                try:
+                    level_text = f"(уровень {level+1})" if level > 0 else ""
+                    await bot.send_message(
+                        referrer_id,
+                        f"<b>📥 Реферальный бонус {level_text}</b>\n\n"
+                        f"Ваш реферал сделал первый депозит!\n"
+                        f"Бонус: <b>+${bonus_amount:.2f}</b>",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.warning(f"[REF_DEPOSIT] Failed to notify {referrer_id}: {e}")
+    
+    return bonuses_given
 
 # ==================== АЛЕРТЫ ====================
 def db_add_alert(user_id: int, symbol: str, target_price: float, direction: str) -> int:
@@ -862,7 +1065,8 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 # Configure rate limiter after ADMIN_IDS is defined
 configure_rate_limiter(run_sql, USE_POSTGRES, ADMIN_IDS)
-REFERRAL_BONUS = 5.0  # $5 бонус рефереру при депозите
+REFERRAL_BONUS = 5.0  # $5 бонус рефереру уровня 1 при депозите
+REFERRAL_BONUS_LEVELS = [5.0, 2.0, 1.0]  # Бонусы за депозит: уровень 1 = $5, уровень 2 = $2, уровень 3 = $1
 COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
 
 # Многоуровневая реферальная система - проценты от комиссии для каждого уровня
@@ -1051,14 +1255,175 @@ async def get_recent_audit_logs(limit: int = 20) -> list:
     return logs
 
 # ==================== SECURITY LIMITS ====================
-MAX_POSITIONS_PER_USER = 5  # Maximum open positions per user (снижено с 10)
+# Базовое значение - увеличено с 5 до 8
+MAX_POSITIONS_PER_USER = 8  # Maximum open positions per user (увеличено для большего количества возможностей)
 MIN_BALANCE_RESERVE = 5.0    # Minimum balance to keep after trade
 MAX_SINGLE_TRADE = 10000.0   # Maximum single trade amount
 MAX_BALANCE = 1000000.0      # Maximum user balance (sanity check)
 
-# Allowed trading symbols (whitelist) - РАСШИРЕННЫЙ СПИСОК
+def get_max_positions_for_user(balance: float) -> int:
+    """
+    Динамическое определение максимального количества позиций на основе баланса
+    
+    Логика:
+    - Баланс < $100: максимум 3 позиции (меньше риска при малом капитале)
+    - Баланс $100-500: максимум 5 позиций
+    - Баланс $500-1000: максимум 8 позиций
+    - Баланс $1000-5000: максимум 10 позиций
+    - Баланс > $5000: максимум 12 позиций
+    
+    Это позволяет:
+    - Защитить мелкие аккаунты от чрезмерной диверсификации
+    - Дать крупным аккаунтам больше возможностей
+    """
+    if balance < 100:
+        return 3
+    elif balance < 500:
+        return 5
+    elif balance < 1000:
+        return 8
+    elif balance < 5000:
+        return 10
+    else:
+        return 12  # Максимум для крупных аккаунтов
+
+
+# === УМНОЕ РАСПРЕДЕЛЕНИЕ КАПИТАЛА v2.0 ===
+# Категории монет для определения максимального размера позиции
+COIN_CATEGORY_MAP = {
+    # Топ-монеты (высокая ликвидность, низкий риск) - до 20% баланса
+    'major': ['BTC', 'ETH'],
+    
+    # Layer 1 (хорошая ликвидность) - до 15% баланса
+    'layer1': ['SOL', 'BNB', 'XRP', 'AVAX', 'NEAR', 'APT', 'SUI', 'SEI', 'TON', 'INJ', 
+               'ATOM', 'DOT', 'ADA', 'TRX', 'LTC'],
+    
+    # Layer 2 (средняя ликвидность) - до 12% баланса
+    'layer2': ['ARB', 'OP', 'STRK', 'ZK', 'MATIC', 'POL', 'MANTA', 'METIS', 'IMX'],
+    
+    # DeFi - до 10% баланса
+    'defi': ['UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'PENDLE', 'GMX', 'DYDX', 'SNX', 
+             'COMP', 'SUSHI', '1INCH', 'LINK'],
+    
+    # AI/Data - до 10% баланса
+    'ai': ['FET', 'RNDR', 'TAO', 'WLD', 'ARKM', 'AGIX', 'OCEAN', 'GRT', 'FIL', 'AR'],
+    
+    # Gaming/NFT - до 8% баланса
+    'gaming': ['GALA', 'AXS', 'SAND', 'MANA', 'PIXEL', 'SUPER', 'MAGIC', 'BLUR', 'IMX'],
+    
+    # Мемы (высокая волатильность) - до 6% баланса
+    'memes': ['DOGE', 'PEPE', 'SHIB', 'FLOKI', 'BONK', 'WIF', 'MEME', 'TURBO', 
+              'NEIRO', 'POPCAT', 'MOG', 'BRETT', 'BOME', 'MYRO', 'SLERF'],
+    
+    # Новые листинги (высокий риск) - до 5% баланса
+    'new': ['JUP', 'ENA', 'W', 'ETHFI', 'AEVO', 'PORTAL', 'DYM', 'ALT', 'PYTH']
+}
+
+# Максимальные проценты от баланса для каждой категории
+CATEGORY_MAX_PERCENT = {
+    'major': 0.20,    # 20% для BTC/ETH
+    'layer1': 0.15,   # 15% для Layer 1
+    'layer2': 0.12,   # 12% для Layer 2
+    'defi': 0.10,     # 10% для DeFi
+    'ai': 0.10,       # 10% для AI
+    'gaming': 0.08,   # 8% для Gaming
+    'memes': 0.06,    # 6% для мемов
+    'new': 0.05,      # 5% для новых листингов
+    'unknown': 0.08   # 8% для неизвестных
+}
+
+def get_coin_category(symbol: str) -> str:
+    """
+    Определить категорию монеты
+    
+    Args:
+        symbol: Символ (например, "BTC/USDT" или "BTC")
+    
+    Returns:
+        Категория ('major', 'layer1', 'memes', etc.)
+    """
+    # Извлекаем базовый символ
+    base = symbol.split('/')[0].upper() if '/' in symbol else symbol.replace('USDT', '').upper()
+    
+    for category, coins in COIN_CATEGORY_MAP.items():
+        if base in coins:
+            return category
+    
+    return 'unknown'
+
+
+def get_max_position_percent(symbol: str) -> float:
+    """
+    Получить максимальный процент от баланса для позиции
+    
+    Args:
+        symbol: Символ монеты
+    
+    Returns:
+        Максимальный процент (0.05 - 0.20)
+    """
+    category = get_coin_category(symbol)
+    return CATEGORY_MAX_PERCENT.get(category, 0.08)
+
+
+def calculate_smart_bet_size(balance: float, symbol: str, quality: 'SetupQuality', 
+                            loss_streak: int = 0) -> float:
+    """
+    Рассчитать умный размер ставки на основе:
+    - Категории монеты
+    - Качества сетапа
+    - Серии убытков
+    - Баланса пользователя
+    
+    Args:
+        balance: Баланс пользователя
+        symbol: Символ монеты
+        quality: Качество сетапа
+        loss_streak: Количество убытков подряд
+    
+    Returns:
+        Размер ставки в USD
+    """
+    # Базовый процент по категории монеты
+    max_percent = get_max_position_percent(symbol)
+    
+    # Множитель по качеству сетапа
+    quality_mult = {
+        SetupQuality.A_PLUS: 1.0,   # 100% от макс. процента
+        SetupQuality.A: 0.85,       # 85% от макс. процента
+        SetupQuality.B: 0.70,       # 70% от макс. процента
+        SetupQuality.C: 0.50,       # 50% от макс. процента
+        SetupQuality.D: 0.30        # 30% от макс. процента
+    }.get(quality, 0.60)
+    
+    # Множитель по серии убытков
+    loss_mult = 1.0
+    if loss_streak >= 4:
+        loss_mult = 0.40  # -60% после 4+ убытков
+    elif loss_streak >= 3:
+        loss_mult = 0.50  # -50% после 3 убытков
+    elif loss_streak >= 2:
+        loss_mult = 0.75  # -25% после 2 убытков
+    
+    # Рассчитываем размер ставки
+    bet_size = balance * max_percent * quality_mult * loss_mult
+    
+    # Применяем ограничения
+    bet_size = max(AUTO_TRADE_MIN_BET, bet_size)  # Минимум $10
+    bet_size = min(AUTO_TRADE_MAX_BET, bet_size)  # Максимум $500
+    bet_size = min(bet_size, balance * 0.20)      # Не более 20% баланса в любом случае
+    bet_size = min(bet_size, balance - MIN_BALANCE_RESERVE)  # Оставляем резерв
+    
+    category = get_coin_category(symbol)
+    logger.info(f"[SMART_BET] {symbol} ({category}): bet=${bet_size:.2f} (max={max_percent:.0%}, quality={quality_mult:.0%}, loss={loss_mult:.0%})")
+    
+    return bet_size
+
+
+# === ДИНАМИЧЕСКИЙ WHITELIST v2.0 ===
+# Статический список как fallback + динамическая проверка
 ALLOWED_SYMBOLS = {
-    # === ОСНОВНЫЕ ===
+    # === ОСНОВНЫЕ (всегда разрешены) ===
     'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
     
     # === LAYER 1 ===
@@ -1098,6 +1463,89 @@ ALLOWED_SYMBOLS = {
     'ETC/USDT', 'XLM/USDT', 'VET/USDT', 'THETA/USDT', 'EGLD/USDT'
 }
 
+# Кэш для динамически проверенных символов
+# {symbol: {'valid': bool, 'turnover': float, 'checked_at': datetime}}
+_dynamic_symbol_cache: Dict[str, Dict] = {}
+_DYNAMIC_CACHE_TTL = 3600  # 1 час
+_MIN_TURNOVER_FOR_DYNAMIC = 10_000_000  # $10M минимальный оборот
+
+async def check_symbol_dynamically(symbol: str) -> tuple:
+    """
+    Динамическая проверка символа через Bybit API
+    
+    Проверяет:
+    - Оборот >$10M за 24ч
+    - Символ торгуется на Bybit Linear
+    - Не стейблкоин
+    
+    Returns: (is_valid: bool, error_message: str or None, turnover: float)
+    """
+    global _dynamic_symbol_cache
+    
+    # Проверяем кэш
+    cached = _dynamic_symbol_cache.get(symbol)
+    if cached:
+        cache_age = (datetime.now() - cached['checked_at']).total_seconds()
+        if cache_age < _DYNAMIC_CACHE_TTL:
+            return cached['valid'], cached.get('error'), cached.get('turnover', 0)
+    
+    try:
+        import aiohttp
+        
+        # Конвертируем символ в формат Bybit
+        bybit_symbol = symbol.replace('/', '')
+        
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={bybit_symbol}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    # API недоступен - используем статический список
+                    return symbol in ALLOWED_SYMBOLS, None, 0
+                
+                data = await resp.json()
+        
+        if data.get('retCode') != 0:
+            return symbol in ALLOWED_SYMBOLS, None, 0
+        
+        tickers = data.get('result', {}).get('list', [])
+        if not tickers:
+            # Символ не найден на Bybit
+            _dynamic_symbol_cache[symbol] = {
+                'valid': False,
+                'error': f"Symbol {symbol} not found on Bybit",
+                'turnover': 0,
+                'checked_at': datetime.now()
+            }
+            return False, f"Symbol {symbol} not found on Bybit", 0
+        
+        ticker = tickers[0]
+        turnover = float(ticker.get('turnover24h', '0'))
+        
+        # Проверяем оборот
+        if turnover < _MIN_TURNOVER_FOR_DYNAMIC:
+            _dynamic_symbol_cache[symbol] = {
+                'valid': False,
+                'error': f"Low turnover ${turnover/1e6:.1f}M < $10M",
+                'turnover': turnover,
+                'checked_at': datetime.now()
+            }
+            return False, f"Low turnover ${turnover/1e6:.1f}M < $10M", turnover
+        
+        # Символ валиден
+        _dynamic_symbol_cache[symbol] = {
+            'valid': True,
+            'error': None,
+            'turnover': turnover,
+            'checked_at': datetime.now()
+        }
+        logger.info(f"[DYNAMIC] Symbol {symbol} validated: turnover ${turnover/1e6:.1f}M")
+        return True, None, turnover
+        
+    except Exception as e:
+        logger.warning(f"[DYNAMIC] Error checking {symbol}: {e}")
+        # При ошибке - fallback на статический список
+        return symbol in ALLOWED_SYMBOLS, None, 0
+
 def validate_amount(amount: float, balance: float, min_amount: float = 1.0) -> tuple:
     """
     Validate trade amount
@@ -1119,15 +1567,59 @@ def validate_amount(amount: float, balance: float, min_amount: float = 1.0) -> t
 
 def validate_symbol(symbol: str) -> tuple:
     """
-    Validate trading symbol
+    Validate trading symbol v2.0 - ДИНАМИЧЕСКАЯ + СТАТИЧЕСКАЯ проверка
+    
+    Логика:
+    1. Сначала проверяем статический whitelist (быстро)
+    2. Если не в списке - можно проверить динамически (через API)
+    
     Returns: (is_valid: bool, error_message: str or None)
     """
     if not symbol or not isinstance(symbol, str):
         return False, "Invalid symbol"
     symbol = symbol.upper().strip()
-    if symbol not in ALLOWED_SYMBOLS:
-        return False, f"Symbol {symbol} not supported"
-    return True, None
+    
+    # Быстрая проверка статического списка
+    if symbol in ALLOWED_SYMBOLS:
+        return True, None
+    
+    # Проверяем кэш динамических символов
+    cached = _dynamic_symbol_cache.get(symbol)
+    if cached:
+        cache_age = (datetime.now() - cached['checked_at']).total_seconds()
+        if cache_age < _DYNAMIC_CACHE_TTL:
+            if cached['valid']:
+                return True, None
+            else:
+                return False, cached.get('error', f"Symbol {symbol} not supported")
+    
+    # Символ не в статическом списке и не в кэше
+    # Для синхронной функции - просто отклоняем
+    # Динамическая проверка будет выполнена асинхронно при необходимости
+    return False, f"Symbol {symbol} not in whitelist"
+
+
+async def validate_symbol_async(symbol: str) -> tuple:
+    """
+    Асинхронная валидация символа с динамической проверкой
+    
+    Returns: (is_valid: bool, error_message: str or None)
+    """
+    if not symbol or not isinstance(symbol, str):
+        return False, "Invalid symbol"
+    symbol = symbol.upper().strip()
+    
+    # Быстрая проверка статического списка
+    if symbol in ALLOWED_SYMBOLS:
+        return True, None
+    
+    # Динамическая проверка через API
+    is_valid, error, turnover = await check_symbol_dynamically(symbol)
+    
+    if is_valid:
+        return True, None
+    else:
+        return False, error or f"Symbol {symbol} not supported"
 
 def validate_direction(direction: str) -> tuple:
     """
@@ -1230,7 +1722,10 @@ async def safe_balance_update(user_id: int, delta: float, reason: str = "") -> b
 rate_limits: Dict[int, Dict] = {}  # Deprecated - kept for compatibility
 
 # ==================== КОМИССИИ (АВТО-ВЫВОД) ====================
-async def add_commission(amount: float, user_id: Optional[int] = None):
+# Очередь уведомлений для рефереров (чтобы не спамить при каждой сделке)
+_referral_notifications_queue: Dict[int, float] = {}  # {referrer_id: accumulated_amount}
+
+async def add_commission(amount: float, user_id: Optional[int] = None, bot=None):
     """
     Добавить комиссию и вывести при достижении порога (с персистентностью)
     Распределяет комиссию между рефералами и админом
@@ -1238,6 +1733,7 @@ async def add_commission(amount: float, user_id: Optional[int] = None):
     Args:
         amount: Общая сумма комиссии
         user_id: ID пользователя, который открыл сделку (для реферальной системы)
+        bot: Telegram bot instance для отправки уведомлений (опционально)
     """
     global pending_commission
     
@@ -1278,6 +1774,20 @@ async def add_commission(amount: float, user_id: Optional[int] = None):
                             users_cache[referrer_id]['balance'] + referral_commission
                         )
                     
+                    # СОХРАНЯЕМ запись о заработке в таблицу referral_earnings
+                    db_save_referral_earning(
+                        user_id=referrer_id,
+                        from_user_id=user_id,
+                        amount=referral_commission,
+                        level=level + 1,  # 1-indexed уровень
+                        source='trade_commission'
+                    )
+                    
+                    # Добавляем в очередь уведомлений (группируем по реферерам)
+                    if referrer_id not in _referral_notifications_queue:
+                        _referral_notifications_queue[referrer_id] = 0.0
+                    _referral_notifications_queue[referrer_id] += referral_commission
+                    
                     total_referral_share += referral_commission
                     logger.info(f"[REF_COMMISSION] Level {level+1}: ${referral_commission:.2f} to user {referrer_id} ({level_percent}% of ${amount:.2f})")
         
@@ -1297,6 +1807,36 @@ async def add_commission(amount: float, user_id: Optional[int] = None):
     # Авто-вывод при достижении порога
     if pending_commission >= COMMISSION_WITHDRAW_THRESHOLD and ADMIN_CRYPTO_ID:
         await withdraw_commission()
+
+async def send_referral_notifications(bot) -> int:
+    """
+    Отправить накопленные уведомления рефералам (вызывается периодически)
+    Возвращает количество отправленных уведомлений
+    """
+    global _referral_notifications_queue
+    
+    if not _referral_notifications_queue or not bot:
+        return 0
+    
+    sent_count = 0
+    notifications_to_send = _referral_notifications_queue.copy()
+    _referral_notifications_queue.clear()
+    
+    for referrer_id, total_amount in notifications_to_send.items():
+        if total_amount >= 0.01:  # Минимум $0.01 для уведомления
+            try:
+                await bot.send_message(
+                    referrer_id,
+                    f"<b>💰 Реферальный доход</b>\n\n"
+                    f"Вы заработали <b>${total_amount:.2f}</b> с комиссий ваших рефералов!",
+                    parse_mode="HTML"
+                )
+                sent_count += 1
+                logger.info(f"[REF_NOTIFY] Sent notification to {referrer_id}: ${total_amount:.2f}")
+            except Exception as e:
+                logger.warning(f"[REF_NOTIFY] Failed to notify {referrer_id}: {e}")
+    
+    return sent_count
 
 async def withdraw_commission():
     """Вывести накопленные комиссии на кошелёк админа"""
@@ -1671,21 +2211,12 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         logger.info(f"[PAYMENT] User {user_id} deposited ${usd} via Stars (balance: ${user['balance']:.2f})")
         
-        # Реферальный бонус при первом депозите
+        # Многоуровневые реферальные бонусы при первом депозите
         if is_first_deposit:
             try:
-                referrer_id = db_get_referrer(user_id)
-                if referrer_id:
-                    bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
-                    if bonus_added:
-                        try:
-                            await context.bot.send_message(
-                                referrer_id,
-                                f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
-                                parse_mode="HTML"
-                            )
-                        except Exception as e:
-                            logger.warning(f"[PAYMENT] Failed to notify referrer {referrer_id}: {e}")
+                bonuses = await process_multilevel_deposit_bonus(user_id, bot=context.bot)
+                if bonuses:
+                    logger.info(f"[PAYMENT] Referral bonuses given: {bonuses}")
             except Exception as e:
                 logger.error(f"[PAYMENT] Referral bonus error for user {user_id}: {e}")
             
@@ -1981,20 +2512,14 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             
             logger.info(f"[CRYPTO] User {user_id} deposited ${amount}")
             
-            # Реферальный бонус
+            # Многоуровневые реферальные бонусы при первом депозите
             if is_first_deposit:
-                referrer_id = db_get_referrer(user_id)
-                if referrer_id:
-                    bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
-                    if bonus_added:
-                        try:
-                            await context.bot.send_message(
-                                referrer_id,
-                                f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
-                                parse_mode="HTML"
-                            )
-                        except:
-                            pass
+                try:
+                    bonuses = await process_multilevel_deposit_bonus(user_id, bot=context.bot)
+                    if bonuses:
+                        logger.info(f"[CRYPTO] Referral bonuses given: {bonuses}")
+                except Exception as e:
+                    logger.error(f"[CRYPTO] Referral bonus error for user {user_id}: {e}")
             
             text = f"""<b>✅ Оплата успешна</b>
 
@@ -2077,20 +2602,14 @@ async def check_pending_crypto_payments(context: ContextTypes.DEFAULT_TYPE) -> N
                             
                             logger.info(f"[CRYPTO_AUTO] User {user_id} deposited ${amount}")
                             
-                            # Реферальный бонус
+                            # Многоуровневые реферальные бонусы при первом депозите
                             if is_first_deposit:
-                                referrer_id = db_get_referrer(user_id)
-                                if referrer_id:
-                                    bonus_added = db_add_referral_bonus(referrer_id, REFERRAL_BONUS, from_user_id=user_id)
-                                    if bonus_added:
-                                        try:
-                                            await context.bot.send_message(
-                                                referrer_id,
-                                                f"<b>📥 Реферал</b>\n\nТвой реферал сделал депозит.\nБонус: +${REFERRAL_BONUS}",
-                                                parse_mode="HTML"
-                                            )
-                                        except:
-                                            pass
+                                try:
+                                    bonuses = await process_multilevel_deposit_bonus(user_id, bot=context.bot)
+                                    if bonuses:
+                                        logger.info(f"[CRYPTO_AUTO] Referral bonuses given: {bonuses}")
+                                except Exception as e:
+                                    logger.error(f"[CRYPTO_AUTO] Referral bonus error for user {user_id}: {e}")
                             
                             # Уведомляем пользователя
                             try:
@@ -3411,8 +3930,36 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Проверяем настройки пользователя
             user_auto_enabled = auto_user.get('auto_trade', False)
             user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
-            user_max_daily = auto_user.get('auto_trade_max_daily', 10)
+            user_max_daily = auto_user.get('auto_trade_max_daily', 20)  # УВЕЛИЧЕНО с 10 до 20
             user_today_count = auto_user.get('auto_trade_today', 0)
+            
+            # === АДАПТИВНЫЙ MIN_WINRATE на основе режима рынка ===
+            # В сильном тренде снижаем требования, в рейндже повышаем
+            adaptive_winrate_map = {
+                MarketRegime.STRONG_UPTREND: 55,    # В сильном тренде достаточно 55%
+                MarketRegime.STRONG_DOWNTREND: 55,
+                MarketRegime.UPTREND: 60,           # В тренде 60%
+                MarketRegime.DOWNTREND: 60,
+                MarketRegime.RANGING: 70,           # В рейндже строже - 70%
+                MarketRegime.HIGH_VOLATILITY: 75,   # В волатильности ещё строже - 75%
+            }
+            adaptive_min_winrate = adaptive_winrate_map.get(setup.market_regime, user_min_winrate)
+            # Используем минимум из адаптивного и пользовательского
+            effective_min_winrate = min(adaptive_min_winrate, user_min_winrate)
+            
+            logger.info(f"[SMART] Adaptive winrate: {effective_min_winrate}% (regime={setup.market_regime.value}, user={user_min_winrate}%)")
+            
+            # === АДАПТИВНЫЙ MAX_DAILY на основе режима рынка ===
+            adaptive_max_daily_map = {
+                MarketRegime.STRONG_UPTREND: 25,
+                MarketRegime.STRONG_DOWNTREND: 25,
+                MarketRegime.UPTREND: 20,
+                MarketRegime.DOWNTREND: 20,
+                MarketRegime.RANGING: 15,
+                MarketRegime.HIGH_VOLATILITY: 10,
+            }
+            adaptive_max_daily = adaptive_max_daily_map.get(setup.market_regime, user_max_daily)
+            effective_max_daily = max(adaptive_max_daily, user_max_daily)
             
             # Сброс счётчика
             from datetime import date as dt_date
@@ -3424,14 +3971,14 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 auto_user['auto_trade_last_reset'] = today
                 db_update_user(AUTO_TRADE_USER_ID, auto_trade_today=0, auto_trade_last_reset=today)
             
-            # Проверки
+            # Проверки с АДАПТИВНЫМИ параметрами
             skip_reason = None
             if not user_auto_enabled:
                 skip_reason = "выключен"
-            elif confidence_percent < user_min_winrate:
-                skip_reason = f"confidence {confidence_percent}% < {user_min_winrate}%"
-            elif user_today_count >= user_max_daily:
-                skip_reason = f"лимит {user_today_count}/{user_max_daily}"
+            elif confidence_percent < effective_min_winrate:
+                skip_reason = f"confidence {confidence_percent}% < {effective_min_winrate}% (adaptive)"
+            elif user_today_count >= effective_max_daily:
+                skip_reason = f"лимит {user_today_count}/{effective_max_daily}"
             elif auto_balance < AUTO_TRADE_MIN_BET:
                 skip_reason = f"баланс ${auto_balance:.0f}"
             
@@ -3441,10 +3988,11 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # === VALIDATION FOR AUTO-TRADE ===
                 auto_positions = get_positions(AUTO_TRADE_USER_ID)
                 
-                # Check max positions
-                if len(auto_positions) >= MAX_POSITIONS_PER_USER:
-                    logger.info(f"[SMART] Авто-трейд пропущен: лимит позиций ({len(auto_positions)})")
-                    skip_reason = f"лимит позиций {len(auto_positions)}/{MAX_POSITIONS_PER_USER}"
+                # Check max positions - ДИНАМИЧЕСКИЙ лимит на основе баланса
+                dynamic_max_positions = get_max_positions_for_user(auto_balance)
+                if len(auto_positions) >= dynamic_max_positions:
+                    logger.info(f"[SMART] Авто-трейд пропущен: лимит позиций ({len(auto_positions)}/{dynamic_max_positions})")
+                    skip_reason = f"лимит позиций {len(auto_positions)}/{dynamic_max_positions}"
                 
                 # Check correlation risk
                 if not skip_reason and ADVANCED_POSITION_MANAGEMENT:
@@ -3469,25 +4017,25 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.info(f"[SMART] Авто-трейд пропущен (validation): {skip_reason}")
                 
                 if not skip_reason:
-                    # Расчёт ставки на основе качества сетапа
-                    quality_mult = {
-                        SetupQuality.A_PLUS: 0.12,  # 12% баланса для идеального сетапа
-                        SetupQuality.A: 0.10,        # 10% для отличного сетапа
-                        SetupQuality.B: 0.08,        # 8% для хорошего сетапа
-                    }.get(setup.quality, 0.06)
+                    # === УМНОЕ РАСПРЕДЕЛЕНИЕ КАПИТАЛА v2.0 ===
+                    # Расчёт ставки на основе:
+                    # - Категории монеты (BTC/ETH=20%, Layer1=15%, мемы=6%, etc.)
+                    # - Качества сетапа
+                    # - Серии убытков
                     
-                    # === ДИНАМИЧЕСКИЙ РАЗМЕР ПОСЛЕ УБЫТКОВ ===
                     loss_streak = db_get_loss_streak(AUTO_TRADE_USER_ID)
-                    loss_multiplier = 1.0
-                    if loss_streak >= 3:
-                        loss_multiplier = 0.5  # -50% после 3+ убытков
-                        logger.info(f"[SMART] Loss streak {loss_streak}: reducing bet by 50%")
-                    elif loss_streak >= 2:
-                        loss_multiplier = 0.75  # -25% после 2 убытков
-                        logger.info(f"[SMART] Loss streak {loss_streak}: reducing bet by 25%")
                     
-                    auto_bet = min(AUTO_TRADE_MAX_BET, max(AUTO_TRADE_MIN_BET, auto_balance * quality_mult * loss_multiplier))
-                    auto_bet = min(auto_bet, auto_balance * 0.15)  # Не более 15% баланса
+                    # Используем умный расчёт размера ставки
+                    auto_bet = calculate_smart_bet_size(
+                        balance=auto_balance,
+                        symbol=symbol,
+                        quality=setup.quality,
+                        loss_streak=loss_streak
+                    )
+                    
+                    coin_category = get_coin_category(symbol)
+                    max_percent = get_max_position_percent(symbol)
+                    logger.info(f"[SMART] Bet calculation: {symbol} ({coin_category}), max={max_percent:.0%}, bet=${auto_bet:.2f}")
                     
                     # Ensure minimum balance reserve
                     if auto_balance - auto_bet < MIN_BALANCE_RESERVE:
@@ -3761,15 +4309,17 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(f"<b>❌ Ошибка</b>\n\n{error}", parse_mode="HTML")
         return
     
-    # Check max positions limit
-    if len(user_positions) >= MAX_POSITIONS_PER_USER:
+    # Check max positions limit - ДИНАМИЧЕСКИЙ лимит на основе баланса
+    dynamic_max_positions = get_max_positions_for_user(user['balance'])
+    if len(user_positions) >= dynamic_max_positions:
         await query.edit_message_text(
             f"<b>❌ Лимит позиций</b>\n\n"
-            f"Максимум: {MAX_POSITIONS_PER_USER}\n"
+            f"Максимум для вашего баланса: {dynamic_max_positions}\n"
+            f"Текущих позиций: {len(user_positions)}\n\n"
             f"Закройте существующие сделки перед открытием новых.",
             parse_mode="HTML"
         )
-        logger.info(f"[LIMIT] User {user_id}: Max positions reached ({len(user_positions)})")
+        logger.info(f"[LIMIT] User {user_id}: Max positions reached ({len(user_positions)}/{dynamic_max_positions})")
         return
 
     # === ПРОВЕРКА КОРРЕЛЯЦИИ ===
@@ -6332,31 +6882,38 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user_id = update.effective_user.id
     bot_username = (await context.bot.get_me()).username
     
-    ref_count = db_get_referrals_count(user_id)
+    # Получаем полную статистику
+    stats = db_get_referrals_stats(user_id)
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-    ref_commission_earned = db_get_referral_commission_earned(user_id)
     
-    # Формируем информацию о процентах
-    commission_info = ""
+    # Формируем детальную информацию
+    levels_info = ""
     if REFERRAL_COMMISSION_LEVELS:
-        commission_info = f"\n💵 Комиссия с рефералов:\n"
+        levels_info = "\n<b>📊 Уровни и заработок:</b>\n"
         for level, percent in enumerate(REFERRAL_COMMISSION_LEVELS, 1):
-            commission_info += f"• Уровень {level}: {percent}% от комиссии\n"
-        commission_info += f"\n💰 Заработано: <b>${ref_commission_earned:.2f}</b>"
+            count_key = f'level{level}_count'
+            earnings_key = f'earnings_level{level}'
+            count = stats.get(count_key, 0)
+            earned = stats.get(earnings_key, 0.0)
+            levels_info += f"├ Уровень {level}: {percent}% • {count} чел • <b>${earned:.2f}</b>\n"
     
     text = f"""<b>🤝 Реферальная программа</b>
 
-Приглашай друзей и получай:
-• <b>${REFERRAL_BONUS:.2f}</b> за депозит реферала
-• <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки реферала
+<b>💎 Вознаграждения:</b>
+├ <b>${REFERRAL_BONUS:.2f}</b> за первый депозит реферала
+└ <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки (3 уровня)
+{levels_info}
+<b>📈 Итого:</b>
+├ Рефералов всего: <b>{stats['total_count']}</b>
+├ Депозиты рефералов: <b>${stats['referral_deposits']:.2f}</b>
+└ 💰 Заработано: <b>${stats['total_earned']:.2f}</b>
 
-📊 Твои рефералы: <b>{ref_count}</b>
-{commission_info}
-
-🔗 Твоя ссылка:
+🔗 <b>Твоя ссылка:</b>
 <code>{ref_link}</code>"""
     
-    await update.message.reply_text(text, parse_mode="HTML")
+    keyboard = [[InlineKeyboardButton("👥 Мои рефералы", callback_data="my_referrals")]]
+    
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 # ==================== МЕНЮ "ДОПОЛНИТЕЛЬНО" ====================
 async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6383,31 +6940,75 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = update.effective_user.id
     bot_username = (await context.bot.get_me()).username
     
-    ref_count = db_get_referrals_count(user_id)
+    # Получаем полную статистику
+    stats = db_get_referrals_stats(user_id)
     ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
-    ref_commission_earned = db_get_referral_commission_earned(user_id)
     
-    # Формируем информацию о процентах
-    commission_info = ""
+    # Формируем детальную информацию
+    levels_info = ""
     if REFERRAL_COMMISSION_LEVELS:
-        commission_info = f"\n💵 Комиссия с рефералов:\n"
+        levels_info = "\n<b>📊 Уровни и заработок:</b>\n"
         for level, percent in enumerate(REFERRAL_COMMISSION_LEVELS, 1):
-            commission_info += f"• Уровень {level}: {percent}% от комиссии\n"
-        commission_info += f"\n💰 Заработано: <b>${ref_commission_earned:.2f}</b>"
+            count_key = f'level{level}_count'
+            earnings_key = f'earnings_level{level}'
+            count = stats.get(count_key, 0)
+            earned = stats.get(earnings_key, 0.0)
+            levels_info += f"├ Уровень {level}: {percent}% • {count} чел • <b>${earned:.2f}</b>\n"
     
     text = f"""<b>🤝 Реферальная программа</b>
 
-Приглашай друзей и получай:
-• <b>${REFERRAL_BONUS:.2f}</b> за депозит реферала
-• <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки реферала
+<b>💎 Вознаграждения:</b>
+├ <b>${REFERRAL_BONUS:.2f}</b> за первый депозит реферала
+└ <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки (3 уровня)
+{levels_info}
+<b>📈 Итого:</b>
+├ Рефералов всего: <b>{stats['total_count']}</b>
+├ Депозиты рефералов: <b>${stats['referral_deposits']:.2f}</b>
+└ 💰 Заработано: <b>${stats['total_earned']:.2f}</b>
 
-📊 Твои рефералы: <b>{ref_count}</b>
-{commission_info}
-
-🔗 Твоя ссылка:
+🔗 <b>Твоя ссылка:</b>
 <code>{ref_link}</code>"""
     
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]]
+    keyboard = [
+        [InlineKeyboardButton("👥 Мои рефералы", callback_data="my_referrals")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]
+    ]
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+async def my_referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Показать список рефералов пользователя"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    referrals = db_get_referrals_list(user_id, level=1)
+    
+    if not referrals:
+        text = "<b>👥 Мои рефералы</b>\n\nУ вас пока нет рефералов.\n\nПоделитесь своей ссылкой с друзьями!"
+    else:
+        text = f"<b>👥 Мои рефералы ({len(referrals)})</b>\n\n"
+        
+        for i, ref in enumerate(referrals[:15], 1):  # Показываем максимум 15
+            ref_id = ref.get('user_id', 0)
+            deposit = ref.get('total_deposit', 0) or 0
+            earned = ref.get('earned', 0) or 0
+            
+            # Маскируем ID для приватности
+            masked_id = f"{str(ref_id)[:3]}***{str(ref_id)[-2:]}" if len(str(ref_id)) > 5 else f"***{str(ref_id)[-3:]}"
+            
+            status = "✅" if deposit > 0 else "⏳"
+            text += f"{status} <code>{masked_id}</code> • Депозит: ${deposit:.0f} • Доход: ${earned:.2f}\n"
+        
+        if len(referrals) > 15:
+            text += f"\n<i>...и ещё {len(referrals) - 15} рефералов</i>"
+        
+        # Итого
+        total_deposit = sum(r.get('total_deposit', 0) or 0 for r in referrals)
+        total_earned = sum(r.get('earned', 0) or 0 for r in referrals)
+        text += f"\n\n<b>Итого депозитов:</b> ${total_deposit:.2f}\n<b>Ваш доход:</b> ${total_earned:.2f}"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="referral_menu")]]
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
@@ -6515,6 +7116,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(refresh_commission_callback, pattern="^refresh_commission$"))
     app.add_handler(CallbackQueryHandler(more_menu, pattern="^more_menu$"))
     app.add_handler(CallbackQueryHandler(referral_menu, pattern="^referral_menu$"))
+    app.add_handler(CallbackQueryHandler(my_referrals_menu, pattern="^my_referrals$"))
     app.add_handler(CallbackQueryHandler(history_menu, pattern="^history_menu$"))
     app.add_handler(CallbackQueryHandler(withdraw_menu, pattern="^withdraw_menu$"))
     app.add_handler(CallbackQueryHandler(handle_withdraw, pattern="^withdraw_(all|\\d+)$"))
@@ -6538,6 +7140,11 @@ def main() -> None:
         
         # Автоматическая проверка крипто-платежей каждые 15 секунд
         app.job_queue.run_repeating(check_pending_crypto_payments, interval=15, first=15)
+        
+        # Отправка уведомлений рефералам каждые 60 секунд (группируем уведомления)
+        async def send_ref_notifications_job(context):
+            await send_referral_notifications(context.bot)
+        app.job_queue.run_repeating(send_ref_notifications_job, interval=60, first=60)
         
         logger.info("[JOBS] All periodic tasks registered")
     else:

@@ -143,23 +143,40 @@ class MTFAnalysis:
 
 # ==================== TRADING STATE ====================
 class TradingState:
-    """Состояние торговли для защиты капитала"""
+    """Состояние торговли для защиты капитала v2.0 - ОПТИМИЗИРОВАНО для большего количества сделок"""
     
     def __init__(self):
         self.consecutive_losses = 0
         self.daily_trades = 0
         self.daily_pnl = 0.0
+        self.daily_wins = 0
         self.last_trade_time: Optional[datetime] = None
         self.last_reset_date: Optional[str] = None
         self.is_paused = False
         self.pause_until: Optional[datetime] = None
+        self.recent_trades: List[float] = []  # Последние 10 сделок для расчёта winrate
         
-        # Настройки защиты
-        self.MAX_CONSECUTIVE_LOSSES = 4  # После 4 убытков подряд - пауза
-        self.MAX_DAILY_TRADES = 10       # Максимум сделок в день
-        self.MAX_DAILY_LOSS_PERCENT = 10 # Макс убыток в день 10%
-        self.MIN_TIME_BETWEEN_TRADES = 10 # Минут между сделками
-        self.PAUSE_AFTER_LOSSES_HOURS = 2 # Часов паузы после серии убытков
+        # === УЛУЧШЕННЫЕ настройки защиты ===
+        self.MAX_CONSECUTIVE_LOSSES = 5      # Увеличено с 4 до 5
+        self.MAX_DAILY_TRADES = 20           # УВЕЛИЧЕНО с 10 до 20 (больше возможностей)
+        self.MAX_DAILY_LOSS_PERCENT = 12     # Увеличено с 10% до 12%
+        self.MIN_TIME_BETWEEN_TRADES = 5     # СНИЖЕНО с 10 до 5 минут (быстрее реакция)
+        self.PAUSE_AFTER_LOSSES_HOURS = 1.5  # Снижено с 2 до 1.5 часов
+        
+        # Адаптивные настройки
+        self.ADAPTIVE_DAILY_TRADES = {
+            'strong_trend': 25,    # В сильном тренде - больше сделок
+            'trend': 20,           # В тренде - стандартно
+            'ranging': 15,         # В рейндже - меньше
+            'high_volatility': 10  # В волатильности - осторожно
+        }
+    
+    def get_recent_winrate(self) -> float:
+        """Получить winrate за последние 10 сделок"""
+        if len(self.recent_trades) < 3:
+            return 0.7  # Недостаточно данных - возвращаем 70%
+        wins = sum(1 for pnl in self.recent_trades if pnl > 0)
+        return wins / len(self.recent_trades)
     
     def reset_daily(self):
         """Сброс дневных счётчиков"""
@@ -167,6 +184,7 @@ class TradingState:
         if self.last_reset_date != today:
             self.daily_trades = 0
             self.daily_pnl = 0.0
+            self.daily_wins = 0
             self.last_reset_date = today
             logger.info("[STATE] Daily counters reset")
     
@@ -176,20 +194,39 @@ class TradingState:
         self.daily_pnl += pnl
         self.last_trade_time = datetime.now(timezone.utc)
         
-        if pnl < 0:
+        # Трекинг winrate
+        self.recent_trades.append(pnl)
+        if len(self.recent_trades) > 10:
+            self.recent_trades.pop(0)
+        
+        if pnl > 0:
+            self.daily_wins += 1
+            self.consecutive_losses = 0
+        else:
             self.consecutive_losses += 1
             if self.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
                 self.pause_trading(self.PAUSE_AFTER_LOSSES_HOURS)
-        else:
-            self.consecutive_losses = 0
     
-    def pause_trading(self, hours: int):
+    def pause_trading(self, hours: float):
         """Поставить торговлю на паузу"""
         self.is_paused = True
         self.pause_until = datetime.now(timezone.utc) + timedelta(hours=hours)
         logger.warning(f"[STATE] Trading paused for {hours} hours after {self.consecutive_losses} consecutive losses")
     
-    def can_trade(self, balance: float) -> Tuple[bool, str]:
+    def get_adaptive_max_trades(self, market_regime: str = 'trend') -> int:
+        """Получить адаптивный лимит сделок на основе режима рынка"""
+        regime_map = {
+            'STRONG_UPTREND': 'strong_trend',
+            'STRONG_DOWNTREND': 'strong_trend',
+            'UPTREND': 'trend',
+            'DOWNTREND': 'trend',
+            'RANGING': 'ranging',
+            'HIGH_VOLATILITY': 'high_volatility'
+        }
+        regime_key = regime_map.get(market_regime, 'trend')
+        return self.ADAPTIVE_DAILY_TRADES.get(regime_key, self.MAX_DAILY_TRADES)
+    
+    def can_trade(self, balance: float, market_regime: str = None) -> Tuple[bool, str]:
         """Можно ли открывать новую сделку"""
         self.reset_daily()
         
@@ -204,9 +241,10 @@ class TradingState:
                 self.is_paused = False
                 self.consecutive_losses = 0
         
-        # Проверка лимита сделок
-        if self.daily_trades >= self.MAX_DAILY_TRADES:
-            return False, f"Лимит сделок в день ({self.MAX_DAILY_TRADES})"
+        # Проверка лимита сделок (адаптивный)
+        max_trades = self.get_adaptive_max_trades(market_regime) if market_regime else self.MAX_DAILY_TRADES
+        if self.daily_trades >= max_trades:
+            return False, f"Лимит сделок в день ({self.daily_trades}/{max_trades})"
         
         # Проверка дневного убытка
         if balance > 0:
@@ -219,6 +257,16 @@ class TradingState:
             minutes_since_last = (now - self.last_trade_time).seconds // 60
             if minutes_since_last < self.MIN_TIME_BETWEEN_TRADES:
                 return False, f"Cooldown ({self.MIN_TIME_BETWEEN_TRADES - minutes_since_last} мин)"
+        
+        # Дополнительная проверка: если winrate < 50% и > 5 сделок - замедляемся
+        recent_winrate = self.get_recent_winrate()
+        if self.daily_trades >= 5 and recent_winrate < 0.5:
+            # Увеличиваем время между сделками при плохом winrate
+            extended_cooldown = self.MIN_TIME_BETWEEN_TRADES * 2
+            if self.last_trade_time:
+                minutes_since_last = (now - self.last_trade_time).seconds // 60
+                if minutes_since_last < extended_cooldown:
+                    return False, f"Extended cooldown ({extended_cooldown - minutes_since_last} мин) - низкий winrate ({recent_winrate:.0%})"
         
         return True, "OK"
 
@@ -242,21 +290,60 @@ class SmartAnalyzer:
         self.cache_ttl = 30  # секунд
         self.state = TradingState()
         
-        # Настройки качества - СБАЛАНСИРОВАННЫЕ (больше сделок + меньше выбитых стопов)
-        self.MIN_QUALITY = SetupQuality.B  # Минимум B-сетап (B, A, A+)
-        self.MIN_RISK_REWARD = 1.3         # Минимальное соотношение R/R 1:1.3 (больше возможностей)
-        self.MIN_CONFIDENCE = 0.50         # Минимальная уверенность 50% (больше сделок)
+        # === АДАПТИВНЫЕ ПОРОГИ КАЧЕСТВА v2.0 ===
+        # Базовые настройки (используются как fallback)
+        self.MIN_QUALITY = SetupQuality.B  # Минимум B-сетап
+        self.MIN_RISK_REWARD = 1.3         # Базовый R/R
+        self.MIN_CONFIDENCE = 0.50         # Базовая уверенность
         
-        # Динамические пороги R/R по режиму рынка (сниженные для большего количества сделок)
-        self.RR_THRESHOLDS = {
-            MarketRegime.STRONG_UPTREND: 1.0,      # В сильном тренде R/R минимум 1:1.0
-            MarketRegime.UPTREND: 1.2,             # Обычный тренд
-            MarketRegime.RANGING: 1.5,              # В рейндже чуть строже
-            MarketRegime.DOWNTREND: 1.2,            # Обычный тренд
-            MarketRegime.STRONG_DOWNTREND: 1.0,    # В сильном тренде R/R минимум 1:1.0
-            MarketRegime.HIGH_VOLATILITY: 1.8,     # Высокая волатильность - строже
-            MarketRegime.UNKNOWN: 1.3               # Неизвестный режим
+        # АДАПТИВНЫЕ ПОРОГИ по режиму рынка
+        # Формат: {режим: (min_quality, min_rr, min_confidence)}
+        self.ADAPTIVE_THRESHOLDS = {
+            # Сильный тренд - АГРЕССИВНЫЕ настройки (больше сделок)
+            MarketRegime.STRONG_UPTREND: {
+                'min_quality': SetupQuality.C,   # Даже C-сетапы в сильном тренде
+                'min_rr': 1.0,                    # R/R 1:1 достаточно
+                'min_confidence': 0.45            # 45% уверенности
+            },
+            MarketRegime.STRONG_DOWNTREND: {
+                'min_quality': SetupQuality.C,
+                'min_rr': 1.0,
+                'min_confidence': 0.45
+            },
+            # Обычный тренд - СБАЛАНСИРОВАННЫЕ настройки
+            MarketRegime.UPTREND: {
+                'min_quality': SetupQuality.B,   # B+ сетапы
+                'min_rr': 1.2,                    # R/R 1:1.2
+                'min_confidence': 0.50            # 50% уверенности
+            },
+            MarketRegime.DOWNTREND: {
+                'min_quality': SetupQuality.B,
+                'min_rr': 1.2,
+                'min_confidence': 0.50
+            },
+            # Рейндж - КОНСЕРВАТИВНЫЕ настройки
+            MarketRegime.RANGING: {
+                'min_quality': SetupQuality.A,   # Только A и A+ сетапы
+                'min_rr': 1.5,                    # R/R 1:1.5
+                'min_confidence': 0.60            # 60% уверенности
+            },
+            # Высокая волатильность - СТРОГИЕ настройки
+            MarketRegime.HIGH_VOLATILITY: {
+                'min_quality': SetupQuality.A_PLUS,  # Только идеальные
+                'min_rr': 1.8,                        # R/R 1:1.8
+                'min_confidence': 0.70                # 70% уверенности
+            },
+            # Неизвестный режим - БАЗОВЫЕ настройки
+            MarketRegime.UNKNOWN: {
+                'min_quality': SetupQuality.B,
+                'min_rr': 1.3,
+                'min_confidence': 0.55
+            }
         }
+        
+        # Legacy: RR_THRESHOLDS для обратной совместимости
+        self.RR_THRESHOLDS = {regime: thresholds['min_rr'] 
+                             for regime, thresholds in self.ADAPTIVE_THRESHOLDS.items()}
         
         # Торговые сессии (UTC)
         self.LONDON_OPEN = 7
@@ -264,7 +351,24 @@ class SmartAnalyzer:
         self.NY_OPEN = 13
         self.NY_CLOSE = 21
         
-        logger.info("[SMART] Analyzer initialized")
+        logger.info("[SMART] Analyzer initialized with adaptive thresholds")
+    
+    def get_adaptive_thresholds(self, market_regime: MarketRegime) -> dict:
+        """
+        Получить адаптивные пороги для текущего режима рынка
+        
+        Returns:
+            {
+                'min_quality': SetupQuality,
+                'min_rr': float,
+                'min_confidence': float
+            }
+        """
+        return self.ADAPTIVE_THRESHOLDS.get(market_regime, {
+            'min_quality': self.MIN_QUALITY,
+            'min_rr': self.MIN_RISK_REWARD,
+            'min_confidence': self.MIN_CONFIDENCE
+        })
     
     async def _get_session(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
@@ -2375,72 +2479,97 @@ class SmartAnalyzer:
         reasoning = []
         warnings = []
         
-        # === СЧЁТЧИКИ СИГНАЛОВ ===
+        # === СИСТЕМА ВЗВЕШЕННЫХ СИГНАЛОВ v2.0 ===
+        # Веса для разных типов сигналов (от самых важных к менее важным)
+        SIGNAL_WEIGHTS = {
+            'liquidity_sweep': 5,    # Самый сильный сигнал
+            'mtf_aligned': 4,        # MTF полностью согласованы
+            'mtf_partial': 3,        # MTF частично согласованы
+            'order_block': 3,        # Order Block confluence
+            'divergence': 3,         # Дивергенция
+            'fvg': 2,                # Fair Value Gap
+            'vsa': 2,                # Volume Spread Analysis
+            'extreme_move': 2,       # Экстремальное движение
+            'stochastic': 2,         # Стохастик
+            'bollinger': 2,          # Bollinger Bands
+            'macd': 2,               # MACD crossover
+            'funding': 1,            # Фандинг рейт
+            'orderbook': 1,          # Дисбаланс стакана
+            'oi_change': 1,          # Open Interest
+        }
+        
         bullish_signals = 0
         bearish_signals = 0
         
         # === HIGH WINRATE: SMC SIGNALS ===
         
-        # Liquidity sweep - сильнейший сигнал разворота
+        # 1. Liquidity sweep - САМЫЙ СИЛЬНЫЙ сигнал (вес 5)
         if liquidity_sweep:
+            weight = SIGNAL_WEIGHTS['liquidity_sweep']
             if liquidity_sweep['type'] == 'bullish':
-                bullish_signals += 4
-                reasoning.append(liquidity_sweep['reasoning'])
+                bullish_signals += weight
+                reasoning.append(f"[W{weight}] {liquidity_sweep['reasoning']}")
             elif liquidity_sweep['type'] == 'bearish':
-                bearish_signals += 4
-                reasoning.append(liquidity_sweep['reasoning'])
+                bearish_signals += weight
+                reasoning.append(f"[W{weight}] {liquidity_sweep['reasoning']}")
         
-        # Order Block confluence
-        if current_ob:
-            if current_ob.type == 'bullish':
-                bullish_signals += 3
-                reasoning.append(f"У Bullish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
-            elif current_ob.type == 'bearish':
-                bearish_signals += 3
-                reasoning.append(f"У Bearish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
-        
-        # Fair Value Gap zone
-        if current_fvg:
-            if current_fvg.type == 'bullish':
-                bullish_signals += 2
-                reasoning.append(f"В Bullish FVG зоне")
-            elif current_fvg.type == 'bearish':
-                bearish_signals += 2
-                reasoning.append(f"В Bearish FVG зоне")
-        
-        # Divergence
-        if divergence['found']:
-            if divergence['type'] in ['regular_bullish', 'hidden_bullish']:
-                bullish_signals += 3
-                reasoning.append(divergence['reasoning'])
-            elif divergence['type'] in ['regular_bearish', 'hidden_bearish']:
-                bearish_signals += 3
-                reasoning.append(divergence['reasoning'])
-        
-        # VSA signals
-        if vsa['signal'] == 'LONG':
-            bullish_signals += 2
-            reasoning.append(vsa['reasoning'])
-        elif vsa['signal'] == 'SHORT':
-            bearish_signals += 2
-            reasoning.append(vsa['reasoning'])
-        
-        # MTF alignment bonus
+        # 2. MTF alignment (вес 4 для полного, 3 для частичного)
         if mtf.aligned:
+            weight = SIGNAL_WEIGHTS['mtf_aligned']
             if mtf.trend_4h == 'BULLISH':
-                bullish_signals += 3
-                reasoning.append("MTF: все таймфреймы бычьи")
+                bullish_signals += weight
+                reasoning.append(f"[W{weight}] MTF: все таймфреймы бычьи")
             elif mtf.trend_4h == 'BEARISH':
-                bearish_signals += 3
-                reasoning.append("MTF: все таймфреймы медвежьи")
+                bearish_signals += weight
+                reasoning.append(f"[W{weight}] MTF: все таймфреймы медвежьи")
         elif hasattr(mtf, 'partially_aligned') and mtf.partially_aligned:
-            # Частичное выравнивание: 2 из 3 таймфреймов согласны
+            weight = SIGNAL_WEIGHTS['mtf_partial']
             if mtf.trend_4h == 'BULLISH' or (mtf.trend_4h == 'NEUTRAL' and mtf.trend_1h == 'BULLISH'):
-                bullish_signals += 2
-                reasoning.append("MTF: частичное выравнивание (бычье)")
+                bullish_signals += weight
+                reasoning.append(f"[W{weight}] MTF: частичное выравнивание (бычье)")
             elif mtf.trend_4h == 'BEARISH' or (mtf.trend_4h == 'NEUTRAL' and mtf.trend_1h == 'BEARISH'):
-                bearish_signals += 2
-                reasoning.append("MTF: частичное выравнивание (медвежье)")
+                bearish_signals += weight
+                reasoning.append(f"[W{weight}] MTF: частичное выравнивание (медвежье)")
+        
+        # 3. Order Block confluence (вес 3)
+        if current_ob:
+            weight = SIGNAL_WEIGHTS['order_block']
+            if current_ob.type == 'bullish':
+                bullish_signals += weight
+                reasoning.append(f"[W{weight}] У Bullish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
+            elif current_ob.type == 'bearish':
+                bearish_signals += weight
+                reasoning.append(f"[W{weight}] У Bearish Order Block ({current_ob.price_low:.2f}-{current_ob.price_high:.2f})")
+        
+        # 4. Divergence (вес 3)
+        if divergence['found']:
+            weight = SIGNAL_WEIGHTS['divergence']
+            if divergence['type'] in ['regular_bullish', 'hidden_bullish']:
+                bullish_signals += weight
+                reasoning.append(f"[W{weight}] {divergence['reasoning']}")
+            elif divergence['type'] in ['regular_bearish', 'hidden_bearish']:
+                bearish_signals += weight
+                reasoning.append(f"[W{weight}] {divergence['reasoning']}")
+        
+        # 5. Fair Value Gap zone (вес 2)
+        if current_fvg:
+            weight = SIGNAL_WEIGHTS['fvg']
+            if current_fvg.type == 'bullish':
+                bullish_signals += weight
+                reasoning.append(f"[W{weight}] В Bullish FVG зоне")
+            elif current_fvg.type == 'bearish':
+                bearish_signals += weight
+                reasoning.append(f"[W{weight}] В Bearish FVG зоне")
+        
+        # 6. VSA signals (вес 2)
+        if vsa['signal'] == 'LONG':
+            weight = SIGNAL_WEIGHTS['vsa']
+            bullish_signals += weight
+            reasoning.append(f"[W{weight}] {vsa['reasoning']}")
+        elif vsa['signal'] == 'SHORT':
+            weight = SIGNAL_WEIGHTS['vsa']
+            bearish_signals += weight
+            reasoning.append(f"[W{weight}] {vsa['reasoning']}")
         
         # === ЛОГИКА СИГНАЛА ===
         
@@ -2461,84 +2590,97 @@ class SmartAnalyzer:
         # Объём подтверждает
         volume_confirms = volume_data['ratio'] > 1.5 or volume_data['trend'] == 'INCREASING'  # Требование объёма повышено с 1.2
         
-        # === НОВАЯ ЛОГИКА: ЭКСТРЕМАЛЬНЫЕ ДВИЖЕНИЯ И ДИСБАЛАНС ===
+        # === ДОПОЛНИТЕЛЬНЫЕ СИГНАЛЫ (с весами) ===
         
-        # 1. Экстремальное движение (резкое падение/рост) - снижен порог силы с 3 до 1
+        # 7. Экстремальное движение (вес 2 + бонус за силу)
         if extreme_move['extreme'] and extreme_move['strength'] >= 1:
+            weight = SIGNAL_WEIGHTS['extreme_move']
+            bonus = min(2, extreme_move['strength'])  # Бонус до +2 за силу
             if extreme_move['signal'] == 'LONG':
-                bullish_signals += extreme_move['strength'] + 1
-                reasoning.extend(extreme_move['reasoning'])
+                bullish_signals += weight + bonus
+                for r in extreme_move['reasoning']:
+                    reasoning.append(f"[W{weight}+{bonus}] {r}")
             elif extreme_move['signal'] == 'SHORT':
-                bearish_signals += extreme_move['strength'] + 1
-                reasoning.extend(extreme_move['reasoning'])
+                bearish_signals += weight + bonus
+                for r in extreme_move['reasoning']:
+                    reasoning.append(f"[W{weight}+{bonus}] {r}")
         
-        # 2. Стохастик (перепроданность/перекупленность) - учитываем даже не экстремальные
+        # 8. Стохастик (вес 2)
         if stochastic['signal'] != 'NEUTRAL':
+            weight = SIGNAL_WEIGHTS['stochastic']
+            bonus = 1 if stochastic['extreme'] else 0
             if stochastic['signal'] == 'LONG':
-                bullish_signals += stochastic['strength'] + 1
-                if stochastic['extreme']:
-                    reasoning.append(f"Стохастик перепродан (K={stochastic['k']:.0f})")
-                else:
-                    reasoning.append(f"Стохастик низкий (K={stochastic['k']:.0f})")
+                bullish_signals += weight + bonus
+                msg = f"Стохастик перепродан" if stochastic['extreme'] else f"Стохастик низкий"
+                reasoning.append(f"[W{weight}+{bonus}] {msg} (K={stochastic['k']:.0f})")
             elif stochastic['signal'] == 'SHORT':
-                bearish_signals += stochastic['strength'] + 1
-                if stochastic['extreme']:
-                    reasoning.append(f"Стохастик перекуплен (K={stochastic['k']:.0f})")
-                else:
-                    reasoning.append(f"Стохастик высокий (K={stochastic['k']:.0f})")
+                bearish_signals += weight + bonus
+                msg = f"Стохастик перекуплен" if stochastic['extreme'] else f"Стохастик высокий"
+                reasoning.append(f"[W{weight}+{bonus}] {msg} (K={stochastic['k']:.0f})")
         
-        # 3. Bollinger Bands - учитываем даже не экстремальные
+        # 9. Bollinger Bands (вес 2)
         if bollinger['signal'] != 'NEUTRAL':
+            weight = SIGNAL_WEIGHTS['bollinger']
+            bonus = 1 if bollinger['extreme'] else 0
             if bollinger['signal'] == 'LONG':
-                bullish_signals += 2 if bollinger['extreme'] else 1
+                bullish_signals += weight + bonus
                 if bollinger['reasoning']:
-                    reasoning.append(bollinger['reasoning'])
+                    reasoning.append(f"[W{weight}+{bonus}] {bollinger['reasoning']}")
             elif bollinger['signal'] == 'SHORT':
-                bearish_signals += 2 if bollinger['extreme'] else 1
+                bearish_signals += weight + bonus
                 if bollinger['reasoning']:
-                    reasoning.append(bollinger['reasoning'])
+                    reasoning.append(f"[W{weight}+{bonus}] {bollinger['reasoning']}")
         
-        # 4. Фандинг рейт - учитываем даже не экстремальный
-        if funding['signal'] != 'NEUTRAL':
-            if funding['signal'] == 'LONG':
-                bullish_signals += 2 if funding['extreme'] else 1
-                if funding['reasoning']:
-                    reasoning.append(funding['reasoning'])
-            elif funding['signal'] == 'SHORT':
-                bearish_signals += 2 if funding['extreme'] else 1
-                if funding['reasoning']:
-                    reasoning.append(funding['reasoning'])
-        
-        # 5. Дисбаланс стакана - снижен порог с 2 до 1
-        if orderbook['strength'] >= 1:
-            if orderbook['signal'] == 'LONG':
-                bullish_signals += orderbook['strength']
-                if orderbook['reasoning']:
-                    reasoning.append(orderbook['reasoning'])
-            elif orderbook['signal'] == 'SHORT':
-                bearish_signals += orderbook['strength']
-                if orderbook['reasoning']:
-                    reasoning.append(orderbook['reasoning'])
-        
-        # 6. MACD crossover
+        # 10. MACD crossover (вес 2)
         if macd['crossover'] == 'BULLISH':
-            bullish_signals += 2
-            reasoning.append("MACD бычье пересечение")
+            weight = SIGNAL_WEIGHTS['macd']
+            bullish_signals += weight
+            reasoning.append(f"[W{weight}] MACD бычье пересечение")
         elif macd['crossover'] == 'BEARISH':
-            bearish_signals += 2
-            reasoning.append("MACD медвежье пересечение")
+            weight = SIGNAL_WEIGHTS['macd']
+            bearish_signals += weight
+            reasoning.append(f"[W{weight}] MACD медвежье пересечение")
         
-        # 7. Open Interest
+        # 11. Фандинг рейт (вес 1, но важен для контртренда)
+        if funding['signal'] != 'NEUTRAL':
+            weight = SIGNAL_WEIGHTS['funding']
+            bonus = 1 if funding['extreme'] else 0
+            if funding['signal'] == 'LONG':
+                bullish_signals += weight + bonus
+                if funding['reasoning']:
+                    reasoning.append(f"[W{weight}+{bonus}] {funding['reasoning']}")
+            elif funding['signal'] == 'SHORT':
+                bearish_signals += weight + bonus
+                if funding['reasoning']:
+                    reasoning.append(f"[W{weight}+{bonus}] {funding['reasoning']}")
+        
+        # 12. Дисбаланс стакана (вес 1)
+        if orderbook['strength'] >= 1:
+            weight = SIGNAL_WEIGHTS['orderbook']
+            bonus = min(2, orderbook['strength'] - 1)  # Бонус за сильный дисбаланс
+            if orderbook['signal'] == 'LONG':
+                bullish_signals += weight + bonus
+                if orderbook['reasoning']:
+                    reasoning.append(f"[W{weight}+{bonus}] {orderbook['reasoning']}")
+            elif orderbook['signal'] == 'SHORT':
+                bearish_signals += weight + bonus
+                if orderbook['reasoning']:
+                    reasoning.append(f"[W{weight}+{bonus}] {orderbook['reasoning']}")
+        
+        # 13. Open Interest (вес 1)
         if oi_change['reasoning']:
+            weight = SIGNAL_WEIGHTS['oi_change']
             if oi_change['trend'] == 'INCREASING':
                 # Рост OI усиливает текущий тренд
                 if bullish_signals > bearish_signals:
-                    bullish_signals += 1
+                    bullish_signals += weight
+                    reasoning.append(f"[W{weight}] {oi_change['reasoning']} (усиливает LONG)")
                 else:
-                    bearish_signals += 1
-                reasoning.append(oi_change['reasoning'])
+                    bearish_signals += weight
+                    reasoning.append(f"[W{weight}] {oi_change['reasoning']} (усиливает SHORT)")
         
-        logger.info(f"[SMART] Signals: Bullish={bullish_signals}, Bearish={bearish_signals}")
+        # Логируем взвешенные сигналы
+        logger.info(f"[SMART] Weighted Signals: Bullish={bullish_signals}, Bearish={bearish_signals}")
         
         # === КЛАССИЧЕСКАЯ ЛОГИКА (по тренду) ===
         
@@ -2656,8 +2798,15 @@ class SmartAnalyzer:
                 logger.warning(f"[SMART] ⚠️ Manipulation risk detected: {order_flow.get('reason', '')}")
                 warnings.append(f"⚠️ Риск манипуляции: {order_flow.get('reason', '')}")
         
-        # Проверка минимального R/R (динамический порог по режиму рынка)
-        min_rr = self.RR_THRESHOLDS.get(market_regime, self.MIN_RISK_REWARD)
+        # === АДАПТИВНЫЕ ПОРОГИ по режиму рынка ===
+        adaptive = self.get_adaptive_thresholds(market_regime)
+        min_rr = adaptive['min_rr']
+        min_quality = adaptive['min_quality']
+        min_confidence = adaptive['min_confidence']
+        
+        logger.info(f"[SMART] Adaptive thresholds for {market_regime.value}: Quality>={min_quality.name}, R/R>={min_rr}, Conf>={min_confidence:.0%}")
+        
+        # Проверка минимального R/R
         if levels['risk_reward'] < min_rr:
             logger.info(f"[SMART] Skip: R/R too low ({levels['risk_reward']:.2f} < {min_rr})")
             _signal_stats['rejected'] += 1
@@ -2691,16 +2840,16 @@ class SmartAnalyzer:
             confirmation_candle=confirmation.get('confirmed', False)
         )
         
-        # Фильтр по качеству (A_PLUS=5, A=4, B=3, C=2, D=1)
-        # Если quality < MIN_QUALITY, то качество слишком низкое
-        if quality.value < self.MIN_QUALITY.value:
-            logger.info(f"[SMART] Skip: Quality too low ({quality.name})")
+        # Фильтр по АДАПТИВНОМУ качеству (A_PLUS=5, A=4, B=3, C=2, D=1)
+        if quality.value < min_quality.value:
+            logger.info(f"[SMART] Skip: Quality too low ({quality.name} < {min_quality.name})")
             _signal_stats['rejected'] += 1
             _signal_stats['reasons']['low_quality'] += 1
             return None
         
-        if confidence < self.MIN_CONFIDENCE:
-            logger.info(f"[SMART] Skip: Confidence too low ({confidence:.0%})")
+        # Фильтр по АДАПТИВНОЙ уверенности
+        if confidence < min_confidence:
+            logger.info(f"[SMART] Skip: Confidence too low ({confidence:.0%} < {min_confidence:.0%})")
             _signal_stats['rejected'] += 1
             _signal_stats['reasons']['low_confidence'] += 1
             return None
@@ -2808,14 +2957,31 @@ class SmartAnalyzer:
     
     # ==================== COIN SELECTION ====================
     
+    # Категории монет для диверсификации
+    COIN_CATEGORIES = {
+        'major': ['BTC', 'ETH'],  # Основные - всегда включаем
+        'layer1': ['SOL', 'AVAX', 'NEAR', 'APT', 'SUI', 'SEI', 'TON', 'INJ', 'ATOM', 'DOT', 'ADA'],
+        'layer2': ['ARB', 'OP', 'STRK', 'ZK', 'MATIC', 'MANTA', 'METIS', 'IMX'],
+        'memes': ['PEPE', 'DOGE', 'SHIB', 'FLOKI', 'BONK', 'WIF', 'MEME', 'TURBO', 'NEIRO', 'POPCAT'],
+        'defi': ['UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'PENDLE', 'GMX', 'DYDX', 'SNX', 'COMP'],
+        'ai': ['FET', 'RNDR', 'TAO', 'WLD', 'ARKM', 'AGIX', 'OCEAN', 'GRT'],
+        'gaming': ['GALA', 'AXS', 'SAND', 'MANA', 'PIXEL', 'SUPER', 'MAGIC'],
+        'new': ['JUP', 'ENA', 'W', 'ETHFI', 'AEVO', 'PORTAL', 'DYM', 'ALT', 'PYTH']
+    }
+    
     async def select_best_coins(self, top_n: int = 5) -> List[str]:
         """
-        Выбор лучших монет для торговли
+        Выбор лучших монет для торговли v3.0 - КАТЕГОРИЙНЫЙ ПОДХОД
         
-        Критерии:
-        - Высокая ликвидность (>$50M оборот)
-        - Умеренная волатильность (1-4%)
-        - Чёткий тренд
+        СТРАТЕГИЯ:
+        1. Многоуровневая ликвидность + категорийный отбор
+        2. По 2-3 монеты из каждой категории для диверсификации
+        3. Приоритизация по волатильности и объёму
+        
+        КРИТЕРИИ:
+        - Минимум $20M оборот
+        - Волатильность 0.3-12%
+        - Диверсификация по категориям
         """
         
         try:
@@ -2831,7 +2997,17 @@ class SmartAnalyzer:
                 return self._default_coins()
             
             tickers = data.get('result', {}).get('list', [])
-            candidates = []
+            
+            # Словарь для хранения данных по монетам
+            coin_data_map = {}
+            
+            # Категории по ликвидности
+            high_liquidity = []      # >$100M
+            medium_liquidity = []    # $50-100M
+            low_liquidity = []       # $20-50M
+            
+            # Категории по типу монеты
+            category_coins = {cat: [] for cat in self.COIN_CATEGORIES.keys()}
             
             for ticker in tickers:
                 symbol = ticker.get('symbol', '')
@@ -2840,50 +3016,138 @@ class SmartAnalyzer:
                     continue
                 
                 # Фильтруем стейблы
-                skip = ['USDC', 'BUSD', 'TUSD', 'DAI', 'FDUSD']
+                skip = ['USDC', 'BUSD', 'TUSD', 'DAI', 'FDUSD', 'USDP', 'GUSD']
                 if any(s in symbol for s in skip):
                     continue
                 
                 try:
                     turnover = float(ticker.get('turnover24h', '0'))
                     price_change = abs(float(ticker.get('price24hPcnt', '0'))) * 100
+                    last_price = float(ticker.get('lastPrice', '0'))
                     
-                    # Фильтры
-                    if turnover < 50_000_000:  # Минимум $50M оборот
+                    # РАСШИРЕННЫЕ фильтры: 0.3-12% волатильность, $20M+ оборот
+                    if price_change < 0.3 or price_change > 12:
                         continue
-                    if price_change < 0.5 or price_change > 8:  # 0.5-8% движение
+                    if turnover < 20_000_000:
                         continue
                     
                     base = symbol.replace('USDT', '')
                     our_symbol = f"{base}/USDT"
                     
-                    # Скор = ликвидность * умеренная волатильность
-                    # Лучше: высокий оборот, волатильность 2-4%
-                    vol_score = 1.0 if 2 <= price_change <= 4 else 0.7
-                    score = (turnover / 1_000_000_000) * vol_score
+                    # Улучшенный скоринг
+                    if 2 <= price_change <= 5:
+                        vol_score = 1.0  # Идеальная волатильность
+                    elif 1 <= price_change < 2 or 5 < price_change <= 8:
+                        vol_score = 0.85
+                    elif 0.5 <= price_change < 1 or 8 < price_change <= 10:
+                        vol_score = 0.7
+                    else:
+                        vol_score = 0.5
                     
-                    candidates.append({
+                    liquidity_bonus = min(1.5, turnover / 100_000_000)
+                    score = vol_score * liquidity_bonus
+                    
+                    coin_info = {
                         'symbol': our_symbol,
+                        'base': base,
                         'score': score,
                         'turnover': turnover,
-                        'change': price_change
-                    })
+                        'change': price_change,
+                        'price': last_price
+                    }
+                    
+                    coin_data_map[base] = coin_info
+                    
+                    # Распределяем по ликвидности
+                    if turnover >= 100_000_000:
+                        high_liquidity.append(coin_info)
+                    elif turnover >= 50_000_000:
+                        medium_liquidity.append(coin_info)
+                    else:
+                        low_liquidity.append(coin_info)
+                    
+                    # Распределяем по категориям
+                    for cat_name, cat_coins in self.COIN_CATEGORIES.items():
+                        if base in cat_coins:
+                            category_coins[cat_name].append(coin_info)
+                            break
                     
                 except (ValueError, TypeError):
                     continue
             
             # Сортируем по скору
-            candidates.sort(key=lambda x: x['score'], reverse=True)
+            high_liquidity.sort(key=lambda x: x['score'], reverse=True)
+            medium_liquidity.sort(key=lambda x: x['score'], reverse=True)
+            low_liquidity.sort(key=lambda x: x['score'], reverse=True)
             
-            # Берём топ
-            result = [c['symbol'] for c in candidates[:top_n]]
+            for cat in category_coins:
+                category_coins[cat].sort(key=lambda x: x['score'], reverse=True)
             
-            # Всегда включаем BTC и ETH
-            for coin in ['BTC/USDT', 'ETH/USDT']:
-                if coin not in result:
-                    result.insert(0, coin)
+            # === КАТЕГОРИЙНЫЙ ОТБОР ===
+            result = []
+            used_bases = set()
             
-            logger.info(f"[COINS] Selected: {result[:top_n]}")
+            # 1. Всегда включаем BTC и ETH (если доступны)
+            for major in ['BTC', 'ETH']:
+                if major in coin_data_map:
+                    result.append(f"{major}/USDT")
+                    used_bases.add(major)
+            
+            # 2. По 2-3 монеты из каждой категории (кроме major)
+            coins_per_category = {
+                'layer1': 3,   # 3 Layer1
+                'layer2': 2,   # 2 Layer2
+                'memes': 3,    # 3 мема (высокая волатильность)
+                'defi': 2,     # 2 DeFi
+                'ai': 2,       # 2 AI
+                'gaming': 2,   # 2 Gaming
+                'new': 2       # 2 новых листинга
+            }
+            
+            for cat_name, count in coins_per_category.items():
+                cat_list = category_coins.get(cat_name, [])
+                added = 0
+                for coin in cat_list:
+                    if coin['base'] not in used_bases and added < count:
+                        result.append(coin['symbol'])
+                        used_bases.add(coin['base'])
+                        added += 1
+            
+            # 3. Добавляем высоколиквидные монеты, которые ещё не включены
+            for coin in high_liquidity:
+                if len(result) >= top_n:
+                    break
+                if coin['base'] not in used_bases:
+                    result.append(coin['symbol'])
+                    used_bases.add(coin['base'])
+            
+            # 4. Добавляем среднеликвидные с высокой волатильностью
+            volatile_medium = [c for c in medium_liquidity if c['change'] >= 3.0]
+            volatile_medium.sort(key=lambda x: x['change'], reverse=True)
+            for coin in volatile_medium:
+                if len(result) >= top_n:
+                    break
+                if coin['base'] not in used_bases:
+                    result.append(coin['symbol'])
+                    used_bases.add(coin['base'])
+            
+            # 5. Добавляем низколиквидные с экстремальными движениями
+            extreme_low = [c for c in low_liquidity if c['change'] >= 4.0]
+            extreme_low.sort(key=lambda x: x['change'], reverse=True)
+            for coin in extreme_low[:5]:
+                if len(result) >= top_n:
+                    break
+                if coin['base'] not in used_bases:
+                    result.append(coin['symbol'])
+                    used_bases.add(coin['base'])
+            
+            # Логируем распределение по категориям
+            cat_counts = {cat: len([c for c in result if c.replace('/USDT', '') in coins]) 
+                         for cat, coins in self.COIN_CATEGORIES.items()}
+            logger.info(f"[COINS] Category distribution: {cat_counts}")
+            logger.info(f"[COINS] Total selected: {len(result[:top_n])} | High: {len(high_liquidity)}, Med: {len(medium_liquidity)}, Low: {len(low_liquidity)}")
+            logger.info(f"[COINS] Top coins: {result[:min(10, top_n)]}")
+            
             return result[:top_n]
             
         except Exception as e:
@@ -2891,8 +3155,21 @@ class SmartAnalyzer:
             return self._default_coins()
     
     def _default_coins(self) -> List[str]:
-        """Дефолтный список"""
-        return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT']
+        """Расширенный дефолтный список с диверсификацией"""
+        return [
+            # Major
+            'BTC/USDT', 'ETH/USDT',
+            # Layer1
+            'SOL/USDT', 'AVAX/USDT', 'NEAR/USDT',
+            # Layer2
+            'ARB/USDT', 'OP/USDT',
+            # Memes
+            'DOGE/USDT', 'PEPE/USDT',
+            # DeFi
+            'LINK/USDT', 'UNI/USDT',
+            # AI
+            'FET/USDT', 'RNDR/USDT'
+        ]
 
 
 # ==================== GLOBAL INSTANCE ====================
@@ -2906,15 +3183,15 @@ async def find_best_setup(balance: float = 0, use_whale_data: bool = True) -> Op
     Возвращает только качественные сетапы (A+, A, B, C)
     Может учитывать данные китов с Hyperliquid
     """
-    # Выбираем монеты
-    coins = await smart_analyzer.select_best_coins(top_n=10)
+    # Выбираем монеты - УВЕЛИЧЕНО для большего количества возможностей
+    coins = await smart_analyzer.select_best_coins(top_n=25)
     
     # Получаем данные китов если доступно
     whale_signals = {}
     if use_whale_data:
         try:
             from whale_tracker import get_combined_whale_analysis
-            for coin in coins[:5]:  # Топ-5 монет проверяем на китов
+            for coin in coins[:10]:  # Топ-10 монет проверяем на китов (увеличено с 5)
                 ticker = coin.split('/')[0]
                 analysis = await get_combined_whale_analysis(ticker)
                 if analysis.get('confidence', 0) > 0.5:

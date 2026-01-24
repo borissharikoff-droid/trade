@@ -211,7 +211,12 @@ def should_exit_early(
     pnl_percent: float
 ) -> Tuple[bool, str, float]:
     """
-    Проверка необходимости раннего выхода
+    Проверка необходимости раннего выхода v2.0
+    
+    УЛУЧШЕНО:
+    - Более агрессивные пороги для защиты прибыли
+    - Добавлен вариант close_30 для частичного выхода
+    - Улучшенная логика при разных уровнях PnL
     
     Args:
         pos: Данные позиции
@@ -221,8 +226,8 @@ def should_exit_early(
     
     Returns:
         (should_exit, action, close_percent)
-        action: 'close_50', 'close_100', 'none'
-        close_percent: 0.5, 1.0, 0.0
+        action: 'close_30', 'close_50', 'close_100', 'none'
+        close_percent: 0.3, 0.5, 1.0, 0.0
     """
     if not reversal_signals['reversal_risk']:
         return False, 'none', 0.0
@@ -230,15 +235,76 @@ def should_exit_early(
     action = reversal_signals['recommended_action']
     confidence = reversal_signals['confidence']
     
-    # Если позиция в плюсе - можно выходить раньше
-    # Если в минусе - ждём больше подтверждений
-    if pnl_percent > 0:
-        # В плюсе - более агрессивный выход
-        if confidence >= 0.6:
+    # === УЛУЧШЕННАЯ ЛОГИКА ВЫХОДА ===
+    
+    # Если позиция в хорошем плюсе (>2%) - более агрессивный выход
+    if pnl_percent > 2.0:
+        if confidence >= 0.50:  # Снижен порог с 0.6
             return True, action, 1.0 if action == 'close_100' else 0.5
+    
+    # Если позиция в небольшом плюсе (0-2%)
+    elif pnl_percent > 0:
+        if confidence >= 0.55:  # Снижен с 0.6
+            # Частичный выход для защиты прибыли
+            if confidence >= 0.70:
+                return True, 'close_100', 1.0  # Закрыть всё
+            elif confidence >= 0.60:
+                return True, 'close_50', 0.5   # Закрыть 50%
+            else:
+                return True, 'close_30', 0.3   # Закрыть 30%
+    
+    # Если в небольшом минусе (>-1%) - даём шанс
+    elif pnl_percent > -1.0:
+        if confidence >= 0.70:  # Снижен с 0.75
+            return True, 'close_50', 0.5  # Закрыть 50%
+    
+    # Если в минусе (<-1%) - более консервативный
     else:
-        # В минусе - более консервативный (больше подтверждений)
         if confidence >= 0.75:
             return True, action, 1.0 if action == 'close_100' else 0.5
     
     return False, 'none', 0.0
+
+
+def get_adaptive_tp_multiplier(
+    movement_speed: float,
+    volume_ratio: float,
+    market_regime: str
+) -> float:
+    """
+    Получить адаптивный множитель для TP на основе силы движения
+    
+    Args:
+        movement_speed: Скорость движения (в ATR за час)
+        volume_ratio: Отношение текущего объёма к среднему
+        market_regime: Режим рынка (STRONG_UPTREND, UPTREND, etc.)
+    
+    Returns:
+        Множитель для TP (0.9 - 1.5)
+    """
+    multiplier = 1.0
+    
+    # Скорость движения
+    if movement_speed > 2.0:  # Очень быстрое движение
+        multiplier += 0.20  # +20% к TP
+    elif movement_speed > 1.0:  # Быстрое движение
+        multiplier += 0.10  # +10% к TP
+    elif movement_speed < 0.3:  # Очень медленное
+        multiplier -= 0.10  # -10% к TP
+    
+    # Объём
+    if volume_ratio > 2.0:  # Высокий объём
+        multiplier += 0.10  # +10% к TP
+    elif volume_ratio > 1.5:
+        multiplier += 0.05  # +5% к TP
+    elif volume_ratio < 0.5:  # Низкий объём
+        multiplier -= 0.10  # -10% к TP
+    
+    # Режим рынка
+    if market_regime in ['STRONG_UPTREND', 'STRONG_DOWNTREND']:
+        multiplier += 0.15  # В сильном тренде увеличиваем TP
+    elif market_regime == 'HIGH_VOLATILITY':
+        multiplier -= 0.15  # В волатильности уменьшаем TP
+    
+    # Ограничиваем множитель
+    return max(0.85, min(1.5, multiplier))

@@ -134,10 +134,14 @@ def check_correlation_risk(user_positions: List[Dict], new_symbol: str,
 
 def calculate_partial_close_amount(entry: float, current: float, tp1: float, 
                                   direction: str, total_amount: float,
-                                  close_percent: float = 0.25,
+                                  close_percent: float = 0.30,  # УВЕЛИЧЕНО с 25% до 30%
                                   progress_threshold: float = 0.5) -> float:
     """
-    Рассчитать размер частичного закрытия на полпути к TP
+    Рассчитать размер частичного закрытия на полпути к TP v2.0
+    
+    УЛУЧШЕНО:
+    - Увеличен процент закрытия с 25% до 30% для лучшей защиты прибыли
+    - Расширен диапазон срабатывания
     
     Args:
         entry: Цена входа
@@ -145,7 +149,7 @@ def calculate_partial_close_amount(entry: float, current: float, tp1: float,
         tp1: Первый Take Profit
         direction: Направление позиции
         total_amount: Общий размер позиции
-        close_percent: Процент позиции для закрытия (25% по умолчанию)
+        close_percent: Процент позиции для закрытия (30% по умолчанию - УВЕЛИЧЕНО)
         progress_threshold: Порог прогресса к TP (50% по умолчанию)
     
     Returns:
@@ -163,8 +167,8 @@ def calculate_partial_close_amount(entry: float, current: float, tp1: float,
     
     progress = current_distance / total_distance
     
-    # Закрываем на 45-55% пути к TP
-    if progress_threshold - 0.05 <= progress <= progress_threshold + 0.05:
+    # Закрываем на 40-60% пути к TP (расширен диапазон с 45-55%)
+    if progress_threshold - 0.10 <= progress <= progress_threshold + 0.10:
         close_amount = total_amount * close_percent
         logger.info(f"[PARTIAL] Closing {close_percent:.0%} at {progress:.0%} progress to TP1")
         return close_amount
