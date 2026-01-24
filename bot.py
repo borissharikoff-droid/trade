@@ -496,9 +496,17 @@ def db_add_position(user_id: int, pos: Dict) -> int:
     logger.info(f"[DB] Position {pos_id} added for user {user_id}")
     return pos_id
 
+# Whitelist of allowed position columns for updates (security)
+ALLOWED_POSITION_COLUMNS = {
+    'current', 'sl', 'tp', 'pnl', 'bybit_qty', 'realized_pnl', 'amount'
+}
+
 def db_update_position(pos_id: int, **kwargs):
-    """Обновить позицию"""
+    """Обновить позицию (с защитой от SQL injection)"""
     for key, value in kwargs.items():
+        if key not in ALLOWED_POSITION_COLUMNS:
+            logger.warning(f"[SECURITY] Blocked attempt to update invalid position column: {key}")
+            continue
         run_sql(f"UPDATE positions SET {key} = ? WHERE id = ?", (value, pos_id))
 
 def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
@@ -707,6 +715,7 @@ REFERRAL_COMMISSION_LEVELS = [
     3.0,   # Уровень 2 (реферал реферала): 3% от комиссии
     2.0,   # Уровень 3 (реферал реферала реферала): 2% от комиссии
 ]
+REFERRAL_BONUS_LEVELS = [5.0, 2.0, 1.0]  # Бонусы за депозит по уровням: $5, $2, $1
 MAX_REFERRAL_LEVELS = len(REFERRAL_COMMISSION_LEVELS)  # Максимум уровней
 
 # ==================== РАСШИРЕННЫЕ ФУНКЦИИ РЕФЕРАЛЬНОЙ СИСТЕМЫ ====================
@@ -1065,8 +1074,7 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 # Configure rate limiter after ADMIN_IDS is defined
 configure_rate_limiter(run_sql, USE_POSTGRES, ADMIN_IDS)
-REFERRAL_BONUS = 5.0  # $5 бонус рефереру уровня 1 при депозите
-REFERRAL_BONUS_LEVELS = [5.0, 2.0, 1.0]  # Бонусы за депозит: уровень 1 = $5, уровень 2 = $2, уровень 3 = $1
+REFERRAL_BONUS = 5.0  # $5 бонус рефереру уровня 1 при депозите (для совместимости)
 COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
 
 # Многоуровневая реферальная система - проценты от комиссии для каждого уровня
@@ -6897,11 +6905,17 @@ async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             earned = stats.get(earnings_key, 0.0)
             levels_info += f"├ Уровень {level}: {percent}% • {count} чел • <b>${earned:.2f}</b>\n"
     
+    # Формируем информацию о бонусах за депозит
+    deposit_bonus_info = ""
+    if REFERRAL_BONUS_LEVELS:
+        deposit_bonus_info = "├ За депозит реферала: "
+        bonus_parts = [f"${b:.0f}" for b in REFERRAL_BONUS_LEVELS]
+        deposit_bonus_info += " / ".join(bonus_parts) + " (по уровням)\n"
+    
     text = f"""<b>🤝 Реферальная программа</b>
 
 <b>💎 Вознаграждения:</b>
-├ <b>${REFERRAL_BONUS:.2f}</b> за первый депозит реферала
-└ <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки (3 уровня)
+{deposit_bonus_info}└ С комиссий сделок: {REFERRAL_COMMISSION_LEVELS[0]}% / {REFERRAL_COMMISSION_LEVELS[1]}% / {REFERRAL_COMMISSION_LEVELS[2]}%
 {levels_info}
 <b>📈 Итого:</b>
 ├ Рефералов всего: <b>{stats['total_count']}</b>
@@ -6955,11 +6969,17 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             earned = stats.get(earnings_key, 0.0)
             levels_info += f"├ Уровень {level}: {percent}% • {count} чел • <b>${earned:.2f}</b>\n"
     
+    # Формируем информацию о бонусах за депозит
+    deposit_bonus_info = ""
+    if REFERRAL_BONUS_LEVELS:
+        deposit_bonus_info = "├ За депозит реферала: "
+        bonus_parts = [f"${b:.0f}" for b in REFERRAL_BONUS_LEVELS]
+        deposit_bonus_info += " / ".join(bonus_parts) + " (по уровням)\n"
+    
     text = f"""<b>🤝 Реферальная программа</b>
 
 <b>💎 Вознаграждения:</b>
-├ <b>${REFERRAL_BONUS:.2f}</b> за первый депозит реферала
-└ <b>{REFERRAL_COMMISSION_LEVELS[0] if REFERRAL_COMMISSION_LEVELS else 0}%</b> с каждой сделки (3 уровня)
+{deposit_bonus_info}└ С комиссий сделок: {REFERRAL_COMMISSION_LEVELS[0]}% / {REFERRAL_COMMISSION_LEVELS[1]}% / {REFERRAL_COMMISSION_LEVELS[2]}%
 {levels_info}
 <b>📈 Итого:</b>
 ├ Рефералов всего: <b>{stats['total_count']}</b>
