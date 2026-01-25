@@ -2180,39 +2180,27 @@ class SmartAnalyzer:
         elif risk_reward < 1.5:
             score -= 15  # Строже для низкого R/R
         
-        # Определяем качество (ПОВЫШЕННЫЕ пороги для высокого винрейта)
-        if score >= 80:
-            quality = SetupQuality.A_PLUS
-        elif score >= 65:
-            quality = SetupQuality.A
-        elif score >= 50:
-            quality = SetupQuality.B
-        elif score >= 35:
-            quality = SetupQuality.C
-        
-        # Нормализуем confidence - УЛУЧШЕННАЯ формула
+        # Определяем качество и confidence - УЛУЧШЕННАЯ формула
         # A_PLUS (80+) -> 78-95%
         # A (65-79) -> 68-77%
         # B (50-64) -> 58-67%
         # C (35-49) -> 45-57%
         # D (<35) -> 30-44%
         if score >= 80:
-            # A_PLUS: 78% + (score-80) * 0.5% = 78-95%
+            quality = SetupQuality.A_PLUS
             confidence = min(0.95, 0.78 + (score - 80) * 0.005)
         elif score >= 65:
-            # A: 68% + (score-65) * 0.6% = 68-77%
+            quality = SetupQuality.A
             confidence = 0.68 + (score - 65) * 0.006
         elif score >= 50:
-            # B: 58% + (score-50) * 0.6% = 58-67%
+            quality = SetupQuality.B
             confidence = 0.58 + (score - 50) * 0.006
         elif score >= 35:
-            # C: 45% + (score-35) * 0.8% = 45-57%
+            quality = SetupQuality.C
             confidence = 0.45 + (score - 35) * 0.008
         else:
-            # D: 30-44%
-            confidence = max(0.30, 0.30 + score * 0.004)
-        else:
             quality = SetupQuality.D
+            confidence = max(0.30, 0.30 + score * 0.004)
         
         logger.info(f"[QUALITY] Score={score}, Quality={quality.name}, Confidence={confidence:.0%}, MTF={mtf_aligned}, SMC={at_order_block or in_fvg_zone or liquidity_swept}")
         
