@@ -1728,10 +1728,22 @@ def sanitize_pnl(pnl: float, max_pnl: float = None) -> float:
     if pnl is None or (isinstance(pnl, float) and (math.isnan(pnl) or math.isinf(pnl))):
         logger.warning(f"[SANITIZE] Invalid PnL value: {pnl}, defaulting to 0.0")
         return 0.0
+    
+    pnl_float = float(pnl)
+    
+    # Handle extremely small values (PostgreSQL real overflow)
+    if abs(pnl_float) < 1e-10:
+        return 0.0
+    
+    # Handle extremely large values
+    if abs(pnl_float) > 1e10:
+        logger.warning(f"[SANITIZE] PnL too large: {pnl_float}, capping")
+        return 1e10 if pnl_float > 0 else -1e10
+    
     # Bound to reasonable range if max_pnl specified
     if max_pnl:
-        return max(-max_pnl, min(max_pnl, float(pnl)))
-    return float(pnl)
+        return round(max(-max_pnl, min(max_pnl, pnl_float)), 4)
+    return round(pnl_float, 4)
 
 
 def sanitize_amount(amount: float) -> float:
@@ -5112,7 +5124,22 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Позиции не найдены", show_alert=True)
         return
     
-    await query.edit_message_text("<b>⏳ Закрываем позиции...</b>", parse_mode="HTML")
+    # Фильтруем позиции с amount > 0
+    zero_amount = [p for p in to_close if p.get('amount', 0) <= 0]
+    for zero_pos in zero_amount:
+        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+        logger.info(f"[CLOSE_STACK] Removed zero-amount position {zero_pos['id']}")
+    
+    to_close = [p for p in to_close if p.get('amount', 0) > 0]
+    
+    if not to_close:
+        # Все позиции были уже закрыты
+        await edit_or_send(query, "<b>✅ Позиции закрыты</b>\n\nВсе позиции были уже закрыты частичными тейками.", 
+                          InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]))
+        return
+    
+    await edit_or_send(query, "<b>⏳ Закрываем позиции...</b>", None)
     
     ticker = to_close[0]['symbol'].split("/")[0] if "/" in to_close[0]['symbol'] else to_close[0]['symbol']
     
@@ -5153,12 +5180,11 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     if failed_closes and hedging_enabled:
         to_close = [p for p in to_close if p not in failed_closes]
         if not to_close:
-            await query.edit_message_text(
+            await edit_or_send(query,
                 f"<b>❌ Ошибка закрытия</b>\n\n"
                 f"Не удалось закрыть позиции на Bybit.\n"
                 f"Позиции сохранены. Попробуйте ещё раз.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
             )
             return
     
@@ -5846,6 +5872,16 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 change = random.uniform(-0.003, 0.004)
                 pos['current'] = pos['current'] * (1 + change)
             
+            # Проверка на микро-amount (< $0.01) - автозакрытие
+            if pos['amount'] < 0.01:
+                realized_pnl = pos.get('realized_pnl', 0) or 0
+                db_close_position(pos['id'], pos.get('current', pos['entry']), realized_pnl, 'MICRO_CLOSE')
+                updated_positions = [p for p in user_positions if p.get('id') != pos['id']]
+                update_positions_cache(user_id, updated_positions)
+                user_positions = updated_positions
+                logger.info(f"[PROCESS] Auto-closed micro position {pos['id']} (amount=${pos['amount']:.6f})")
+                continue
+            
             # PnL - ВСЕГДА рассчитываем локально (Bybit PnL общий для всей позиции, не для отдельной записи бота)
             # ВАЖНО: комиссия НЕ вычитается здесь - она уже учтена в начальном pnl = -commission при открытии
             if pos['direction'] == "LONG":
@@ -5856,10 +5892,16 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
             # Валидация PnL - ограничиваем экстремальные значения
             raw_pnl = pos['amount'] * LEVERAGE * pnl_percent
             pos['pnl'] = sanitize_pnl(raw_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)  # Max 200% от позиции
+            
+            # Дополнительная проверка на NaN/Inf перед записью в БД
+            if pos['pnl'] is None or (isinstance(pos['pnl'], float) and (pos['pnl'] != pos['pnl'] or abs(pos['pnl']) > 1e10)):
+                pos['pnl'] = 0.0
+                logger.warning(f"[PROCESS] Fixed invalid PnL for position {pos['id']}")
+            
             pnl_percent_display = pnl_percent * 100  # Для удобства
             
             # Обновляем в БД
-            db_update_position(pos['id'], current=pos['current'], pnl=pos['pnl'])
+            db_update_position(pos['id'], current=pos['current'], pnl=round(pos['pnl'], 4))
             
             # === ПРОДВИНУТОЕ УПРАВЛЕНИЕ ПОЗИЦИЯМИ ===
             if ADVANCED_POSITION_MANAGEMENT:
