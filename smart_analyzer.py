@@ -2323,6 +2323,51 @@ class SmartAnalyzer:
         reward = abs(tp1 - entry)
         risk_reward = reward / risk if risk > 0 else 0
         
+        # === ГАРАНТИЯ МИНИМАЛЬНОГО R/R ===
+        # Если R/R слишком низкий, пересчитываем TP на основе ATR
+        MIN_GUARANTEED_RR = 1.2  # Минимум 1:1.2
+        
+        if risk_reward < MIN_GUARANTEED_RR and risk > 0:
+            min_reward = risk * MIN_GUARANTEED_RR
+            
+            if direction == "LONG":
+                new_tp1 = entry + min_reward
+                # Проверяем что новый TP1 не дальше TP2
+                if new_tp1 < tp2:
+                    old_tp1 = tp1
+                    tp1 = new_tp1
+                    reward = min_reward
+                    risk_reward = MIN_GUARANTEED_RR
+                    logger.info(f"[LEVELS] TP1 adjusted for min R/R: {old_tp1:.4f} -> {tp1:.4f} (R/R: {risk_reward:.2f})")
+            else:  # SHORT
+                new_tp1 = entry - min_reward
+                # Проверяем что новый TP1 не дальше TP2
+                if new_tp1 > tp2:
+                    old_tp1 = tp1
+                    tp1 = new_tp1
+                    reward = min_reward
+                    risk_reward = MIN_GUARANTEED_RR
+                    logger.info(f"[LEVELS] TP1 adjusted for min R/R: {old_tp1:.4f} -> {tp1:.4f} (R/R: {risk_reward:.2f})")
+        
+        # Финальная проверка - если R/R всё ещё плохой, используем ATR-based
+        if risk_reward < 0.8:
+            logger.warning(f"[LEVELS] R/R still low ({risk_reward:.2f}), using ATR fallback")
+            if direction == "LONG":
+                sl = entry - atr * 2.0
+                tp1 = entry + atr * 2.5
+                tp2 = entry + atr * 4.0
+                tp3 = entry + atr * 6.0
+            else:
+                sl = entry + atr * 2.0
+                tp1 = entry - atr * 2.5
+                tp2 = entry - atr * 4.0
+                tp3 = entry - atr * 6.0
+            
+            risk = abs(entry - sl)
+            reward = abs(tp1 - entry)
+            risk_reward = reward / risk if risk > 0 else 1.25
+            logger.info(f"[LEVELS] ATR fallback applied: SL={sl:.4f}, TP1={tp1:.4f}, R/R={risk_reward:.2f}")
+        
         return {
             'stop_loss': sl,
             'take_profit_1': tp1,
