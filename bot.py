@@ -2122,23 +2122,52 @@ async def send_menu_photo(bot, chat_id: int, banner_type: str, text: str, reply_
     
     banner_id = get_banner(banner_type)
     
-    if message_to_edit and banner_id:
-        # Пробуем отредактировать существующее сообщение с фото
-        try:
-            await message_to_edit.edit_media(
-                media=InputMediaPhoto(media=banner_id, caption=text, parse_mode="HTML"),
-                reply_markup=reply_markup
-            )
-            return
-        except Exception as e:
-            # Если не получилось - удаляем и отправляем новое
+    if message_to_edit:
+        current_has_photo = message_to_edit.photo is not None and len(message_to_edit.photo) > 0
+        
+        if current_has_photo and banner_id:
+            # Оба с фото - редактируем media
             try:
-                await message_to_edit.delete()
-            except:
-                pass
+                await message_to_edit.edit_media(
+                    media=InputMediaPhoto(media=banner_id, caption=text, parse_mode="HTML"),
+                    reply_markup=reply_markup
+                )
+                return
+            except Exception as e:
+                logger.warning(f"[BANNER] edit_media failed: {e}")
+        
+        elif current_has_photo and not banner_id:
+            # Было фото, нужен текст - редактируем caption
+            try:
+                await message_to_edit.edit_caption(
+                    caption=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+                return
+            except Exception as e:
+                logger.warning(f"[BANNER] edit_caption failed: {e}")
+        
+        elif not current_has_photo and not banner_id:
+            # Оба текст - редактируем текст
+            try:
+                await message_to_edit.edit_text(
+                    text=text,
+                    reply_markup=reply_markup,
+                    parse_mode="HTML"
+                )
+                return
+            except Exception as e:
+                logger.warning(f"[BANNER] edit_text failed: {e}")
+        
+        # Если текст->фото или что-то пошло не так - удаляем и отправляем новое
+        try:
+            await message_to_edit.delete()
+        except:
+            pass
     
+    # Отправляем новое сообщение
     if banner_id:
-        # Отправляем фото с caption
         try:
             await bot.send_photo(
                 chat_id=chat_id,
@@ -2153,6 +2182,25 @@ async def send_menu_photo(bot, chat_id: int, banner_type: str, text: str, reply_
     
     # Fallback - просто текст
     await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
+
+
+async def edit_or_send(query, text: str, reply_markup, parse_mode: str = "HTML"):
+    """Умное редактирование - работает и с фото и с текстом"""
+    message = query.message
+    
+    if message.photo:
+        # Сообщение с фото - редактируем caption
+        try:
+            await message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
+            return
+        except Exception:
+            pass
+    
+    # Обычное текстовое сообщение
+    try:
+        await message.edit_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        pass
 
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2279,7 +2327,7 @@ async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def stars_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запрос своей суммы для Stars"""
@@ -2296,7 +2344,7 @@ async def stars_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     context.user_data['awaiting_stars_amount'] = True
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -2430,7 +2478,7 @@ async def pay_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def crypto_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запрос своей суммы для crypto депозита"""
@@ -2444,7 +2492,7 @@ async def crypto_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
 Введи сумму в USDT (от $1 до $1000):"""
     
     keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="pay_crypto")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def handle_crypto_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Обработка ввода своей суммы для crypto"""
@@ -2542,11 +2590,8 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
     crypto_token = os.getenv("CRYPTO_BOT_TOKEN")
     
     if not crypto_token:
-        await query.edit_message_text(
-            "<b>❌ Временно недоступно</b>\n\nCrypto-платежи временно недоступны. Попробуйте позже.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]]),
-            parse_mode="HTML"
-        )
+        await edit_or_send(query, "<b>❌ Временно недоступно</b>\n\nCrypto-платежи временно недоступны. Попробуйте позже.",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]]))
         return
     
     try:
@@ -2588,7 +2633,7 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
             [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
         ]
         
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
         
     except Exception as e:
         logger.error(f"[CRYPTO] Error: {e}")
@@ -2655,7 +2700,7 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                         [InlineKeyboardButton("🔄 Проверить снова", callback_data=f"check_{invoice_id}")],
                         [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
                     ]
-                    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+                    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
                     return
                 
                 invoice = data["result"]["items"][0]
@@ -2693,7 +2738,7 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
 💰 Баланс: ${user['balance']:.2f}"""
             
             keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
         else:
             # Платёж не оплачен
             amount = pending_info['amount']
@@ -2708,7 +2753,7 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
                 [InlineKeyboardButton("🔄 Проверить снова", callback_data=f"check_{invoice_id}")],
                 [InlineKeyboardButton("🔙 Отмена", callback_data="deposit")]
             ]
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
             
     except Exception as e:
         logger.error(f"[CRYPTO] Check error: {e}")
@@ -2830,7 +2875,7 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка вывода средств"""
@@ -2918,7 +2963,7 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     keyboard = [[InlineKeyboardButton("🔙 Отмена", callback_data="withdraw_menu")]]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def withdraw_custom_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработчик для кнопки 'Своя сумма' в выводе"""
@@ -3195,7 +3240,7 @@ async def auto_trade_daily_menu(update: Update, context: ContextTypes.DEFAULT_TY
         [InlineKeyboardButton("🔙 Назад", callback_data="auto_trade_menu")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def auto_trade_set_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Установить лимит сделок в день"""
@@ -3239,7 +3284,7 @@ async def auto_trade_winrate_menu(update: Update, context: ContextTypes.DEFAULT_
         [InlineKeyboardButton("🔙 Назад", callback_data="auto_trade_menu")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def auto_trade_set_winrate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Установить успешность для авто-трейда"""
@@ -3569,7 +3614,7 @@ PnL: {pnl_sign}${total_pnl:.2f}
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades"),
                  InlineKeyboardButton("🔙 Меню", callback_data="back")]]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
     logger.info(f"[CLOSE_SYMBOL] User {user_id}: closed {ticker}, PnL=${total_pnl:.2f}")
 
 
@@ -3728,7 +3773,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
     
     logger.info(f"[CLOSE_ALL] User {user_id}: closed {closed_count} positions, total PnL: ${total_pnl:.2f}")
 
@@ -3791,7 +3836,7 @@ Winrate: <b>{winrate}%</b>
             [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
         ]
         try:
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
         except BadRequest:
             pass  # Сообщение не изменилось
         return
@@ -3871,7 +3916,7 @@ Winrate: <b>{winrate}%</b>
     keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
     try:
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
     except BadRequest:
         pass  # Сообщение не изменилось
 
@@ -4807,7 +4852,7 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 💰 Баланс: ${user['balance']:.2f}"""
         
         keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
         
         logger.info(f"[CLOSE] User {user_id} closed {ticker} position {pos_id}, PnL: ${pnl:.2f}")
         
@@ -4961,7 +5006,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
 💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запрос своей суммы"""
@@ -5046,7 +5091,7 @@ async def custom_amount_prompt(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("❌ Отмена", callback_data="skip")],
         [InlineKeyboardButton("🏠 Домой", callback_data="back"), InlineKeyboardButton("📊 Сделки", callback_data="trades")]
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка введённой суммы"""
@@ -7290,7 +7335,7 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать реферальную программу через меню"""
@@ -7340,7 +7385,7 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def my_referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать список рефералов пользователя"""
@@ -7376,7 +7421,7 @@ async def my_referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="referral_menu")]]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 async def history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать историю сделок через меню"""
@@ -7397,7 +7442,7 @@ async def history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
 
 # ==================== ИСТОРИЯ СДЕЛОК ====================
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
