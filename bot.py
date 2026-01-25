@@ -2101,7 +2101,22 @@ def update_positions_cache(user_id: int, positions: List[Dict]):
     positions_cache.set(user_id, positions)
 
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
+# Кэш file_id для баннера меню (чтобы не загружать каждый раз)
+MENU_BANNER_FILE_ID = None
+MENU_BANNER_PATH = "menu_banner.png"  # Путь к файлу баннера
+
+def load_menu_banner_from_db():
+    """Загрузить file_id баннера из БД"""
+    global MENU_BANNER_FILE_ID
+    if not MENU_BANNER_FILE_ID:
+        saved = db_get_setting("menu_banner_file_id")
+        if saved:
+            MENU_BANNER_FILE_ID = saved
+            logger.info(f"[MENU] Banner loaded from DB: {saved[:30]}...")
+    return MENU_BANNER_FILE_ID
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global MENU_BANNER_FILE_ID
     user_id = update.effective_user.id
     
     # Rate limiting is now handled by @rate_limit decorator
@@ -2145,9 +2160,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     total_profit = stats['total_pnl']  # Используем сумму PnL из истории вместо users.total_profit
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
-    text = f"""<b>🏠 YULA Меню</b>
-
-Торговля: {trading_status}
+    text = f"""Торговля: {trading_status}
 Авто-трейд: {auto_trade_status}
 
 📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}
@@ -2163,23 +2176,82 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
+    # Если это callback (кнопка "Назад") - редактируем сообщение
     if update.callback_query:
         try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            # При возврате назад пробуем редактировать caption фото
+            await update.callback_query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
         except Exception:
-            await context.bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode="HTML")
+            # Если не получилось (например, это не фото) - отправляем новое
+            try:
+                await update.callback_query.message.delete()
+            except Exception:
+                pass
+            await send_menu_with_banner(context.bot, user_id, text, reply_markup)
     else:
-        await context.bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode="HTML")
+        # Новое сообщение - отправляем с баннером
+        await send_menu_with_banner(context.bot, user_id, text, reply_markup)
+
+
+async def send_menu_with_banner(bot, user_id: int, text: str, reply_markup) -> None:
+    """Отправить меню с баннером"""
+    global MENU_BANNER_FILE_ID
+    
+    # Загружаем из БД если не в памяти
+    if not MENU_BANNER_FILE_ID:
+        load_menu_banner_from_db()
+    
+    try:
+        # Если есть закэшированный file_id - используем его
+        if MENU_BANNER_FILE_ID:
+            msg = await bot.send_photo(
+                chat_id=user_id,
+                photo=MENU_BANNER_FILE_ID,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        else:
+            # Пробуем отправить из файла
+            import os
+            banner_path = os.path.join(os.path.dirname(__file__), MENU_BANNER_PATH)
+            
+            if os.path.exists(banner_path):
+                with open(banner_path, 'rb') as photo:
+                    msg = await bot.send_photo(
+                        chat_id=user_id,
+                        photo=photo,
+                        caption=text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML"
+                    )
+                # Кэшируем file_id для последующих отправок
+                MENU_BANNER_FILE_ID = msg.photo[-1].file_id
+                logger.info(f"[MENU] Banner cached with file_id: {MENU_BANNER_FILE_ID[:20]}...")
+            else:
+                # Файла нет - отправляем просто текст
+                logger.warning(f"[MENU] Banner not found at {banner_path}")
+                await bot.send_message(user_id, f"<b>🏠 YULA Меню</b>\n\n{text}", reply_markup=reply_markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[MENU] Error sending banner: {e}")
+        # Fallback - просто текст
+        await bot.send_message(user_id, f"<b>🏠 YULA Меню</b>\n\n{text}", reply_markup=reply_markup, parse_mode="HTML")
 
 # ==================== ПОПОЛНЕНИЕ ====================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    logger.info(f"[DEPOSIT] User {update.effective_user.id}")
+    user_id = update.effective_user.id
+    logger.info(f"[DEPOSIT] User {user_id}")
     await query.answer()
+    
+    user = get_user(user_id)
+    balance = user['balance']
     
     text = f"""<b>💳 Пополнение</b>
 
-Минимум: ${MIN_DEPOSIT}"""
+Минимум: ${MIN_DEPOSIT}
+
+💰 Баланс: <b>${balance:.2f}</b>"""
     
     keyboard = [
         [InlineKeyboardButton("⭐ Telegram Stars", callback_data="pay_stars")],
@@ -2187,7 +2259,13 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    # Пробуем редактировать caption (если это фото) или text
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -2218,7 +2296,11 @@ async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 
 async def stars_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2233,10 +2315,14 @@ async def stars_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
 <i>Например: 15</i>"""
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="pay_stars")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
     context.user_data['awaiting_stars_amount'] = True
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -2370,7 +2456,11 @@ async def pay_crypto_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def crypto_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запрос своей суммы для crypto депозита"""
@@ -2770,7 +2860,11 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обработка вывода средств"""
@@ -3091,7 +3185,11 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def auto_trade_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Вкл/выкл авто-трейда"""
@@ -6671,6 +6769,57 @@ PnL сегодня: ${smart_state['daily_pnl']:.2f}
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+async def setbanner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Установить баннер меню из фото: отправьте фото с командой /setbanner"""
+    global MENU_BANNER_FILE_ID
+    
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    # Проверяем есть ли фото в сообщении
+    if update.message.photo:
+        # Берём самое большое фото
+        file_id = update.message.photo[-1].file_id
+        MENU_BANNER_FILE_ID = file_id
+        
+        # Сохраняем в БД для персистентности
+        db_set_setting("menu_banner_file_id", file_id)
+        
+        await update.message.reply_text(
+            f"<b>✅ Баннер установлен!</b>\n\n<code>{file_id[:30]}...</code>",
+            parse_mode="HTML"
+        )
+        logger.info(f"[ADMIN] Banner set by {user_id}: {file_id[:30]}...")
+    elif update.message.reply_to_message and update.message.reply_to_message.photo:
+        # Можно ответить на фото командой
+        file_id = update.message.reply_to_message.photo[-1].file_id
+        MENU_BANNER_FILE_ID = file_id
+        db_set_setting("menu_banner_file_id", file_id)
+        
+        await update.message.reply_text(
+            f"<b>✅ Баннер установлен!</b>\n\n<code>{file_id[:30]}...</code>",
+            parse_mode="HTML"
+        )
+        logger.info(f"[ADMIN] Banner set by {user_id}: {file_id[:30]}...")
+    else:
+        # Показываем инструкцию
+        current = MENU_BANNER_FILE_ID or db_get_setting("menu_banner_file_id")
+        status = f"Текущий: <code>{current[:30]}...</code>" if current else "Не установлен"
+        
+        await update.message.reply_text(
+            f"""<b>🖼 Установка баннера меню</b>
+
+{status}
+
+<b>Как установить:</b>
+1. Отправьте фото с подписью /setbanner
+2. Или ответьте на любое фото командой /setbanner""",
+            parse_mode="HTML"
+        )
+
+
 async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Управление авто-торговлей: /autotrade [on|off|status|balance AMOUNT]"""
     global AUTO_TRADE_ENABLED
@@ -7168,7 +7317,11 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать реферальную программу через меню"""
@@ -7218,7 +7371,11 @@ async def referral_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         [InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def my_referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать список рефералов пользователя"""
@@ -7254,7 +7411,11 @@ async def my_referrals_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="referral_menu")]]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 async def history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать историю сделок через меню"""
@@ -7275,7 +7436,11 @@ async def history_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    try:
+        await query.edit_message_caption(caption=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
 
 # ==================== ИСТОРИЯ СДЕЛОК ====================
 async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -7324,6 +7489,8 @@ def main() -> None:
     app.add_handler(CommandHandler("market", market_cmd))
     app.add_handler(CommandHandler("news", news_cmd))  # News analyzer
     app.add_handler(CommandHandler("autotrade", autotrade_cmd))
+    app.add_handler(CommandHandler("setbanner", setbanner_cmd))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.CaptionRegex(r'^/setbanner'), setbanner_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("reset", reset_all))
     app.add_handler(CommandHandler("resetall", reset_everything))
