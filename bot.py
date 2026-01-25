@@ -2100,6 +2100,60 @@ def update_positions_cache(user_id: int, positions: List[Dict]):
     """Обновить кэш позиций (thread-safe)"""
     positions_cache.set(user_id, positions)
 
+# ==================== БАННЕРЫ ДЛЯ МЕНЮ ====================
+# Кэш file_id для баннеров (загружается из БД)
+BANNER_CACHE = {}
+
+def get_banner(banner_type: str) -> str:
+    """Получить file_id баннера из кэша или БД"""
+    if banner_type not in BANNER_CACHE:
+        BANNER_CACHE[banner_type] = db_get_setting(f"banner_{banner_type}")
+    return BANNER_CACHE.get(banner_type, "")
+
+def set_banner(banner_type: str, file_id: str):
+    """Установить file_id баннера"""
+    BANNER_CACHE[banner_type] = file_id
+    db_set_setting(f"banner_{banner_type}", file_id)
+    logger.info(f"[BANNER] Set {banner_type}: {file_id[:30]}...")
+
+async def send_menu_photo(bot, chat_id: int, banner_type: str, text: str, reply_markup, message_to_edit=None):
+    """Отправить или отредактировать сообщение с фото"""
+    from telegram import InputMediaPhoto
+    
+    banner_id = get_banner(banner_type)
+    
+    if message_to_edit and banner_id:
+        # Пробуем отредактировать существующее сообщение с фото
+        try:
+            await message_to_edit.edit_media(
+                media=InputMediaPhoto(media=banner_id, caption=text, parse_mode="HTML"),
+                reply_markup=reply_markup
+            )
+            return
+        except Exception as e:
+            # Если не получилось - удаляем и отправляем новое
+            try:
+                await message_to_edit.delete()
+            except:
+                pass
+    
+    if banner_id:
+        # Отправляем фото с caption
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=banner_id,
+                caption=text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+            return
+        except Exception as e:
+            logger.warning(f"[BANNER] Failed to send photo: {e}")
+    
+    # Fallback - просто текст
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
+
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
@@ -2143,9 +2197,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     total_profit = stats['total_pnl']
     profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
     
-    text = f"""<b>🏠 YULA Меню</b>
-
-Торговля: {trading_status}
+    text = f"""Торговля: {trading_status}
 Авто-трейд: {auto_trade_status}
 
 📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}
@@ -2162,12 +2214,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     if update.callback_query:
-        try:
-            await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode="HTML")
-        except Exception:
-            await context.bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode="HTML")
+        # Возврат с другого меню - редактируем
+        await send_menu_photo(
+            context.bot, user_id, "menu",
+            text, reply_markup,
+            message_to_edit=update.callback_query.message
+        )
     else:
-        await context.bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode="HTML")
+        # Новый /start
+        await send_menu_photo(context.bot, user_id, "menu", text, reply_markup)
 
 # ==================== ПОПОЛНЕНИЕ ====================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2179,9 +2234,7 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     user = get_user(user_id)
     balance = user['balance']
     
-    text = f"""<b>💳 Пополнение</b>
-
-Минимум: ${MIN_DEPOSIT}
+    text = f"""Минимум: ${MIN_DEPOSIT}
 
 💰 Баланс: <b>${balance:.2f}</b>"""
     
@@ -2191,7 +2244,11 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await send_menu_photo(
+        context.bot, user_id, "deposit",
+        text, InlineKeyboardMarkup(keyboard),
+        message_to_edit=query.message
+    )
 
 async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -3079,9 +3136,7 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     status = "✅ ВКЛ" if auto_enabled else "❌ ВЫКЛ"
     
-    text = f"""<b>🤖 Авто-трейд</b>
-
-Статус: {status}
+    text = f"""Статус: {status}
 Сделок сегодня: {today_count}/{max_daily}
 Успешность от: {min_wr}%
 
@@ -3094,7 +3149,11 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+    await send_menu_photo(
+        context.bot, user_id, "autotrade",
+        text, InlineKeyboardMarkup(keyboard),
+        message_to_edit=query.message
+    )
 
 async def auto_trade_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Вкл/выкл авто-трейда"""
@@ -6674,6 +6733,66 @@ PnL сегодня: ${smart_state['daily_pnl']:.2f}
     await update.message.reply_text(text, parse_mode="HTML")
 
 
+async def setbanner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Установить баннер: /setbanner menu|deposit|autotrade (ответом на фото)"""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    args = context.args
+    valid_types = ["menu", "deposit", "autotrade"]
+    
+    # Проверяем есть ли тип баннера
+    if not args or args[0] not in valid_types:
+        # Показываем текущие баннеры
+        status_lines = []
+        for bt in valid_types:
+            banner_id = get_banner(bt)
+            status = f"✅ <code>{banner_id[:25]}...</code>" if banner_id else "❌ Не установлен"
+            status_lines.append(f"• <b>{bt}</b>: {status}")
+        
+        await update.message.reply_text(
+            f"""<b>🖼 Баннеры меню</b>
+
+{chr(10).join(status_lines)}
+
+<b>Как установить:</b>
+1. Ответь на фото командой:
+   <code>/setbanner menu</code>
+   <code>/setbanner deposit</code>
+   <code>/setbanner autotrade</code>""",
+            parse_mode="HTML"
+        )
+        return
+    
+    banner_type = args[0]
+    
+    # Проверяем есть ли фото в ответе
+    if update.message.reply_to_message and update.message.reply_to_message.photo:
+        file_id = update.message.reply_to_message.photo[-1].file_id
+        set_banner(banner_type, file_id)
+        
+        await update.message.reply_text(
+            f"<b>✅ Баннер '{banner_type}' установлен!</b>",
+            parse_mode="HTML"
+        )
+    elif update.message.photo:
+        # Фото в том же сообщении (с caption)
+        file_id = update.message.photo[-1].file_id
+        set_banner(banner_type, file_id)
+        
+        await update.message.reply_text(
+            f"<b>✅ Баннер '{banner_type}' установлен!</b>",
+            parse_mode="HTML"
+        )
+    else:
+        await update.message.reply_text(
+            f"<b>❌ Ответь на фото</b>\n\nОтветь на фото командой /setbanner {banner_type}",
+            parse_mode="HTML"
+        )
+
+
 async def autotrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Управление авто-торговлей: /autotrade [on|off|status|balance AMOUNT]"""
     global AUTO_TRADE_ENABLED
@@ -7327,6 +7446,7 @@ def main() -> None:
     app.add_handler(CommandHandler("market", market_cmd))
     app.add_handler(CommandHandler("news", news_cmd))  # News analyzer
     app.add_handler(CommandHandler("autotrade", autotrade_cmd))
+    app.add_handler(CommandHandler("setbanner", setbanner_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("reset", reset_all))
     app.add_handler(CommandHandler("resetall", reset_everything))
