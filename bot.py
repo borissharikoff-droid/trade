@@ -7560,63 +7560,10 @@ def main() -> None:
         app.job_queue.run_repeating(send_ref_notifications_job, interval=60, first=60)
         
         # === NEWS ANALYZER JOB ===
+        # Новости используются только для внутреннего анализа и влияния на сделки
+        # Алерты отключены - данные применяются в smart_analyzer через enhance_setup_with_news
         if NEWS_FEATURES:
-            async def news_alert_job(context):
-                """Проверка критических новостей и отправка алертов админам"""
-                try:
-                    # Получаем критические сигналы
-                    signals = await get_news_signals()
-                    
-                    # Фильтруем только HIGH и CRITICAL impact
-                    critical_signals = [s for s in signals 
-                                       if s.impact.value >= NewsImpact.HIGH.value 
-                                       and s.confidence >= 0.65]
-                    
-                    if not critical_signals:
-                        return
-                    
-                    # Проверяем манипуляции
-                    manipulations = await detect_manipulations()
-                    
-                    # Формируем алерт
-                    text = "<b>🚨 NEWS ALERT</b>\n\n"
-                    
-                    if manipulations:
-                        text += "<b>⚠️ МАНИПУЛЯЦИЯ:</b>\n"
-                        for m in manipulations[:2]:
-                            text += f"• {m['description']}\n"
-                        text += "\n"
-                    
-                    for signal in critical_signals[:3]:
-                        dir_emoji = "🟢" if signal.direction == 'LONG' else "🔴"
-                        impact = "⚡" * (signal.impact.value - 2)
-                        
-                        text += f"{dir_emoji} <b>{signal.direction}</b> {', '.join(signal.affected_coins[:3])} {impact}\n"
-                        text += f"   📊 {signal.confidence:.0%} | 📰 {signal.source}\n"
-                        
-                        if signal.reasoning:
-                            text += f"   💡 {signal.reasoning[0][:60]}\n"
-                        text += "\n"
-                    
-                    # Отправляем всем админам
-                    for admin_id in ADMIN_IDS:
-                        try:
-                            await context.bot.send_message(
-                                chat_id=admin_id,
-                                text=text,
-                                parse_mode="HTML"
-                            )
-                        except Exception as e:
-                            logger.warning(f"[NEWS] Failed to send alert to {admin_id}: {e}")
-                    
-                    logger.info(f"[NEWS] Sent {len(critical_signals)} alerts to {len(ADMIN_IDS)} admins")
-                    
-                except Exception as e:
-                    logger.error(f"[NEWS] Alert job error: {e}")
-            
-            # Проверяем новости каждые 5 минут
-            app.job_queue.run_repeating(news_alert_job, interval=300, first=30)
-            logger.info("[INIT] News alert job started (5 min interval)")
+            logger.info("[INIT] News analyzer enabled (internal use only, no alerts)")
         
         logger.info("[JOBS] All periodic tasks registered")
     else:
