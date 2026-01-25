@@ -733,44 +733,100 @@ MAX_REFERRAL_LEVELS = len(REFERRAL_COMMISSION_LEVELS)  # Максимум уро
 
 # ==================== РАСШИРЕННЫЕ ФУНКЦИИ РЕФЕРАЛЬНОЙ СИСТЕМЫ ====================
 
+def ensure_referral_earnings_table():
+    """Создать таблицу referral_earnings если её нет"""
+    try:
+        if USE_POSTGRES:
+            run_sql('''CREATE TABLE IF NOT EXISTS referral_earnings (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                from_user_id BIGINT NOT NULL,
+                amount REAL NOT NULL,
+                level INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            run_sql("CREATE INDEX IF NOT EXISTS idx_ref_earn_user ON referral_earnings(user_id)")
+            run_sql("CREATE INDEX IF NOT EXISTS idx_ref_earn_from ON referral_earnings(from_user_id)")
+        else:
+            run_sql('''CREATE TABLE IF NOT EXISTS referral_earnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                from_user_id INTEGER NOT NULL,
+                amount REAL NOT NULL,
+                level INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )''')
+            run_sql("CREATE INDEX IF NOT EXISTS idx_ref_earn_user ON referral_earnings(user_id)")
+            run_sql("CREATE INDEX IF NOT EXISTS idx_ref_earn_from ON referral_earnings(from_user_id)")
+        logger.info("[DB] referral_earnings table ensured")
+        return True
+    except Exception as e:
+        logger.error(f"[DB] Failed to create referral_earnings table: {e}")
+        return False
+
+# Флаг для однократной проверки таблицы
+_referral_table_checked = False
+
+def _ensure_referral_table():
+    """Проверить таблицу один раз при первом использовании"""
+    global _referral_table_checked
+    if not _referral_table_checked:
+        ensure_referral_earnings_table()
+        _referral_table_checked = True
+
 def db_save_referral_earning(user_id: int, from_user_id: int, amount: float, level: int, source: str):
     """Сохранить запись о реферальном заработке"""
-    if USE_POSTGRES:
-        run_sql("""
-            INSERT INTO referral_earnings (user_id, from_user_id, amount, level, source, created_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (user_id, from_user_id, amount, level, source))
-    else:
-        run_sql("""
-            INSERT INTO referral_earnings (user_id, from_user_id, amount, level, source, created_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-        """, (user_id, from_user_id, amount, level, source))
-    logger.info(f"[REF_EARN] Saved: user {user_id} earned ${amount:.2f} from {from_user_id} (level {level}, source: {source})")
+    _ensure_referral_table()
+    try:
+        if USE_POSTGRES:
+            run_sql("""
+                INSERT INTO referral_earnings (user_id, from_user_id, amount, level, source, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (user_id, from_user_id, amount, level, source))
+        else:
+            run_sql("""
+                INSERT INTO referral_earnings (user_id, from_user_id, amount, level, source, created_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+            """, (user_id, from_user_id, amount, level, source))
+        logger.info(f"[REF_EARN] Saved: user {user_id} earned ${amount:.2f} from {from_user_id} (level {level}, source: {source})")
+    except Exception as e:
+        logger.error(f"[REF_EARN] Failed to save: {e}")
 
 def db_get_referral_commission_earned(user_id: int) -> float:
     """
     Получить общую сумму заработка с рефералов из таблицы referral_earnings
     """
-    row = run_sql("SELECT COALESCE(SUM(amount), 0) as total FROM referral_earnings WHERE user_id = ?", (user_id,), fetch="one")
-    return round(row['total'] if row else 0.0, 2)
+    _ensure_referral_table()
+    try:
+        row = run_sql("SELECT COALESCE(SUM(amount), 0) as total FROM referral_earnings WHERE user_id = ?", (user_id,), fetch="one")
+        return round(row['total'] if row else 0.0, 2)
+    except Exception as e:
+        logger.warning(f"[REF_EARN] Query error: {e}")
+        return 0.0
 
 def db_get_referral_earnings_by_level(user_id: int) -> Dict[int, float]:
     """
     Получить заработок по каждому уровню реферальной системы
     """
-    rows = run_sql("""
-        SELECT level, COALESCE(SUM(amount), 0) as total 
-        FROM referral_earnings 
-        WHERE user_id = ?
-        GROUP BY level
-        ORDER BY level
-    """, (user_id,), fetch="all")
-    
+    _ensure_referral_table()
     result = {1: 0.0, 2: 0.0, 3: 0.0}
-    for row in rows:
-        level = row.get('level', 1)
-        if 1 <= level <= 3:
-            result[level] = round(row['total'], 2)
+    try:
+        rows = run_sql("""
+            SELECT level, COALESCE(SUM(amount), 0) as total 
+            FROM referral_earnings 
+            WHERE user_id = ?
+            GROUP BY level
+            ORDER BY level
+        """, (user_id,), fetch="all")
+        
+        for row in rows:
+            level = row.get('level', 1)
+            if 1 <= level <= 3:
+                result[level] = round(row['total'], 2)
+    except Exception as e:
+        logger.warning(f"[REF_EARN] Query earnings_by_level error: {e}")
     return result
 
 def db_get_referrals_list(user_id: int, level: int = 1) -> List[Dict]:
@@ -778,20 +834,24 @@ def db_get_referrals_list(user_id: int, level: int = 1) -> List[Dict]:
     Получить список рефералов пользователя с их статистикой
     level=1: прямые рефералы
     """
-    if level == 1:
-        # Прямые рефералы
-        referrals = run_sql("""
-            SELECT u.user_id, u.balance, u.total_deposit,
-                   COALESCE((SELECT SUM(amount) FROM referral_earnings WHERE user_id = ? AND from_user_id = u.user_id), 0) as earned
-            FROM users u
-            WHERE u.referrer_id = ?
-            ORDER BY u.total_deposit DESC
-        """, (user_id, user_id), fetch="all")
-    else:
-        # Для уровней 2 и 3 - сложнее, пока возвращаем пустой список
-        referrals = []
-    
-    return referrals
+    _ensure_referral_table()
+    try:
+        if level == 1:
+            # Прямые рефералы
+            referrals = run_sql("""
+                SELECT u.user_id, u.balance, u.total_deposit,
+                       COALESCE((SELECT SUM(amount) FROM referral_earnings WHERE user_id = ? AND from_user_id = u.user_id), 0) as earned
+                FROM users u
+                WHERE u.referrer_id = ?
+                ORDER BY u.total_deposit DESC
+            """, (user_id, user_id), fetch="all")
+        else:
+            # Для уровней 2 и 3 - сложнее, пока возвращаем пустой список
+            referrals = []
+        return referrals
+    except Exception as e:
+        logger.warning(f"[REF_EARN] Query referrals_list error: {e}")
+        return []
 
 def db_get_referrals_stats(user_id: int) -> Dict:
     """
@@ -2142,17 +2202,18 @@ async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # 50 stars = $1
     keyboard = [
         [
-            InlineKeyboardButton("$1 (50⭐)", callback_data="stars_50"),
-            InlineKeyboardButton("$5 (250⭐)", callback_data="stars_250")
+            InlineKeyboardButton("🧪 $0.02 (1⭐)", callback_data="stars_1"),
+            InlineKeyboardButton("$1 (50⭐)", callback_data="stars_50")
         ],
         [
-            InlineKeyboardButton("$10 (500⭐)", callback_data="stars_500"),
-            InlineKeyboardButton("$25 (1250⭐)", callback_data="stars_1250")
+            InlineKeyboardButton("$5 (250⭐)", callback_data="stars_250"),
+            InlineKeyboardButton("$10 (500⭐)", callback_data="stars_500")
         ],
         [
-            InlineKeyboardButton("$50 (2500⭐)", callback_data="stars_2500"),
-            InlineKeyboardButton("$100 (5000⭐)", callback_data="stars_5000")
+            InlineKeyboardButton("$25 (1250⭐)", callback_data="stars_1250"),
+            InlineKeyboardButton("$50 (2500⭐)", callback_data="stars_2500")
         ],
+        [InlineKeyboardButton("$100 (5000⭐)", callback_data="stars_5000")],
         [InlineKeyboardButton("✏️ Своё значение", callback_data="stars_custom")],
         [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
@@ -2182,9 +2243,9 @@ async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     
     user_id = update.effective_user.id
-    stars_map = {"stars_50": 50, "stars_250": 250, "stars_500": 500, "stars_1250": 1250, "stars_2500": 2500, "stars_5000": 5000}
+    stars_map = {"stars_1": 1, "stars_50": 50, "stars_250": 250, "stars_500": 500, "stars_1250": 1250, "stars_2500": 2500, "stars_5000": 5000}
     stars = stars_map.get(query.data, 50)
-    usd = stars // STARS_RATE
+    usd = stars / STARS_RATE  # Дробное деление для маленьких сумм
     
     logger.info(f"[STARS] User {user_id} requested invoice: {stars} stars = ${usd}")
     
@@ -2194,14 +2255,15 @@ async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pass
     
     try:
+        usd_label = f"${usd:.2f}" if usd < 1 else f"${usd:.0f}"
         await context.bot.send_invoice(
             chat_id=user_id,
-            title=f"Пополнение ${usd}",
-            description=f"Пополнение баланса на ${usd}",
+            title=f"Пополнение {usd_label}",
+            description=f"Пополнение баланса на {usd_label}",
             payload=f"deposit_{usd}",
             provider_token="",  # Пустая строка для Telegram Stars
             currency="XTR",
-            prices=[LabeledPrice(label=f"${usd}", amount=stars)]
+            prices=[LabeledPrice(label=usd_label, amount=stars)]
         )
         logger.info(f"[STARS] Invoice sent successfully to user {user_id}: {stars} stars")
     except Exception as e:
@@ -2228,9 +2290,9 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         payment = update.message.successful_payment
         stars = payment.total_amount
-        usd = stars // STARS_RATE
+        usd = stars / STARS_RATE  # Дробное деление для маленьких сумм
         
-        logger.info(f"[STARS] Payment details - user {user_id}: {stars} stars = ${usd}, payload={payment.invoice_payload}")
+        logger.info(f"[STARS] Payment details - user {user_id}: {stars} stars = ${usd:.4f}, payload={payment.invoice_payload}")
         
         if usd <= 0:
             logger.error(f"[PAYMENT] User {user_id}: Invalid payment amount {stars} stars")
