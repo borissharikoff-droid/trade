@@ -2133,9 +2133,11 @@ async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     query = update.callback_query
     await query.answer()
     
-    text = """<b>⭐ Через Stars</b>
+    text = """<b>⭐ Пополнение через Telegram Stars</b>
 
-Выбери сумму:"""
+Курс: <b>50 ⭐ = $1</b>
+
+Выберите сумму пополнения:"""
     
     # 50 stars = $1
     keyboard = [
@@ -2151,10 +2153,29 @@ async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             InlineKeyboardButton("$50 (2500⭐)", callback_data="stars_2500"),
             InlineKeyboardButton("$100 (5000⭐)", callback_data="stars_5000")
         ],
+        [InlineKeyboardButton("✏️ Своё значение", callback_data="stars_custom")],
         [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
     
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+
+
+async def stars_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запрос своей суммы для Stars"""
+    query = update.callback_query
+    await query.answer()
+    
+    text = """<b>✏️ Своё значение</b>
+
+Введите сумму в долларах (от $1 до $500):
+
+<i>Например: 15</i>"""
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="pay_stars")]]
+    
+    context.user_data['awaiting_stars_amount'] = True
+    
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -4911,6 +4932,57 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
         if handled:
             return
     
+    # Проверяем Stars custom amount
+    if context.user_data.get('awaiting_stars_amount'):
+        try:
+            amount = int(float(update.message.text.replace(",", ".").replace("$", "").strip()))
+            user_id = update.effective_user.id
+            
+            if amount < 1:
+                await update.message.reply_text(
+                    "<b>❌ Ошибка</b>\n\nМинимальная сумма: $1",
+                    parse_mode="HTML"
+                )
+                return True
+            
+            if amount > 500:
+                await update.message.reply_text(
+                    "<b>❌ Ошибка</b>\n\nМаксимальная сумма: $500",
+                    parse_mode="HTML"
+                )
+                return True
+            
+            context.user_data['awaiting_stars_amount'] = False
+            stars = amount * STARS_RATE
+            
+            logger.info(f"[STARS] User {user_id} requested custom invoice: {stars} stars = ${amount}")
+            
+            try:
+                await context.bot.send_invoice(
+                    chat_id=user_id,
+                    title=f"Пополнение ${amount}",
+                    description=f"Пополнение баланса на ${amount}",
+                    payload=f"deposit_{amount}",
+                    provider_token="",
+                    currency="XTR",
+                    prices=[LabeledPrice(label=f"${amount}", amount=stars)]
+                )
+                logger.info(f"[STARS] Custom invoice sent to user {user_id}: {stars} stars")
+            except Exception as e:
+                logger.error(f"[STARS] Failed to send custom invoice: {e}")
+                await update.message.reply_text(
+                    "<b>❌ Ошибка</b>\n\nНе удалось создать счёт.\nПопробуйте позже.",
+                    parse_mode="HTML"
+                )
+            return True
+            
+        except ValueError:
+            await update.message.reply_text(
+                "<b>❌ Ошибка</b>\n\nВведите число, например: 15",
+                parse_mode="HTML"
+            )
+            return True
+    
     # Проверяем сумму для вывода
     if context.user_data.get('awaiting_withdraw_amount'):
         try:
@@ -7211,7 +7283,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(close_symbol_trades, pattern="^close_symbol\\|"))
     app.add_handler(CallbackQueryHandler(deposit_menu, pattern="^deposit$"))
     app.add_handler(CallbackQueryHandler(pay_stars_menu, pattern="^pay_stars$"))
-    app.add_handler(CallbackQueryHandler(send_stars_invoice, pattern="^stars_"))
+    app.add_handler(CallbackQueryHandler(stars_custom_amount, pattern="^stars_custom$"))
+    app.add_handler(CallbackQueryHandler(send_stars_invoice, pattern="^stars_\\d+$"))
     app.add_handler(CallbackQueryHandler(pay_crypto_menu, pattern="^pay_crypto$"))
     app.add_handler(CallbackQueryHandler(crypto_custom_amount, pattern="^crypto_custom$"))
     app.add_handler(CallbackQueryHandler(create_crypto_invoice, pattern="^crypto_\\d+$"))
