@@ -2440,7 +2440,18 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 💰 Баланс: ${user['balance']:.2f}"""
         
         keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+        
+        # Отправляем с баннером если есть
+        banner_id = get_banner("payment")
+        if banner_id:
+            await update.message.reply_photo(
+                photo=banner_id,
+                caption=text,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode="HTML"
+            )
+        else:
+            await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         
     except Exception as e:
         logger.error(f"[PAYMENT] Critical error for user {user_id}: {e}", exc_info=True)
@@ -2738,7 +2749,23 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
 💰 Баланс: ${user['balance']:.2f}"""
             
             keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
-            await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
+            
+            # Удаляем старое сообщение и отправляем с баннером
+            banner_id = get_banner("payment")
+            try:
+                await query.message.delete()
+            except:
+                pass
+            if banner_id:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=banner_id,
+                    caption=text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="HTML"
+                )
+            else:
+                await context.bot.send_message(chat_id=user_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         else:
             # Платёж не оплачен
             amount = pending_info['amount']
@@ -2823,15 +2850,25 @@ async def check_pending_crypto_payments(context: ContextTypes.DEFAULT_TYPE) -> N
                             
                             # Уведомляем пользователя
                             try:
-                                await context.bot.send_message(
-                                    user_id,
-                                    f"""<b>✅ Оплата успешна</b>
+                                payment_text = f"""<b>✅ Оплата успешна</b>
 
 Зачислено: <b>${amount:.2f}</b>
 
-💰 Баланс: ${user['balance']:.2f}""",
-                                    parse_mode="HTML"
-                                )
+💰 Баланс: ${user['balance']:.2f}"""
+                                banner_id = get_banner("payment")
+                                if banner_id:
+                                    await context.bot.send_photo(
+                                        chat_id=user_id,
+                                        photo=banner_id,
+                                        caption=payment_text,
+                                        parse_mode="HTML"
+                                    )
+                                else:
+                                    await context.bot.send_message(
+                                        user_id,
+                                        payment_text,
+                                        parse_mode="HTML"
+                                    )
                             except Exception as e:
                                 logger.warning(f"[CRYPTO_AUTO] Failed to notify user {user_id}: {e}")
                             
@@ -6807,14 +6844,14 @@ PnL сегодня: ${smart_state['daily_pnl']:.2f}
 
 
 async def setbanner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Установить баннер: /setbanner menu|deposit|autotrade (ответом на фото)"""
+    """Установить баннер: /setbanner menu|deposit|autotrade|payment (ответом на фото)"""
     user_id = update.effective_user.id
     if user_id not in ADMIN_IDS:
         await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
         return
     
     args = context.args
-    valid_types = ["menu", "deposit", "autotrade"]
+    valid_types = ["menu", "deposit", "autotrade", "payment"]
     
     # Проверяем есть ли тип баннера
     if not args or args[0] not in valid_types:
@@ -6832,9 +6869,10 @@ async def setbanner_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 <b>Как установить:</b>
 1. Ответь на фото командой:
-   <code>/setbanner menu</code>
-   <code>/setbanner deposit</code>
-   <code>/setbanner autotrade</code>""",
+   <code>/setbanner menu</code> — главное меню
+   <code>/setbanner deposit</code> — пополнение
+   <code>/setbanner autotrade</code> — авто-трейд
+   <code>/setbanner payment</code> — успешная оплата""",
             parse_mode="HTML"
         )
         return
