@@ -30,6 +30,19 @@ except ImportError:
     LIQUIDITY_ANALYSIS_ENABLED = False
     logger.warning("[SMART] Liquidity analyzer not available")
 
+# News Analyzer для торговли по новостям
+try:
+    from news_analyzer import (
+        news_analyzer, enhance_setup_with_news, get_news_signals,
+        get_market_sentiment, should_trade_now, detect_manipulations,
+        get_news_trading_opportunities
+    )
+    NEWS_ANALYSIS_ENABLED = True
+    logger.info("[SMART] News analyzer enabled")
+except ImportError:
+    NEWS_ANALYSIS_ENABLED = False
+    logger.warning("[SMART] News analyzer not available")
+
 
 # ==================== ENUMS ====================
 class MarketRegime(Enum):
@@ -290,54 +303,54 @@ class SmartAnalyzer:
         self.cache_ttl = 30  # секунд
         self.state = TradingState()
         
-        # === АДАПТИВНЫЕ ПОРОГИ КАЧЕСТВА v2.0 ===
+        # === АДАПТИВНЫЕ ПОРОГИ КАЧЕСТВА v3.0 (ОПТИМИЗИРОВАНО для большего количества сделок) ===
         # Базовые настройки (используются как fallback)
-        self.MIN_QUALITY = SetupQuality.B  # Минимум B-сетап
-        self.MIN_RISK_REWARD = 1.3         # Базовый R/R
-        self.MIN_CONFIDENCE = 0.50         # Базовая уверенность
+        self.MIN_QUALITY = SetupQuality.C  # Снижено с B до C
+        self.MIN_RISK_REWARD = 1.0         # Снижено с 1.3 до 1.0
+        self.MIN_CONFIDENCE = 0.45         # Снижено с 0.50 до 0.45
         
-        # АДАПТИВНЫЕ ПОРОГИ по режиму рынка
+        # АДАПТИВНЫЕ ПОРОГИ по режиму рынка (ОСЛАБЛЕНЫ для большего количества сделок)
         # Формат: {режим: (min_quality, min_rr, min_confidence)}
         self.ADAPTIVE_THRESHOLDS = {
-            # Сильный тренд - АГРЕССИВНЫЕ настройки (больше сделок)
+            # Сильный тренд - ОЧЕНЬ АГРЕССИВНЫЕ настройки
             MarketRegime.STRONG_UPTREND: {
-                'min_quality': SetupQuality.C,   # Даже C-сетапы в сильном тренде
-                'min_rr': 1.0,                    # R/R 1:1 достаточно
-                'min_confidence': 0.45            # 45% уверенности
+                'min_quality': SetupQuality.C,   # C-сетапы ОК
+                'min_rr': 0.8,                    # R/R 1:0.8 (даже немного ниже 1:1)
+                'min_confidence': 0.40            # 40% уверенности
             },
             MarketRegime.STRONG_DOWNTREND: {
+                'min_quality': SetupQuality.C,
+                'min_rr': 0.8,
+                'min_confidence': 0.40
+            },
+            # Обычный тренд - АГРЕССИВНЫЕ настройки
+            MarketRegime.UPTREND: {
+                'min_quality': SetupQuality.C,   # C-сетапы ОК
+                'min_rr': 1.0,                    # R/R 1:1
+                'min_confidence': 0.45            # 45% уверенности
+            },
+            MarketRegime.DOWNTREND: {
                 'min_quality': SetupQuality.C,
                 'min_rr': 1.0,
                 'min_confidence': 0.45
             },
-            # Обычный тренд - СБАЛАНСИРОВАННЫЕ настройки
-            MarketRegime.UPTREND: {
-                'min_quality': SetupQuality.B,   # B+ сетапы
-                'min_rr': 1.2,                    # R/R 1:1.2
-                'min_confidence': 0.50            # 50% уверенности
-            },
-            MarketRegime.DOWNTREND: {
-                'min_quality': SetupQuality.B,
-                'min_rr': 1.2,
-                'min_confidence': 0.50
-            },
-            # Рейндж - КОНСЕРВАТИВНЫЕ настройки
+            # Рейндж - УМЕРЕННЫЕ настройки (раньше были слишком строгие)
             MarketRegime.RANGING: {
-                'min_quality': SetupQuality.A,   # Только A и A+ сетапы
-                'min_rr': 1.5,                    # R/R 1:1.5
-                'min_confidence': 0.60            # 60% уверенности
+                'min_quality': SetupQuality.B,   # B-сетапы (снижено с A)
+                'min_rr': 1.2,                    # R/R 1:1.2 (снижено с 1.5)
+                'min_confidence': 0.50            # 50% уверенности (снижено с 60%)
             },
-            # Высокая волатильность - СТРОГИЕ настройки
+            # Высокая волатильность - КОНСЕРВАТИВНЫЕ настройки
             MarketRegime.HIGH_VOLATILITY: {
-                'min_quality': SetupQuality.A_PLUS,  # Только идеальные
-                'min_rr': 1.8,                        # R/R 1:1.8
-                'min_confidence': 0.70                # 70% уверенности
+                'min_quality': SetupQuality.A,   # A-сетапы (снижено с A+)
+                'min_rr': 1.3,                    # R/R 1:1.3 (снижено с 1.8)
+                'min_confidence': 0.55            # 55% уверенности (снижено с 70%)
             },
             # Неизвестный режим - БАЗОВЫЕ настройки
             MarketRegime.UNKNOWN: {
                 'min_quality': SetupQuality.B,
-                'min_rr': 1.3,
-                'min_confidence': 0.55
+                'min_rr': 1.0,
+                'min_confidence': 0.45
             }
         }
         
@@ -2341,28 +2354,23 @@ class SmartAnalyzer:
             _signal_stats['reasons']['state_blocked'] += 1
             return None
         
-        # 2. Проверка торговой сессии
+        # 2. Проверка торговой сессии - ОТКЛЮЧЕНО (крипта 24/7)
+        # Логируем для информации, но не блокируем
         if not self._is_good_trading_time():
-            logger.info("[SMART] Skip: Outside trading hours")
-            _signal_stats['rejected'] += 1
-            _signal_stats['reasons']['outside_hours'] += 1
-            return None
+            logger.info("[SMART] ⚠️ Off-hours, но торговля разрешена")
         
-        # 2.5. Проверка новостного времени (FOMC, NFP, CPI)
+        # 2.5. Проверка новостного времени - ТОЛЬКО ПРЕДУПРЕЖДЕНИЕ
         is_news, news_event = self._is_news_time()
         if is_news:
-            logger.info(f"[SMART] Skip: News event window ({news_event})")
-            _signal_stats['rejected'] += 1
-            _signal_stats['reasons']['news_event'] = _signal_stats['reasons'].get('news_event', 0) + 1
-            return None
+            logger.warning(f"[SMART] ⚠️ News event: {news_event} - но торговля разрешена")
         
         # 3. Загружаем данные
         klines_1h = await self.get_klines(symbol, '1h', 100)
         klines_4h = await self.get_klines(symbol, '4h', 50)
         klines_15m = await self.get_klines(symbol, '15m', 50)
         
-        if not klines_1h or len(klines_1h) < 50:
-            logger.warning(f"[SMART] Insufficient data for {symbol}")
+        if not klines_1h or len(klines_1h) < 30:  # Снижено с 50 до 30 свечей
+            logger.warning(f"[SMART] Insufficient data for {symbol} (need 30, got {len(klines_1h) if klines_1h else 0})")
             return None
         
         # Парсим данные
@@ -2387,12 +2395,9 @@ class SmartAnalyzer:
         market_regime = self.determine_market_regime(swings, atr_percent, price_change_24h)
         logger.info(f"[SMART] Market Regime: {market_regime.value}, ATR: {atr_percent:.2f}%")
         
-        # Не торгуем в высокой волатильности или неопределённости
+        # Логируем режим рынка, но НЕ блокируем вход (адаптивные пороги всё равно применятся)
         if market_regime in [MarketRegime.HIGH_VOLATILITY, MarketRegime.UNKNOWN]:
-            logger.info(f"[SMART] Skip: Bad market regime")
-            _signal_stats['rejected'] += 1
-            _signal_stats['reasons']['bad_regime'] += 1
-            return None
+            logger.warning(f"[SMART] ⚠️ Volatile/Unknown regime - требования ужесточены, но вход разрешен")
         
         # 6. Ключевые уровни
         key_levels = self.find_key_levels(highs_1h, lows_1h, closes_1h, touches_required=2)
@@ -2778,19 +2783,20 @@ class SmartAnalyzer:
         )
         
         # === ПРОВЕРКА ЛИКВИДНОСТИ: Избегаем зон охоты на стопы ===
+        # ОСЛАБЛЕНО: Теперь только предупреждаем, но не блокируем вход
         if LIQUIDITY_ANALYSIS_ENABLED:
             liquidity_zones = liquidity_analyzer.find_liquidity_zones(klines_1h, direction, symbol)
-            # Динамическое расстояние: минимум 0.3% или 0.5 ATR (вместо 1 ATR)
-            min_distance_pct = max(0.3, (atr / current_price) * 50)  # 0.5 ATR в процентах
+            # Снижено: минимум 0.15% или 0.3 ATR
+            min_distance_pct = max(0.15, (atr / current_price) * 30)  # 0.3 ATR в процентах
             should_avoid, reason = liquidity_analyzer.should_avoid_entry(
                 current_price, liquidity_zones, atr, min_distance_percent=min_distance_pct
             )
             
             if should_avoid:
-                logger.info(f"[SMART] Skip {symbol}: {reason}")
-                _signal_stats['rejected'] += 1
+                # Теперь только логируем как warning, но НЕ блокируем вход
+                logger.warning(f"[SMART] ⚠️ {symbol}: близко к ликвидности - {reason} (вход разрешен)")
                 _signal_stats['reasons']['liquidity_zone'] = _signal_stats['reasons'].get('liquidity_zone', 0) + 1
-                return None
+                # return None  # ЗАКОММЕНТИРОВАНО - не блокируем вход
             
             # Проверка order flow на манипуляции
             order_flow = liquidity_analyzer.analyze_order_flow(klines_1h)
@@ -2906,6 +2912,15 @@ class SmartAnalyzer:
         if signal_type == SignalType.TREND_REVERSAL and (bullish_signals >= 4 or bearish_signals >= 4):
             _signal_stats['imbalance_trades'] += 1
         
+        # === УЛУЧШЕНИЕ СЕТАПА НОВОСТЯМИ ===
+        if NEWS_ANALYSIS_ENABLED:
+            try:
+                coin = symbol.replace('USDT', '').replace('/USDT', '')
+                setup = await enhance_setup_with_news(setup, coin)
+                logger.info(f"[SMART] Setup enhanced with news data for {coin}")
+            except Exception as e:
+                logger.warning(f"[SMART] News enhancement failed: {e}")
+        
         return setup
     
     def _is_good_trading_time(self) -> bool:
@@ -2957,16 +2972,45 @@ class SmartAnalyzer:
     
     # ==================== COIN SELECTION ====================
     
-    # Категории монет для диверсификации
+    # Категории монет для диверсификации v2.0 - РАСШИРЕННЫЙ СПИСОК
     COIN_CATEGORIES = {
-        'major': ['BTC', 'ETH'],  # Основные - всегда включаем
-        'layer1': ['SOL', 'AVAX', 'NEAR', 'APT', 'SUI', 'SEI', 'TON', 'INJ', 'ATOM', 'DOT', 'ADA'],
-        'layer2': ['ARB', 'OP', 'STRK', 'ZK', 'MATIC', 'MANTA', 'METIS', 'IMX'],
-        'memes': ['PEPE', 'DOGE', 'SHIB', 'FLOKI', 'BONK', 'WIF', 'MEME', 'TURBO', 'NEIRO', 'POPCAT'],
-        'defi': ['UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'PENDLE', 'GMX', 'DYDX', 'SNX', 'COMP'],
-        'ai': ['FET', 'RNDR', 'TAO', 'WLD', 'ARKM', 'AGIX', 'OCEAN', 'GRT'],
-        'gaming': ['GALA', 'AXS', 'SAND', 'MANA', 'PIXEL', 'SUPER', 'MAGIC'],
-        'new': ['JUP', 'ENA', 'W', 'ETHFI', 'AEVO', 'PORTAL', 'DYM', 'ALT', 'PYTH']
+        'major': ['BTC', 'ETH', 'BNB', 'XRP'],  # Топ-4 по капитализации
+        'layer1': [
+            'SOL', 'AVAX', 'NEAR', 'APT', 'SUI', 'SEI', 'TON', 'INJ', 'ATOM', 'DOT', 'ADA',
+            'TRX', 'LINK', 'FTM', 'ALGO', 'HBAR', 'VET', 'EOS', 'XLM', 'ICP', 'FIL',
+            'EGLD', 'FLOW', 'KAVA', 'ROSE', 'ZIL', 'ONE', 'QTUM', 'IOTA', 'XTZ', 'NEO'
+        ],
+        'layer2': [
+            'ARB', 'OP', 'STRK', 'ZK', 'MATIC', 'MANTA', 'METIS', 'IMX',
+            'LRC', 'CELR', 'BOBA', 'SKL', 'CTSI'
+        ],
+        'memes': [
+            'PEPE', 'DOGE', 'SHIB', 'FLOKI', 'BONK', 'WIF', 'MEME', 'TURBO', 'NEIRO', 'POPCAT',
+            'BABYDOGE', 'ELON', 'SATS', 'ORDI', 'RATS', '1000PEPE', 'COQ', 'MYRO', 'TOSHI'
+        ],
+        'defi': [
+            'UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'PENDLE', 'GMX', 'DYDX', 'SNX', 'COMP',
+            'SUSHI', '1INCH', 'BAL', 'YFI', 'CAKE', 'RSR', 'ALPHA', 'SPELL', 'LQTY', 'RPL'
+        ],
+        'ai': [
+            'FET', 'RNDR', 'TAO', 'WLD', 'ARKM', 'AGIX', 'OCEAN', 'GRT',
+            'PRIME', 'AI', 'NMR', 'CTXC', 'DKA', 'PHB', 'MDT', 'NFP', 'ALI'
+        ],
+        'gaming': [
+            'GALA', 'AXS', 'SAND', 'MANA', 'PIXEL', 'SUPER', 'MAGIC',
+            'ENJ', 'ILV', 'ALICE', 'YGG', 'PRIME', 'GMT', 'GST', 'GODS', 'PYR', 'VOXEL', 'HIGH'
+        ],
+        'infrastructure': [
+            'LINK', 'API3', 'BAND', 'TRB', 'UMA', 'REQ', 'RLC', 'STORJ', 'AR', 'MASK',
+            'SSV', 'ANKR', 'GLM', 'NKN', 'COTI', 'CTSI', 'OGN', 'SYN'
+        ],
+        'new': [
+            'JUP', 'ENA', 'W', 'ETHFI', 'AEVO', 'PORTAL', 'DYM', 'ALT', 'PYTH',
+            'TIA', 'STRK', 'MANTA', 'PIXEL', 'ACE', 'XAI', 'NFP', 'AI', 'SLERF', 'BOME'
+        ],
+        'exchange': [
+            'BNB', 'OKB', 'CRO', 'KCS', 'GT', 'HT', 'MX', 'FTT', 'LEO'
+        ]
     }
     
     async def select_best_coins(self, top_n: int = 5) -> List[str]:
@@ -3025,10 +3069,10 @@ class SmartAnalyzer:
                     price_change = abs(float(ticker.get('price24hPcnt', '0'))) * 100
                     last_price = float(ticker.get('lastPrice', '0'))
                     
-                    # РАСШИРЕННЫЕ фильтры: 0.3-12% волатильность, $20M+ оборот
-                    if price_change < 0.3 or price_change > 12:
+                    # ОПТИМИЗИРОВАННЫЕ фильтры: 0.2-15% волатильность, $10M+ оборот
+                    if price_change < 0.2 or price_change > 15:
                         continue
-                    if turnover < 20_000_000:
+                    if turnover < 10_000_000:  # Снижено с $20M до $10M
                         continue
                     
                     base = symbol.replace('USDT', '')
@@ -3176,15 +3220,55 @@ class SmartAnalyzer:
 smart_analyzer = SmartAnalyzer()
 
 
-async def find_best_setup(balance: float = 0, use_whale_data: bool = True) -> Optional[TradeSetup]:
+async def find_best_setup(balance: float = 0, use_whale_data: bool = True, use_news_data: bool = True) -> Optional[TradeSetup]:
     """
     Найти лучший торговый сетап
     
     Возвращает только качественные сетапы (A+, A, B, C)
-    Может учитывать данные китов с Hyperliquid
+    Может учитывать данные китов с Hyperliquid и новостей
     """
-    # Выбираем монеты - УВЕЛИЧЕНО для большего количества возможностей
-    coins = await smart_analyzer.select_best_coins(top_n=25)
+    
+    # === ПРОВЕРКА НОВОСТЕЙ НА МАНИПУЛЯЦИИ ===
+    if use_news_data and NEWS_ANALYSIS_ENABLED:
+        try:
+            manipulations = await detect_manipulations()
+            if manipulations:
+                for m in manipulations:
+                    logger.warning(f"[NEWS] ⚠️ {m['type']}: {m['description']}")
+            
+            # Получаем рыночный сентимент
+            sentiment = await get_market_sentiment()
+            if sentiment.get('last_update'):
+                logger.info(f"[NEWS] Market sentiment: {sentiment['score']:.0f} ({sentiment['trend']})")
+        except Exception as e:
+            logger.warning(f"[NEWS] Sentiment check error: {e}")
+    
+    # === ПРОВЕРКА NEWS-BASED OPPORTUNITIES ===
+    news_opportunities = []
+    if use_news_data and NEWS_ANALYSIS_ENABLED:
+        try:
+            news_opportunities = await get_news_trading_opportunities()
+            if news_opportunities:
+                logger.info(f"[NEWS] Found {len(news_opportunities)} news-based opportunities")
+                for opp in news_opportunities[:3]:
+                    logger.info(f"[NEWS] 📰 {opp['direction']} {opp['coins']} ({opp['confidence']:.0%}): {opp['reasoning'][0]}")
+        except Exception as e:
+            logger.warning(f"[NEWS] Opportunities check error: {e}")
+    
+    # Выбираем монеты - УВЕЛИЧЕНО до 40 для максимального количества возможностей
+    coins = await smart_analyzer.select_best_coins(top_n=40)
+    
+    # Добавляем монеты из news opportunities в начало списка
+    if news_opportunities:
+        news_coins = []
+        for opp in news_opportunities:
+            for coin in opp['coins']:
+                symbol = f"{coin}USDT"
+                if symbol not in news_coins and symbol not in coins[:10]:
+                    news_coins.append(symbol)
+        if news_coins:
+            logger.info(f"[NEWS] Adding news-based coins: {news_coins[:5]}")
+            coins = news_coins[:5] + coins  # Приоритизируем монеты из новостей
     
     # Получаем данные китов если доступно
     whale_signals = {}
@@ -3201,6 +3285,15 @@ async def find_best_setup(balance: float = 0, use_whale_data: bool = True) -> Op
             pass  # Whale tracker не установлен
         except Exception as e:
             logger.warning(f"[WHALE] Error getting whale data: {e}")
+    
+    # News signals для монет
+    news_signals = {}
+    if news_opportunities:
+        for opp in news_opportunities:
+            for coin in opp['coins']:
+                symbol = f"{coin}USDT"
+                if symbol not in news_signals or opp['confidence'] > news_signals[symbol]['confidence']:
+                    news_signals[symbol] = opp
     
     best_setup: Optional[TradeSetup] = None
     
@@ -3222,6 +3315,21 @@ async def find_best_setup(balance: float = 0, use_whale_data: bool = True) -> Op
                         setup.confidence = max(0.3, setup.confidence - 0.15)
                         setup.warnings.insert(0, f"⚠️ Киты против: {whale.get('direction')}")
                         logger.info(f"[SMART] {symbol}: Whale disagreement -15% confidence")
+                
+                # === БУСТ ОТ НОВОСТЕЙ ===
+                if symbol in news_signals:
+                    news = news_signals[symbol]
+                    if news['direction'] == setup.direction:
+                        # Новости подтверждают направление
+                        boost = min(0.15, news['confidence'] * 0.2)
+                        setup.confidence = min(0.95, setup.confidence + boost)
+                        setup.reasoning.insert(0, f"📰 Новости: {news['reasoning'][0][:50]}")
+                        logger.info(f"[SMART] {symbol}: News confirmation +{boost:.0%} confidence")
+                    elif news['direction'] and news['direction'] != setup.direction:
+                        # Новости против - снижаем confidence
+                        setup.confidence = max(0.3, setup.confidence - 0.1)
+                        setup.warnings.insert(0, f"⚠️ Новости против: {news['direction']}")
+                        logger.info(f"[SMART] {symbol}: News disagreement -10% confidence")
                 
                 # Берём первый качественный сетап
                 if best_setup is None:

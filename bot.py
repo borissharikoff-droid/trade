@@ -57,6 +57,19 @@ except ImportError as e:
     ADVANCED_FEATURES = False
     logger.warning(f"[INIT] Advanced features disabled: {e}")
 
+# News Analyzer - отслеживание новостей, Twitter, макро-событий
+try:
+    from news_analyzer import (
+        news_analyzer, get_news_signals, get_market_sentiment,
+        should_trade_now, detect_manipulations, get_news_trading_opportunities,
+        get_upcoming_events, NewsImpact, NewsSentiment
+    )
+    NEWS_FEATURES = True
+    logger.info("[INIT] News analyzer loaded: Twitter, macro events, sentiment")
+except ImportError as e:
+    NEWS_FEATURES = False
+    logger.warning(f"[INIT] News analyzer disabled: {e}")
+
 # ==================== DATABASE ====================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_PATH = os.environ.get("DB_PATH", "bot_data.db")
@@ -6341,6 +6354,103 @@ async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
 
 
+async def news_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Анализ новостей и Twitter: /news [COIN]
+    Показывает текущий сентимент, новости, сигналы от трейдеров
+    """
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    if not NEWS_FEATURES:
+        await update.message.reply_text(
+            "<b>❌ News Analyzer не загружен</b>\n\n"
+            "Проверьте файл news_analyzer.py",
+            parse_mode="HTML"
+        )
+        return
+    
+    await update.message.reply_text("<b>⏳ Анализирую новости и Twitter...</b>", parse_mode="HTML")
+    
+    try:
+        # Получаем данные параллельно
+        sentiment_task = get_market_sentiment()
+        signals_task = get_news_signals()
+        manipulations_task = detect_manipulations()
+        events_task = get_upcoming_events()
+        
+        results = await asyncio.gather(
+            sentiment_task, signals_task, manipulations_task, events_task,
+            return_exceptions=True
+        )
+        
+        sentiment = results[0] if not isinstance(results[0], Exception) else {}
+        signals = results[1] if not isinstance(results[1], Exception) else []
+        manipulations = results[2] if not isinstance(results[2], Exception) else []
+        events = results[3] if not isinstance(results[3], Exception) else []
+        
+        # === ФОРМИРУЕМ СООБЩЕНИЕ ===
+        text = "<b>📰 News & Twitter Analyzer</b>\n\n"
+        
+        # Сентимент
+        score = sentiment.get('score', 0)
+        trend = sentiment.get('trend', 'NEUTRAL')
+        
+        if score > 30:
+            sent_emoji = "🟢"
+        elif score < -30:
+            sent_emoji = "🔴"
+        else:
+            sent_emoji = "⚪"
+        
+        text += f"{sent_emoji} <b>Сентимент рынка:</b> {score:.0f}/100 ({trend})\n\n"
+        
+        # Предупреждения о манипуляциях
+        if manipulations:
+            text += "<b>⚠️ ПРЕДУПРЕЖДЕНИЯ:</b>\n"
+            for m in manipulations[:3]:
+                text += f"• {m['type']}: {m['description']}\n"
+            text += "\n"
+        
+        # Предстоящие макро-события
+        if events:
+            text += "<b>📅 Макро-события:</b>\n"
+            for event in events[:3]:
+                text += f"• {event.name}: {event.description}\n"
+                text += f"  ⏰ {event.scheduled_time.strftime('%H:%M UTC')}\n"
+            text += "\n"
+        
+        # Торговые сигналы от новостей
+        if signals:
+            text += "<b>📈 Сигналы от новостей:</b>\n"
+            for signal in signals[:5]:
+                dir_emoji = "🟢" if signal.direction == 'LONG' else "🔴"
+                impact = "⚡" * min(3, signal.impact.value - 2)
+                
+                text += f"\n{dir_emoji} <b>{signal.direction}</b> {', '.join(signal.affected_coins[:3])} {impact}\n"
+                text += f"   📊 Уверенность: {signal.confidence:.0%}\n"
+                text += f"   📰 {signal.source}\n"
+                
+                for reason in signal.reasoning[:2]:
+                    text += f"   • {reason[:50]}\n"
+        else:
+            text += "<b>📊 Сигналов от новостей нет</b>\n"
+            text += "Twitter и новостные ленты спокойны\n"
+        
+        # Мониторимые аккаунты
+        text += "\n<b>👀 Мониторинг Twitter:</b>\n"
+        text += "Trump, SEC, Fed, Top Traders, Binance...\n"
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"[NEWS] Error in news_cmd: {e}")
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
+
+
 async def signal_stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Статистика генерации сигналов: /signalstats [reset]"""
     user_id = update.effective_user.id
@@ -7077,6 +7187,7 @@ def main() -> None:
     app.add_handler(CommandHandler("whale", whale_cmd))
     app.add_handler(CommandHandler("memes", memes_cmd))
     app.add_handler(CommandHandler("market", market_cmd))
+    app.add_handler(CommandHandler("news", news_cmd))  # News analyzer
     app.add_handler(CommandHandler("autotrade", autotrade_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("reset", reset_all))
@@ -7144,6 +7255,65 @@ def main() -> None:
         async def send_ref_notifications_job(context):
             await send_referral_notifications(context.bot)
         app.job_queue.run_repeating(send_ref_notifications_job, interval=60, first=60)
+        
+        # === NEWS ANALYZER JOB ===
+        if NEWS_FEATURES:
+            async def news_alert_job(context):
+                """Проверка критических новостей и отправка алертов админам"""
+                try:
+                    # Получаем критические сигналы
+                    signals = await get_news_signals()
+                    
+                    # Фильтруем только HIGH и CRITICAL impact
+                    critical_signals = [s for s in signals 
+                                       if s.impact.value >= NewsImpact.HIGH.value 
+                                       and s.confidence >= 0.65]
+                    
+                    if not critical_signals:
+                        return
+                    
+                    # Проверяем манипуляции
+                    manipulations = await detect_manipulations()
+                    
+                    # Формируем алерт
+                    text = "<b>🚨 NEWS ALERT</b>\n\n"
+                    
+                    if manipulations:
+                        text += "<b>⚠️ МАНИПУЛЯЦИЯ:</b>\n"
+                        for m in manipulations[:2]:
+                            text += f"• {m['description']}\n"
+                        text += "\n"
+                    
+                    for signal in critical_signals[:3]:
+                        dir_emoji = "🟢" if signal.direction == 'LONG' else "🔴"
+                        impact = "⚡" * (signal.impact.value - 2)
+                        
+                        text += f"{dir_emoji} <b>{signal.direction}</b> {', '.join(signal.affected_coins[:3])} {impact}\n"
+                        text += f"   📊 {signal.confidence:.0%} | 📰 {signal.source}\n"
+                        
+                        if signal.reasoning:
+                            text += f"   💡 {signal.reasoning[0][:60]}\n"
+                        text += "\n"
+                    
+                    # Отправляем всем админам
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=admin_id,
+                                text=text,
+                                parse_mode="HTML"
+                            )
+                        except Exception as e:
+                            logger.warning(f"[NEWS] Failed to send alert to {admin_id}: {e}")
+                    
+                    logger.info(f"[NEWS] Sent {len(critical_signals)} alerts to {len(ADMIN_IDS)} admins")
+                    
+                except Exception as e:
+                    logger.error(f"[NEWS] Alert job error: {e}")
+            
+            # Проверяем новости каждые 5 минут
+            app.job_queue.run_repeating(news_alert_job, interval=300, first=30)
+            logger.info("[INIT] News alert job started (5 min interval)")
         
         logger.info("[JOBS] All periodic tasks registered")
     else:
