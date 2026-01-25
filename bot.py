@@ -2178,6 +2178,7 @@ async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE)
             title=f"Пополнение ${usd}",
             description=f"Пополнение баланса на ${usd}",
             payload=f"deposit_{usd}",
+            provider_token="",  # Пустая строка для Telegram Stars
             currency="XTR",
             prices=[LabeledPrice(label=f"${usd}", amount=stars)]
         )
