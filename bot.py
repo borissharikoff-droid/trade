@@ -3661,8 +3661,15 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
     symbol = parts[1]
     ticker = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
     
-    # Находим позиции по этому символу
-    positions_to_close = [p for p in user_positions if p['symbol'] == symbol]
+    # Находим позиции по этому символу (только с amount > 0)
+    positions_to_close = [p for p in user_positions if p['symbol'] == symbol and p.get('amount', 0) > 0]
+    
+    # Удаляем позиции с amount=0 (полностью закрыты частичными тейками)
+    zero_amount_positions = [p for p in user_positions if p['symbol'] == symbol and p.get('amount', 0) <= 0]
+    for zero_pos in zero_amount_positions:
+        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+        logger.info(f"[CLOSE_SYMBOL] Removed zero-amount position {zero_pos['id']}")
     
     if not positions_to_close:
         await query.edit_message_text(
@@ -3763,6 +3770,15 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_id = update.effective_user.id
     user = get_user(user_id)
     user_positions = get_positions(user_id)
+    
+    # Фильтруем позиции с amount > 0, удаляем "пустые"
+    zero_amount_positions = [p for p in user_positions if p.get('amount', 0) <= 0]
+    for zero_pos in zero_amount_positions:
+        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+        logger.info(f"[CLOSE_ALL] Removed zero-amount position {zero_pos['id']}")
+    
+    user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
     
     if not user_positions:
         await query.edit_message_text(
@@ -3942,6 +3958,20 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     logger.info(f"[TRADES] Cache AFTER sync: {cache_after} positions, IDs: {cache_ids_after}")
     
     user_positions = get_positions(user_id)
+    
+    # Удаляем позиции с amount=0 (полностью закрыты частичными тейками)
+    zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
+    for zero_pos in zero_amount:
+        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+        logger.info(f"[TRADES] Auto-removed zero-amount position {zero_pos['id']}")
+    
+    # Фильтруем список
+    user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
+    
+    # Обновляем кэш если были удаления
+    if zero_amount:
+        positions_cache.set(user_id, user_positions)
     
     # Логируем количество позиций
     logger.info(f"[TRADES] User {user_id}: {len(user_positions)} positions from get_positions")
@@ -4891,6 +4921,33 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         if not pos:
             await query.answer("❌ Позиция не найдена", show_alert=True)
+            return
+        
+        # Проверка на нулевой amount (позиция уже полностью закрыта частичными тейками)
+        amount = pos.get('amount', 0)
+        if amount <= 0:
+            # Позиция уже закрыта - удаляем из БД
+            realized_pnl = pos.get('realized_pnl', 0) or 0
+            db_close_position(pos_id, pos.get('current', pos['entry']), realized_pnl, 'FULLY_CLOSED')
+            
+            # Удаляем из кэша
+            try:
+                cached_positions = positions_cache.get(user_id)
+                if cached_positions:
+                    positions_cache.set(user_id, [p for p in cached_positions if p.get('id') != pos_id])
+            except:
+                pass
+            
+            ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+            await query.edit_message_text(
+                f"<b>✅ {ticker} закрыт</b>\n\n"
+                f"Позиция была полностью закрыта частичными тейками.\n"
+                f"Реализованный P&L: <b>+${realized_pnl:.2f}</b>\n\n"
+                f"💰 Баланс: ${user['balance']:.2f}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+            )
+            logger.info(f"[CLOSE] User {user_id}: position {pos_id} was already fully closed, removed from DB")
             return
         
         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
