@@ -3173,6 +3173,8 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = update.effective_user.id
     users_cache.pop(user_id, None)  # Обновляем из БД
     user = get_user(user_id)
+    balance = user.get('balance', 0)
+    positions = get_positions(user_id)
     
     auto_enabled = user.get('auto_trade', False)
     max_daily = user.get('auto_trade_max_daily', 10)
@@ -3181,9 +3183,35 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     
     status = "✅ ВКЛ" if auto_enabled else "❌ ВЫКЛ"
     
+    # Диагностика - почему сигнал может быть пропущен
+    max_positions = get_max_positions_for_user(balance)
+    current_positions = len(positions)
+    available_balance = balance - sum(p.get('amount', 0) for p in positions)
+    
+    blockers = []
+    if not auto_enabled:
+        blockers.append("❌ Авто-трейд выключен")
+    if current_positions >= max_positions:
+        blockers.append(f"❌ Лимит позиций ({current_positions}/{max_positions})")
+    if today_count >= max_daily:
+        blockers.append(f"❌ Лимит сделок за день ({today_count}/{max_daily})")
+    if available_balance < AUTO_TRADE_MIN_BET:
+        blockers.append(f"❌ Мало свободных средств (${available_balance:.0f} < ${AUTO_TRADE_MIN_BET})")
+    
+    if blockers:
+        status_detail = "\n".join(blockers)
+    else:
+        status_detail = "✅ Готов к торговле"
+    
     text = f"""Статус: {status}
 Сделок сегодня: {today_count}/{max_daily}
 Успешность от: {min_wr}%
+
+<b>Диагностика:</b>
+{status_detail}
+
+<i>Позиций: {current_positions}/{max_positions}
+Свободно: ${available_balance:.2f}</i>
 
 <blockquote>Бот автоматически входит в сделки по сигналам. Все, что вам нужно — настроить % успешности сделок и ждать, пока YULA войдет в позицию.</blockquote>"""
     
