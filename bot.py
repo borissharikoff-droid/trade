@@ -1860,11 +1860,15 @@ async def add_commission(amount: float, user_id: Optional[int] = None, bot=None)
     
     # Распределяем комиссию между рефералами и админом
     if user_id:
+        # Логируем реферера пользователя для отладки
+        direct_referrer = db_get_referrer(user_id)
+        logger.info(f"[REF_COMMISSION] User {user_id} direct referrer: {direct_referrer}")
+        
         referrer_chain = db_get_referrer_chain(user_id, MAX_REFERRAL_LEVELS)
         
         # Добавить логирование и проверку
         if not referrer_chain:
-            logger.info(f"[REF_COMMISSION] No referrer chain for user {user_id}, all commission to admin")
+            logger.info(f"[REF_COMMISSION] No referrer chain for user {user_id}, all commission (${amount:.4f}) to admin")
             pending_commission += amount
             save_pending_commission()
             return
@@ -3277,7 +3281,7 @@ async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if today_count >= max_daily:
         blockers.append(f"❌ Лимит сделок за день ({today_count}/{max_daily})")
     if available_balance < AUTO_TRADE_MIN_BET:
-        blockers.append(f"❌ Мало свободных средств (${available_balance:.0f} < ${AUTO_TRADE_MIN_BET})")
+        blockers.append(f"❌ Мало средств (${available_balance:.0f} из ${AUTO_TRADE_MIN_BET} мин.)")
     
     if blockers:
         status_detail = "\n".join(blockers)
