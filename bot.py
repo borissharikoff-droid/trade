@@ -1712,8 +1712,36 @@ def validate_direction(direction: str) -> tuple:
     return True, None
 
 def sanitize_balance(balance: float) -> float:
-    """Ensure balance stays within safe bounds"""
-    return max(0.0, min(MAX_BALANCE, balance))
+    """Ensure balance stays within safe bounds and is valid"""
+    import math
+    # Handle None, NaN, Inf
+    if balance is None or (isinstance(balance, float) and (math.isnan(balance) or math.isinf(balance))):
+        logger.warning(f"[SANITIZE] Invalid balance value: {balance}, defaulting to 0.0")
+        return 0.0
+    return max(0.0, min(MAX_BALANCE, float(balance)))
+
+
+def sanitize_pnl(pnl: float, max_pnl: float = None) -> float:
+    """Ensure PnL is valid and within reasonable bounds"""
+    import math
+    # Handle None, NaN, Inf
+    if pnl is None or (isinstance(pnl, float) and (math.isnan(pnl) or math.isinf(pnl))):
+        logger.warning(f"[SANITIZE] Invalid PnL value: {pnl}, defaulting to 0.0")
+        return 0.0
+    # Bound to reasonable range if max_pnl specified
+    if max_pnl:
+        return max(-max_pnl, min(max_pnl, float(pnl)))
+    return float(pnl)
+
+
+def sanitize_amount(amount: float) -> float:
+    """Ensure amount is valid and positive"""
+    import math
+    # Handle None, NaN, Inf
+    if amount is None or (isinstance(amount, float) and (math.isnan(amount) or math.isinf(amount))):
+        logger.warning(f"[SANITIZE] Invalid amount value: {amount}, defaulting to 0.0")
+        return 0.0
+    return max(0.0, float(amount))
 
 # ==================== BINANCE API ====================
 BINANCE_API = "https://api.binance.com/api/v3"
@@ -2722,14 +2750,16 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             user_id = pending_info['user_id']
             amount = pending_info['amount']
             
-            user = get_user(user_id)
-            # Первый депозит = когда total_deposit был 0 до этого депозита
-            old_total_deposit = user['total_deposit'] - amount
-            is_first_deposit = old_total_deposit == 0.0
-            
-            user['balance'] = sanitize_balance(user['balance'] + amount)
-            user['total_deposit'] += amount
-            save_user(user_id)
+            # Защита от race conditions при изменении баланса
+            async with get_user_lock(user_id):
+                user = get_user(user_id)
+                # Первый депозит = когда total_deposit был 0 до этого депозита
+                old_total_deposit = user['total_deposit'] - amount
+                is_first_deposit = old_total_deposit == 0.0
+                
+                user['balance'] = sanitize_balance(user['balance'] + amount)
+                user['total_deposit'] += amount
+                save_user(user_id)
             
             logger.info(f"[CRYPTO] User {user_id} deposited ${amount}")
             
@@ -2828,14 +2858,16 @@ async def check_pending_crypto_payments(context: ContextTypes.DEFAULT_TYPE) -> N
                             # Платёж оплачен - зачисляем средства
                             db_remove_pending_invoice(invoice_id)
                             
-                            user = get_user(user_id)
-                            # Первый депозит = когда total_deposit был 0 до этого депозита
-                            old_total_deposit = user['total_deposit'] - amount
-                            is_first_deposit = old_total_deposit == 0.0
-                            
-                            user['balance'] = sanitize_balance(user['balance'] + amount)
-                            user['total_deposit'] += amount
-                            save_user(user_id)
+                            # Защита от race conditions при изменении баланса
+                            async with get_user_lock(user_id):
+                                user = get_user(user_id)
+                                # Первый депозит = когда total_deposit был 0 до этого депозита
+                                old_total_deposit = user['total_deposit'] - amount
+                                is_first_deposit = old_total_deposit == 0.0
+                                
+                                user['balance'] = sanitize_balance(user['balance'] + amount)
+                                user['total_deposit'] += amount
+                                save_user(user_id)
                             
                             logger.info(f"[CRYPTO_AUTO] User {user_id} deposited ${amount}")
                             
@@ -3387,16 +3419,29 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
 
     # Получаем все открытые позиции на Bybit
     bybit_positions = await hedger.get_all_positions()
-    # Словарь: symbol -> size (размер позиции)
-    bybit_sizes = {pos['symbol']: float(pos.get('size', 0)) for pos in bybit_positions}
+    # Словарь: symbol -> {size, side} (размер и направление позиции)
+    bybit_data = {}
+    for bp in bybit_positions:
+        bybit_side = "LONG" if bp.get('side') == "Buy" else "SHORT"
+        bybit_data[bp['symbol']] = {
+            'size': float(bp.get('size', 0)),
+            'side': bybit_side
+        }
     
     # Получаем закрытые позиции за последние 7 дней
     closed_pnl = await hedger.get_closed_pnl(limit=100)
 
     for pos in user_positions[:]:
         bybit_symbol = pos['symbol'].replace("/", "")
-        bybit_size = bybit_sizes.get(bybit_symbol, 0)
+        bybit_info = bybit_data.get(bybit_symbol, {'size': 0, 'side': None})
+        bybit_size = bybit_info['size']
+        bybit_side = bybit_info['side']
         expected_qty = pos.get('bybit_qty', 0)
+        
+        # Проверка направления: если направления разные, считаем позицию закрытой
+        direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
+        if direction_mismatch:
+            logger.warning(f"[SYNC] Direction mismatch for {bybit_symbol}: bot={pos['direction']}, bybit={bybit_side}")
 
         # Проверяем закрыта ли позиция:
         # 1. bybit_qty > 0 и размер на Bybit = 0 -> позиция закрылась на Bybit
@@ -3437,23 +3482,49 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                 logger.error(f"[SYNC] Failed to notify orphan: {e}")
             continue
         
-        is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1)
+        # Позиция закрыта если: размер=0, размер << ожидаемого, или направление не совпадает
+        is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1) or direction_mismatch
 
         if is_closed:
-            # Позиция закрыта на Bybit - рассчитываем PnL локально
-            # (Bybit PnL общий для всей позиции, не подходит для отдельных записей бота)
-            real_pnl = pos.get('pnl', 0)
+            # Позиция закрыта на Bybit - берём реальный PnL
+            real_pnl = pos.get('pnl', 0)  # Default - локальный
             
-            # Пробуем найти закрытую позицию по символу для уточнения
+            # Ищем реальный PnL с Bybit с проверкой времени и qty
+            import time as time_module
+            current_time_ms = int(time_module.time() * 1000)
+            
             for closed in closed_pnl:
                 if closed['symbol'] == bybit_symbol:
-                    logger.info(f"[SYNC] Found closed position: {bybit_symbol}, Bybit PnL: ${closed['closed_pnl']:.2f}")
-                    break
+                    bybit_pnl = closed['closed_pnl']
+                    bybit_qty = closed.get('qty', 0)
+                    bybit_time = closed.get('updated_time', 0)
+                    bybit_side = closed.get('side', '')
+                    
+                    # Проверка времени (< 10 мин)
+                    time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
+                    
+                    # Проверка qty (должно быть близко к expected_qty)
+                    qty_ratio = bybit_qty / expected_qty if expected_qty > 0 else 0
+                    
+                    # Проверка направления
+                    expected_side = "Sell" if pos['direction'] == "LONG" else "Buy"  # Закрытие - обратная сторона
+                    side_match = bybit_side == expected_side or not bybit_side
+                    
+                    logger.info(f"[SYNC] Checking Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f}, time_diff={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side={bybit_side}")
+                    
+                    # Используем Bybit PnL если проходит проверки
+                    if time_diff < 600 and qty_ratio > 0.5 and side_match:
+                        logger.info(f"[SYNC] Using Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f} (local: ${real_pnl:.2f})")
+                        real_pnl = bybit_pnl
+                        break
+                    else:
+                        logger.warning(f"[SYNC] Bybit PnL rejected: time={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side_match={side_match}")
 
             logger.info(f"[SYNC] Closing {bybit_symbol}: bybit_size={bybit_size}, expected_qty={expected_qty}, PnL=${real_pnl:.2f}")
 
-            # Закрываем позицию в боте
-            returned = pos['amount'] + real_pnl
+            # Закрываем позицию в боте (с валидацией)
+            real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)  # Max 200% от позиции
+            returned = sanitize_amount(pos['amount']) + real_pnl
             user['balance'] = sanitize_balance(user['balance'] + returned)
             user['total_profit'] += real_pnl
             save_user(user_id)
@@ -3638,17 +3709,17 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
     total_pnl = 0
     total_returned = 0
     
+    # Получаем реальную цену один раз для всех позиций
+    real_price = await get_cached_price(symbol)
+    
     for pos in positions_to_close:
-        # Получаем реальную цену
-        real_price = await get_cached_price(symbol)
-        if not real_price:
-            real_price = pos['current']
+        close_price = real_price if real_price else pos['current']
         
         # Пересчитываем PnL с реальной ценой
         if pos['direction'] == "LONG":
-            pnl = (real_price - pos['entry']) / pos['entry'] * pos['amount'] * LEVERAGE
+            pnl = (close_price - pos['entry']) / pos['entry'] * pos['amount'] * LEVERAGE
         else:
-            pnl = (pos['entry'] - real_price) / pos['entry'] * pos['amount'] * LEVERAGE
+            pnl = (pos['entry'] - close_price) / pos['entry'] * pos['amount'] * LEVERAGE
         
         pnl -= pos.get('commission', 0)
         
@@ -3656,15 +3727,15 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         total_pnl += pnl
         total_returned += returned
         
-        user['balance'] = sanitize_balance(user['balance'] + returned)
-        user['total_profit'] += pnl
-        
-        db_close_position(pos['id'], real_price, pnl, 'MANUAL_CLOSE')
+        db_close_position(pos['id'], close_price, pnl, 'MANUAL_CLOSE')
         # Явно удаляем из кэша по ID
         pos_id_to_remove = pos['id']
         if user_id in positions_cache:
             positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
+    # Обновляем баланс ОДИН РАЗ после всех закрытий
+    user['balance'] = sanitize_balance(user['balance'] + total_returned)
+    user['total_profit'] += total_pnl
     save_user(user_id)
     
     pnl_sign = "+" if total_pnl >= 0 else ""
@@ -4324,6 +4395,11 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                             logger.error("[AUTO_TRADE] ❌ Bybit не подтвердил позицию")
                             bybit_success = False
                         else:
+                            # Сохраняем РЕАЛЬНЫЙ размер с Bybit
+                            real_bybit_qty = float(bybit_pos.get('size', 0))
+                            if real_bybit_qty > 0 and bybit_qty > 0 and abs(real_bybit_qty - bybit_qty) / bybit_qty > 0.01:
+                                logger.info(f"[AUTO_TRADE] Correcting qty: calculated={bybit_qty}, real={real_bybit_qty}")
+                                bybit_qty = real_bybit_qty
                             increment_bybit_opened()
                     else:
                         logger.error("[AUTO_TRADE] ❌ Bybit ошибка")
@@ -4650,6 +4726,12 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
                 return
             
+            # Сохраняем РЕАЛЬНЫЙ размер с Bybit (может отличаться из-за округления)
+            real_bybit_qty = float(bybit_pos.get('size', 0))
+            if real_bybit_qty > 0 and abs(real_bybit_qty - bybit_qty) / bybit_qty > 0.01:  # Разница > 1%
+                logger.info(f"[HEDGE] Correcting qty: calculated={bybit_qty}, real={real_bybit_qty}")
+                bybit_qty = real_bybit_qty
+            
             # Успешно открыто на Bybit - инкрементируем статистику
             increment_bybit_opened()
         else:
@@ -4665,9 +4747,13 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # Комиссия за открытие (только после успешного открытия на Bybit)
     commission = amount * (COMMISSION_PERCENT / 100)
-    user['balance'] -= amount
-    user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
-    save_user(user_id)  # Сохраняем в БД
+    
+    # Защита от race conditions при изменении баланса
+    async with get_user_lock(user_id):
+        user = get_user(user_id)  # Re-read with lock
+        user['balance'] -= amount
+        user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
+        save_user(user_id)  # Сохраняем в БД
 
     # Добавляем комиссию в накопитель (авто-вывод) с учетом рефералов
     await add_commission(commission, user_id=user_id)
@@ -4679,6 +4765,14 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             existing = p
             break
 
+    if existing:
+        # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
+        if hedging_enabled and existing.get('bybit_qty', 0) > 0:
+            bybit_pos = await hedger.get_position_data(symbol)
+            if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
+                existing = None  # Создаём новую позицию вместо усреднения
+        
     if existing:
         # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
         old_amount = existing['amount']
@@ -5392,6 +5486,12 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
                 )
                 return
             
+            # Сохраняем РЕАЛЬНЫЙ размер с Bybit (может отличаться из-за округления)
+            real_bybit_qty = float(bybit_pos.get('size', 0))
+            if real_bybit_qty > 0 and abs(real_bybit_qty - bybit_qty) / bybit_qty > 0.01:  # Разница > 1%
+                logger.info(f"[HEDGE] Correcting qty: calculated={bybit_qty}, real={real_bybit_qty}")
+                bybit_qty = real_bybit_qty
+            
             # Успешно открыто на Bybit - инкрементируем статистику
             increment_bybit_opened()
         else:
@@ -5406,9 +5506,13 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Комиссия за открытие (только после успешного открытия на Bybit)
     commission = amount * (COMMISSION_PERCENT / 100)
-    user['balance'] -= amount
-    user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
-    save_user(user_id)
+    
+    # Защита от race conditions при изменении баланса
+    async with get_user_lock(user_id):
+        user = get_user(user_id)  # Re-read with lock
+        user['balance'] -= amount
+        user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
+        save_user(user_id)
 
     # Добавляем комиссию в накопитель (авто-вывод) с учетом рефералов
     await add_commission(commission, user_id=user_id)
@@ -5420,6 +5524,14 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
             existing = p
             break
 
+    if existing:
+        # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
+        if hedging_enabled and existing.get('bybit_qty', 0) > 0:
+            bybit_pos = await hedger.get_position_data(symbol)
+            if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
+                existing = None  # Создаём новую позицию вместо усреднения
+        
     if existing:
         # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
         old_amount = existing['amount']
@@ -5603,19 +5715,22 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                 bybit_time = closed_trades[0].get('updated_time', 0)
                                 
                                 # Валидация: PnL должен быть реалистичным
-                                max_reasonable_pnl = pos['amount'] * LEVERAGE * 0.5
-                                current_time_ms = int(asyncio.get_event_loop().time() * 1000)
+                                # Увеличен лимит - P&L может быть большим при высоком плече
+                                max_reasonable_pnl = pos['amount'] * LEVERAGE * 2.0  # 200% от позиции
+                                import time as time_module
+                                current_time_ms = int(time_module.time() * 1000)
                                 time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
                                 
                                 logger.info(f"[BYBIT_SYNC] Bybit data: pnl=${bybit_pnl:.2f}, time_diff={time_diff:.0f}s, max=${max_reasonable_pnl:.2f}")
                                 
-                                if abs(bybit_pnl) <= max_reasonable_pnl and time_diff < 120:  # 2 мин для sync
+                                # ВСЕГДА используем Bybit PnL если он есть и время < 10 мин
+                                if time_diff < 600:  # 10 мин для sync
                                     real_pnl = bybit_pnl
                                     exit_price = bybit_exit
                                     reason = "TP" if real_pnl > 0 else "SL"
                                     logger.info(f"[BYBIT_SYNC] Using Bybit PnL: ${real_pnl:.2f}")
                                 else:
-                                    logger.warning(f"[BYBIT_SYNC] Bybit PnL ${bybit_pnl:.2f} seems wrong, using local ${pos['pnl']:.2f}")
+                                    logger.warning(f"[BYBIT_SYNC] Bybit trade too old ({time_diff:.0f}s), using local ${pos['pnl']:.2f}")
                         except Exception as e:
                             logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
                         
@@ -5675,11 +5790,15 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 pos['current'] = pos['current'] * (1 + change)
             
             # PnL - ВСЕГДА рассчитываем локально (Bybit PnL общий для всей позиции, не для отдельной записи бота)
+            # ВАЖНО: комиссия НЕ вычитается здесь - она уже учтена в начальном pnl = -commission при открытии
             if pos['direction'] == "LONG":
-                pnl_percent = (pos['current'] - pos['entry']) / pos['entry']
+                pnl_percent = (pos['current'] - pos['entry']) / pos['entry'] if pos['entry'] > 0 else 0
             else:
-                pnl_percent = (pos['entry'] - pos['current']) / pos['entry']
-            pos['pnl'] = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
+                pnl_percent = (pos['entry'] - pos['current']) / pos['entry'] if pos['entry'] > 0 else 0
+            
+            # Валидация PnL - ограничиваем экстремальные значения
+            raw_pnl = pos['amount'] * LEVERAGE * pnl_percent
+            pos['pnl'] = sanitize_pnl(raw_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)  # Max 200% от позиции
             pnl_percent_display = pnl_percent * 100  # Для удобства
             
             # Обновляем в БД
@@ -5744,10 +5863,14 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                             if await is_hedging_enabled() and close_qty > 0:
                                 await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
                             
+                            # PnL с учетом пропорциональной комиссии
+                            original_amount = pos.get('original_amount', pos['amount'])
+                            partial_commission = pos.get('commission', 0) * (partial_close_amount / original_amount)
+                            
                             if pos['direction'] == "LONG":
-                                partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * partial_close_amount * LEVERAGE
+                                partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * partial_close_amount * LEVERAGE - partial_commission
                             else:
-                                partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * partial_close_amount * LEVERAGE
+                                partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * partial_close_amount * LEVERAGE - partial_commission
                             
                             returned = partial_close_amount + partial_pnl
                             user['balance'] = sanitize_balance(user['balance'] + returned)
@@ -5913,10 +6036,14 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                     if await is_hedging_enabled() and close_qty > 0:
                                         await hedge_close(pos['id'], pos['symbol'], pos['direction'], close_qty)
                                     
+                                    # PnL с учетом пропорциональной комиссии
+                                    original_amount = pos.get('original_amount', pos['amount'])
+                                    partial_commission = pos.get('commission', 0) * (close_amount / original_amount)
+                                    
                                     if pos['direction'] == "LONG":
-                                        exit_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
+                                        exit_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                                     else:
-                                        exit_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE
+                                        exit_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                                     
                                     returned = close_amount + exit_pnl
                                     user['balance'] = sanitize_balance(user['balance'] + returned)
@@ -5998,11 +6125,14 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 else:
                     bybit_closed = True  # Хеджирование отключено или нет qty
                 
-                # PnL от частичного закрытия
+                # PnL от частичного закрытия с учетом пропорциональной комиссии
+                original_amount = pos.get('original_amount', pos['amount'] + close_amount)
+                partial_commission = pos.get('commission', 0) * (close_amount / original_amount)
+                
                 if pos['direction'] == "LONG":
-                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
+                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                 else:
-                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE
+                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                 
                 # Возвращаем часть и профит
                 returned = close_amount + partial_pnl
@@ -6060,10 +6190,14 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 else:
                     bybit_closed = True
                 
+                # PnL с учетом пропорциональной комиссии
+                original_amount = pos.get('original_amount', pos['amount'] + close_amount)
+                partial_commission = pos.get('commission', 0) * (close_amount / original_amount)
+                
                 if pos['direction'] == "LONG":
-                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE
+                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                 else:
-                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE
+                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                 
                 returned = close_amount + partial_pnl
                 user['balance'] = sanitize_balance(user['balance'] + returned)
@@ -6128,18 +6262,20 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                     bybit_time = closed_trades[0].get('updated_time', 0)
                                     
                                     # Валидация: PnL должен быть реалистичным
-                                    max_reasonable_pnl = pos['amount'] * LEVERAGE * 0.5
-                                    current_time_ms = int(asyncio.get_event_loop().time() * 1000)
+                                    max_reasonable_pnl = pos['amount'] * LEVERAGE * 2.0  # 200% от позиции
+                                    import time as time_module
+                                    current_time_ms = int(time_module.time() * 1000)
                                     time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
                                     
                                     logger.info(f"[TP3/SL] Bybit data: pnl=${bybit_pnl:.2f}, qty={bybit_qty}, time_diff={time_diff:.0f}s")
                                     
-                                    if abs(bybit_pnl) <= max_reasonable_pnl and time_diff < 60:
+                                    # ВСЕГДА используем Bybit PnL если он есть и время < 5 мин
+                                    if time_diff < 300:  # 5 мин для TP/SL
                                         real_pnl = bybit_pnl
                                         exit_price = bybit_exit
                                         logger.info(f"[TP3/SL] Using Bybit PnL: ${real_pnl:.2f}")
                                     else:
-                                        logger.warning(f"[TP3/SL] Bybit PnL ${bybit_pnl:.2f} seems wrong, using local ${pos['pnl']:.2f}")
+                                        logger.warning(f"[TP3/SL] Bybit trade too old ({time_diff:.0f}s), using local ${pos['pnl']:.2f}")
                             except Exception as e:
                                 logger.warning(f"[TP3/SL] Failed to get real PnL: {e}")
                         else:
