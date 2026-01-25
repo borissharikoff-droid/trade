@@ -595,110 +595,308 @@ class NewsAnalyzer:
     
     async def fetch_twitter_sentiment(self, accounts: List[str] = None) -> List[NewsEvent]:
         """
-        Получить сентимент Twitter через Nitter/RSS прокси
-        Использует публичные RSS фиды как fallback
+        Получить крипто-новости из нескольких РАБОТАЮЩИХ источников:
+        1. CoinTelegraph RSS
+        2. Decrypt RSS
+        3. TheBlock RSS
+        4. Bitcoin Magazine RSS
+        5. CryptoSlate RSS
         """
         events = []
         
-        # Nitter инстансы для RSS
-        nitter_instances = [
-            'https://nitter.net',
-            'https://nitter.privacydev.net',
-            'https://nitter.poast.org'
+        # Работающие RSS источники крипто-новостей
+        rss_sources = [
+            {
+                'url': 'https://cointelegraph.com/rss',
+                'name': 'CoinTelegraph',
+                'type': 'news',
+                'impact': 'HIGH'
+            },
+            {
+                'url': 'https://decrypt.co/feed',
+                'name': 'Decrypt',
+                'type': 'news',
+                'impact': 'HIGH'
+            },
+            {
+                'url': 'https://www.theblock.co/rss.xml',
+                'name': 'TheBlock',
+                'type': 'news',
+                'impact': 'HIGH'
+            },
+            {
+                'url': 'https://bitcoinmagazine.com/.rss/full/',
+                'name': 'Bitcoin Magazine',
+                'type': 'news',
+                'impact': 'MEDIUM'
+            },
+            {
+                'url': 'https://cryptoslate.com/feed/',
+                'name': 'CryptoSlate',
+                'type': 'news',
+                'impact': 'MEDIUM'
+            },
+            {
+                'url': 'https://www.coindesk.com/arc/outboundfeeds/rss/',
+                'name': 'CoinDesk',
+                'type': 'news',
+                'impact': 'HIGH'
+            }
         ]
         
-        target_accounts = accounts or list(TWITTER_ACCOUNTS.keys())[:10]
-        
-        for account in target_accounts[:5]:  # Лимит 5 аккаунтов за раз
-            account_info = TWITTER_ACCOUNTS.get(account, {})
-            
-            for nitter_url in nitter_instances:
-                try:
-                    rss_url = f"{nitter_url}/{account}/rss"
-                    
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(
-                            rss_url, 
-                            timeout=aiohttp.ClientTimeout(total=5),
-                            headers={'User-Agent': 'Mozilla/5.0'}
-                        ) as resp:
-                            if resp.status != 200:
-                                continue
-                            
-                            content = await resp.text()
-                    
-                    # Парсим RSS (упрощённо)
-                    # Ищем <item> блоки
-                    items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
-                    
-                    for item in items[:5]:  # Последние 5 твитов
-                        title_match = re.search(r'<title>(.*?)</title>', item)
-                        link_match = re.search(r'<link>(.*?)</link>', item)
-                        date_match = re.search(r'<pubDate>(.*?)</pubDate>', item)
-                        
-                        if not title_match:
+        for source in rss_sources:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        source['url'],
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                            'Accept': 'application/rss+xml, application/xml, text/xml'
+                        }
+                    ) as resp:
+                        if resp.status != 200:
+                            logger.debug(f"[NEWS] {source['name']} returned {resp.status}")
                             continue
                         
-                        title = title_match.group(1)
-                        title = re.sub(r'<[^>]+>', '', title)  # Убираем HTML теги
-                        
-                        news_hash = self._get_news_hash(title, account)
-                        if news_hash in self.seen_news:
-                            continue
-                        
-                        self.seen_news.append(news_hash)
-                        
-                        # Проверяем релевантность по ключевым словам
-                        keywords_to_check = account_info.get('keywords', [])
-                        is_relevant = any(kw in title.lower() for kw in keywords_to_check)
-                        
-                        if not is_relevant and account_info.get('type') not in ['trader', 'regulator']:
-                            continue
-                        
-                        sentiment, confidence, keywords = self.analyze_sentiment(title)
-                        category = self.detect_category(title, account_info.get('type', 'other'))
-                        coins = self.extract_coins(title)
-                        impact = self.calculate_impact(
-                            account_info.get('type', 'other'),
-                            category,
-                            sentiment.value
-                        )
-                        
-                        # Парсим дату
-                        timestamp = datetime.now(timezone.utc)
-                        if date_match:
+                        content = await resp.text()
+                
+                # Парсим RSS
+                items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL | re.IGNORECASE)
+                
+                if not items:
+                    # Попробуем альтернативный формат (Atom)
+                    items = re.findall(r'<entry>(.*?)</entry>', content, re.DOTALL | re.IGNORECASE)
+                
+                for item in items[:10]:  # Последние 10 новостей
+                    # Парсим title
+                    title_match = re.search(r'<title[^>]*>(.*?)</title>', item, re.DOTALL)
+                    if not title_match:
+                        continue
+                    
+                    title = title_match.group(1)
+                    title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', title)  # Убираем CDATA
+                    title = re.sub(r'<[^>]+>', '', title)  # Убираем HTML теги
+                    title = title.strip()
+                    
+                    if not title or len(title) < 10:
+                        continue
+                    
+                    news_hash = self._get_news_hash(title, source['name'])
+                    if news_hash in self.seen_news:
+                        continue
+                    
+                    self.seen_news.append(news_hash)
+                    
+                    # Парсим ссылку
+                    link_match = re.search(r'<link[^>]*>([^<]+)</link>', item)
+                    if not link_match:
+                        link_match = re.search(r'<link[^>]*href=["\']([^"\']+)["\']', item)
+                    url = link_match.group(1) if link_match else ''
+                    
+                    # Парсим описание для дополнительного контекста
+                    desc_match = re.search(r'<description[^>]*>(.*?)</description>', item, re.DOTALL)
+                    description = ''
+                    if desc_match:
+                        description = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', desc_match.group(1))
+                        description = re.sub(r'<[^>]+>', '', description)[:200]
+                    
+                    # Анализ
+                    full_text = f"{title} {description}"
+                    sentiment, confidence, keywords = self.analyze_sentiment(full_text)
+                    category = self.detect_category(full_text, source['type'])
+                    coins = self.extract_coins(full_text)
+                    impact = self.calculate_impact(source['type'], category, sentiment.value)
+                    
+                    # Парсим дату
+                    timestamp = datetime.now(timezone.utc)
+                    date_match = re.search(r'<pubDate>(.*?)</pubDate>', item)
+                    if not date_match:
+                        date_match = re.search(r'<published>(.*?)</published>', item)
+                    if date_match:
+                        try:
+                            from email.utils import parsedate_to_datetime
+                            timestamp = parsedate_to_datetime(date_match.group(1))
+                        except:
                             try:
-                                from email.utils import parsedate_to_datetime
-                                timestamp = parsedate_to_datetime(date_match.group(1))
+                                # ISO format fallback
+                                timestamp = datetime.fromisoformat(date_match.group(1).replace('Z', '+00:00'))
                             except:
                                 pass
-                        
-                        event = NewsEvent(
-                            id=news_hash,
-                            source=f'Twitter/@{account}',
-                            author=account_info.get('name', account),
-                            title=title[:200],
-                            content=title,
-                            url=link_match.group(1) if link_match else '',
-                            timestamp=timestamp,
-                            sentiment=sentiment,
-                            impact=impact,
-                            category=category,
-                            affected_coins=coins,
-                            keywords_found=keywords,
-                            confidence=confidence
-                        )
-                        
-                        events.append(event)
                     
-                    break  # Успешно получили данные, не пробуем другие инстансы
+                    event = NewsEvent(
+                        id=news_hash,
+                        source=source['name'],
+                        author=source['name'],
+                        title=title[:200],
+                        content=description or title,
+                        url=url,
+                        timestamp=timestamp,
+                        sentiment=sentiment,
+                        impact=impact,
+                        category=category,
+                        affected_coins=coins,
+                        keywords_found=keywords,
+                        confidence=confidence
+                    )
                     
-                except Exception as e:
-                    continue  # Пробуем следующий инстанс
+                    events.append(event)
+                
+                logger.debug(f"[NEWS] {source['name']}: parsed {len(items)} items")
+                
+            except Exception as e:
+                logger.debug(f"[NEWS] {source['name']} error: {e}")
+                continue
             
-            await asyncio.sleep(0.5)  # Rate limiting
+            await asyncio.sleep(0.3)  # Rate limiting
         
-        logger.info(f"[NEWS] Fetched {len(events)} tweets from Twitter")
+        # Сортируем по времени
+        events.sort(key=lambda x: x.timestamp, reverse=True)
+        
+        logger.info(f"[NEWS] Fetched {len(events)} news from RSS sources")
+        return events
+    
+    async def fetch_coingecko_trending(self) -> List[NewsEvent]:
+        """
+        Получить trending монеты с CoinGecko - хороший индикатор хайпа
+        """
+        events = []
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Trending coins
+                async with session.get(
+                    'https://api.coingecko.com/api/v3/search/trending',
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={'Accept': 'application/json'}
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        
+                        for idx, coin_data in enumerate(data.get('coins', [])[:7]):
+                            coin = coin_data.get('item', {})
+                            name = coin.get('name', '')
+                            symbol = coin.get('symbol', '').upper()
+                            
+                            if not symbol:
+                                continue
+                            
+                            # Создаём новость о trending монете
+                            title = f"🔥 {symbol} trending #{idx+1} on CoinGecko"
+                            
+                            news_hash = self._get_news_hash(f"trending_{symbol}", "coingecko")
+                            if news_hash in self.seen_news:
+                                continue
+                            self.seen_news.append(news_hash)
+                            
+                            # Trending = потенциально bullish (хайп)
+                            event = NewsEvent(
+                                id=news_hash,
+                                source='CoinGecko Trending',
+                                author='CoinGecko',
+                                title=title,
+                                content=f"{name} ({symbol}) is trending",
+                                url=f"https://www.coingecko.com/en/coins/{coin.get('id', '')}",
+                                timestamp=datetime.now(timezone.utc),
+                                sentiment=NewsSentiment.BULLISH,
+                                impact=NewsImpact.MEDIUM,
+                                category=NewsCategory.OTHER,
+                                affected_coins=[symbol],
+                                keywords_found=['trending', 'hype'],
+                                confidence=0.5 + (0.05 * (7 - idx))  # Higher rank = higher confidence
+                            )
+                            events.append(event)
+                
+                logger.info(f"[NEWS] CoinGecko trending: {len(events)} coins")
+                
+        except Exception as e:
+            logger.debug(f"[NEWS] CoinGecko error: {e}")
+        
+        return events
+    
+    async def fetch_binance_announcements(self) -> List[NewsEvent]:
+        """
+        Получить важные анонсы с Binance (листинги, делистинги)
+        """
+        events = []
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Binance announcements API
+                async with session.get(
+                    'https://www.binance.com/bapi/composite/v1/public/cms/article/list/query',
+                    params={
+                        'type': 1,
+                        'pageNo': 1,
+                        'pageSize': 20
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Accept': 'application/json'
+                    }
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        
+                        articles = data.get('data', {}).get('catalogs', [])
+                        
+                        for catalog in articles:
+                            for article in catalog.get('articles', [])[:10]:
+                                title = article.get('title', '')
+                                
+                                if not title:
+                                    continue
+                                
+                                news_hash = self._get_news_hash(title, "binance")
+                                if news_hash in self.seen_news:
+                                    continue
+                                self.seen_news.append(news_hash)
+                                
+                                # Определяем тип анонса
+                                title_lower = title.lower()
+                                
+                                if 'list' in title_lower and 'delist' not in title_lower:
+                                    sentiment = NewsSentiment.VERY_BULLISH
+                                    impact = NewsImpact.HIGH
+                                    category = NewsCategory.LISTING
+                                elif 'delist' in title_lower or 'remove' in title_lower:
+                                    sentiment = NewsSentiment.VERY_BEARISH
+                                    impact = NewsImpact.HIGH
+                                    category = NewsCategory.LISTING
+                                elif 'maintenance' in title_lower or 'suspend' in title_lower:
+                                    sentiment = NewsSentiment.BEARISH
+                                    impact = NewsImpact.MEDIUM
+                                    category = NewsCategory.OTHER
+                                else:
+                                    sentiment = NewsSentiment.NEUTRAL
+                                    impact = NewsImpact.LOW
+                                    category = NewsCategory.OTHER
+                                
+                                coins = self.extract_coins(title)
+                                
+                                event = NewsEvent(
+                                    id=news_hash,
+                                    source='Binance',
+                                    author='Binance',
+                                    title=title[:200],
+                                    content=title,
+                                    url=f"https://www.binance.com/en/support/announcement",
+                                    timestamp=datetime.now(timezone.utc),
+                                    sentiment=sentiment,
+                                    impact=impact,
+                                    category=category,
+                                    affected_coins=coins,
+                                    keywords_found=[],
+                                    confidence=0.7 if impact.value >= NewsImpact.HIGH.value else 0.5
+                                )
+                                events.append(event)
+                
+                logger.info(f"[NEWS] Binance announcements: {len(events)}")
+                
+        except Exception as e:
+            logger.debug(f"[NEWS] Binance announcements error: {e}")
+        
         return events
     
     # ==================== MACRO EVENTS ====================
@@ -814,9 +1012,11 @@ class NewsAnalyzer:
         
         # Собираем новости из всех источников параллельно
         tasks = [
-            self.fetch_cryptopanic_news(),
-            self.fetch_twitter_sentiment(),
-            self.fetch_fear_greed_index()
+            self.fetch_cryptopanic_news(),        # CryptoPanic API
+            self.fetch_twitter_sentiment(),        # RSS новостные ленты (CoinTelegraph, Decrypt, etc.)
+            self.fetch_fear_greed_index(),         # Fear & Greed Index
+            self.fetch_coingecko_trending(),       # Trending на CoinGecko
+            self.fetch_binance_announcements()     # Анонсы Binance
         ]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -825,9 +1025,17 @@ class NewsAnalyzer:
         if isinstance(results[0], list):
             all_events.extend(results[0])
         
-        # Twitter
+        # RSS News (CoinTelegraph, Decrypt, etc.)
         if isinstance(results[1], list):
             all_events.extend(results[1])
+        
+        # CoinGecko Trending
+        if isinstance(results[3], list):
+            all_events.extend(results[3])
+        
+        # Binance Announcements
+        if isinstance(results[4], list):
+            all_events.extend(results[4])
         
         # Fear & Greed влияет на общий сентимент
         if isinstance(results[2], dict):
