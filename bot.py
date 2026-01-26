@@ -21,6 +21,8 @@ from smart_analyzer import (
 from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
 from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
 from cache_manager import users_cache, positions_cache, price_cache, cleanup_caches
+from trade_logger import trade_logger, init_trade_logger, LogCategory, LogLevel
+from auto_optimizer import auto_optimizer, init_auto_optimizer
 
 load_dotenv()
 
@@ -433,6 +435,14 @@ def init_db():
     # Initialize rate limiter tables
     init_rate_limiter()
     
+    # Initialize trade logger for comprehensive logging
+    init_trade_logger(run_sql, USE_POSTGRES)
+    logger.info("[DB] Trade logger initialized")
+    
+    # Initialize auto optimizer for continuous learning
+    init_auto_optimizer(run_sql, trade_logger)
+    logger.info("[DB] Auto optimizer initialized")
+    
     db_type = "PostgreSQL" if USE_POSTGRES else f"SQLite ({DB_PATH})"
     logger.info(f"[DB] Initialized: {db_type}")
 
@@ -544,6 +554,26 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     record_trade_result(pnl)
     
     logger.info(f"[DB] Position {pos_id} closed: {reason}, PnL: ${pnl:.2f}")
+    
+    # Comprehensive logging
+    try:
+        # Calculate holding time if possible
+        holding_minutes = None
+        if pos.get('opened_at'):
+            try:
+                opened = datetime.fromisoformat(str(pos['opened_at']).replace('Z', '+00:00'))
+                closed = datetime.fromisoformat(closed_at)
+                holding_minutes = (closed - opened).total_seconds() / 60
+            except:
+                pass
+        
+        trade_logger.log_trade_close(
+            user_id=pos['user_id'], symbol=pos['symbol'], direction=pos['direction'],
+            amount=pos['amount'], entry=pos['entry'], exit_price=exit_price,
+            pnl=pnl, reason=reason, position_id=pos_id, holding_minutes=holding_minutes
+        )
+    except Exception as e:
+        logger.warning(f"[TRADE_LOGGER] Failed to log trade close: {e}")
 
 def db_get_history(user_id: int, limit: int = 20) -> List[Dict]:
     """Получить историю сделок"""
@@ -998,12 +1028,17 @@ def db_add_referral_bonus(referrer_id: int, amount: float, from_user_id: int = 0
         logger.warning(f"[REF] Daily limit reached for {referrer_id}: {daily_count}/{MAX_REFERRAL_BONUSES_PER_DAY}")
         return False
     
-    # Add bonus
+    # Add bonus (atomic SQL update)
     run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, referrer_id))
     
-    # Обновляем кэш
+    # Синхронизируем кэш с БД (избегаем race conditions)
     if referrer_id in users_cache:
-        users_cache[referrer_id]['balance'] = sanitize_balance(users_cache[referrer_id]['balance'] + amount)
+        updated_user = run_sql("SELECT balance FROM users WHERE user_id = ?", (referrer_id,), fetch="one")
+        if updated_user:
+            users_cache[referrer_id]['balance'] = sanitize_balance(updated_user['balance'])
+        else:
+            # Fallback: если не удалось прочитать, удаляем из кэша - он перечитается при следующем доступе
+            users_cache.delete(referrer_id)
     
     # СОХРАНЯЕМ запись о заработке в таблицу referral_earnings
     if from_user_id:
@@ -1061,12 +1096,16 @@ async def process_multilevel_deposit_bonus(user_id: int, bot=None) -> List[Dict]
                 logger.info(f"[REF_DEPOSIT] Skipping duplicate bonus for level {level+1}")
                 continue
             
-            # Начисляем бонус
+            # Начисляем бонус (atomic SQL update)
             run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (bonus_amount, referrer_id))
             
-            # Обновляем кэш
+            # Синхронизируем кэш с БД (избегаем race conditions)
             if referrer_id in users_cache:
-                users_cache[referrer_id]['balance'] = sanitize_balance(users_cache[referrer_id]['balance'] + bonus_amount)
+                updated_user = run_sql("SELECT balance FROM users WHERE user_id = ?", (referrer_id,), fetch="one")
+                if updated_user:
+                    users_cache[referrer_id]['balance'] = sanitize_balance(updated_user['balance'])
+                else:
+                    users_cache.delete(referrer_id)
             
             # Сохраняем в referral_earnings
             db_save_referral_earning(
@@ -1828,7 +1867,8 @@ async def safe_balance_update(user_id: int, delta: float, reason: str = "") -> b
     lock = get_user_lock(user_id)
     async with lock:
         user = get_user(user_id)
-        new_balance = user['balance'] + delta
+        old_balance = user['balance']
+        new_balance = old_balance + delta
         
         if new_balance < 0:
             logger.warning(f"[BALANCE] Blocked: user {user_id} delta={delta:.2f} would result in negative balance")
@@ -1837,6 +1877,13 @@ async def safe_balance_update(user_id: int, delta: float, reason: str = "") -> b
         user['balance'] = sanitize_balance(new_balance)
         save_user(user_id)
         logger.info(f"[BALANCE] User {user_id}: {delta:+.2f} -> ${user['balance']:.2f} ({reason})")
+        
+        # Comprehensive balance logging
+        try:
+            trade_logger.log_balance_change(user_id, old_balance, user['balance'], reason)
+        except:
+            pass
+        
         return True
 
 # ==================== RATE LIMITING ====================
@@ -1892,14 +1939,16 @@ async def add_commission(amount: float, user_id: Optional[int] = None, bot=None)
                 referral_commission = amount * (level_percent / 100)
                 
                 if referral_commission > 0:  # Начисляем только если комиссия > 0
-                    # Начисляем рефереру
+                    # Начисляем рефереру (atomic SQL update)
                     run_sql("UPDATE users SET balance = balance + ? WHERE user_id = ?", (referral_commission, referrer_id))
                     
-                    # Обновляем кэш
+                    # Синхронизируем кэш с БД (избегаем race conditions)
                     if referrer_id in users_cache:
-                        users_cache[referrer_id]['balance'] = sanitize_balance(
-                            users_cache[referrer_id]['balance'] + referral_commission
-                        )
+                        updated_user = run_sql("SELECT balance FROM users WHERE user_id = ?", (referrer_id,), fetch="one")
+                        if updated_user:
+                            users_cache[referrer_id]['balance'] = sanitize_balance(updated_user['balance'])
+                        else:
+                            users_cache.delete(referrer_id)
                     
                     # СОХРАНЯЕМ запись о заработке в таблицу referral_earnings
                     db_save_referral_earning(
@@ -3476,8 +3525,12 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             
             # Возвращаем только amount без PnL (позиция не была реально открыта)
             returned = pos['amount']
-            user['balance'] = sanitize_balance(user['balance'] + returned)
-            save_user(user_id)
+            
+            # Защита от race conditions при изменении баланса
+            async with get_user_lock(user_id):
+                user = get_user(user_id)  # Re-read with lock
+                user['balance'] = sanitize_balance(user['balance'] + returned)
+                save_user(user_id)
             
             db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
             
@@ -3546,9 +3599,13 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             # Закрываем позицию в боте (с валидацией)
             real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)  # Max 200% от позиции
             returned = sanitize_amount(pos['amount']) + real_pnl
-            user['balance'] = sanitize_balance(user['balance'] + returned)
-            user['total_profit'] += real_pnl
-            save_user(user_id)
+            
+            # Защита от race conditions при изменении баланса
+            async with get_user_lock(user_id):
+                user = get_user(user_id)  # Re-read with lock
+                user['balance'] = sanitize_balance(user['balance'] + returned)
+                user['total_profit'] += real_pnl
+                save_user(user_id)
 
             # Переносим в историю
             db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
@@ -3761,10 +3818,12 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         if user_id in positions_cache:
             positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
-    # Обновляем баланс ОДИН РАЗ после всех закрытий
-    user['balance'] = sanitize_balance(user['balance'] + total_returned)
-    user['total_profit'] += total_pnl
-    save_user(user_id)
+    # Обновляем баланс ОДИН РАЗ после всех закрытий (с локом для защиты от race conditions)
+    async with get_user_lock(user_id):
+        user = get_user(user_id)  # Re-read with lock
+        user['balance'] = sanitize_balance(user['balance'] + total_returned)
+        user['total_profit'] += total_pnl
+        save_user(user_id)
     
     pnl_sign = "+" if total_pnl >= 0 else ""
     pnl_emoji = "✅" if total_pnl >= 0 else "❌"
@@ -3905,10 +3964,12 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if user_id in positions_cache:
             positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
-    # Обновляем баланс
-    user['balance'] = sanitize_balance(user['balance'] + total_returned)
-    user['total_profit'] += total_pnl
-    save_user(user_id)
+    # Обновляем баланс (с локом для защиты от race conditions)
+    async with get_user_lock(user_id):
+        user = get_user(user_id)  # Re-read with lock
+        user['balance'] = sanitize_balance(user['balance'] + total_returned)
+        user['total_profit'] += total_pnl
+        save_user(user_id)
     
     # Формируем итоговое сообщение
     pnl_abs = abs(total_pnl)
@@ -4886,6 +4947,13 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         positions_cache.set(user_id, db_get_positions(user_id))
         
         logger.info(f"[TRADE] ✅ Позиция открыта: User {user_id} {direction} {symbol} ${amount:.2f}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
+        
+        # Comprehensive logging
+        trade_logger.log_trade_open(
+            user_id=user_id, symbol=symbol, direction=direction,
+            amount=amount, entry=entry, sl=sl, tp=tp1,
+            bybit_qty=bybit_qty, position_id=pos_id
+        )
     
     dir_text = "LONG" if direction == "LONG" else "SHORT"
     tp1_percent = abs(tp1 - entry) / entry * 100
@@ -5224,10 +5292,12 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         if user_id in positions_cache:
             positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
     
-    # Обновляем баланс
-    user['balance'] = sanitize_balance(user['balance'] + total_returned)
-    user['total_profit'] += total_pnl
-    save_user(user_id)
+    # Обновляем баланс (с локом для защиты от race conditions)
+    async with get_user_lock(user_id):
+        user = get_user(user_id)  # Re-read with lock
+        user['balance'] = sanitize_balance(user['balance'] + total_returned)
+        user['total_profit'] += total_pnl
+        save_user(user_id)
     
     pnl_abs = abs(total_pnl)
     
@@ -5826,11 +5896,13 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                         except Exception as e:
                             logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
                         
-                        # Возвращаем деньги пользователю
+                        # Возвращаем деньги пользователю (с локом для защиты от race conditions)
                         returned = pos['amount'] + real_pnl
-                        user['balance'] = sanitize_balance(user['balance'] + returned)
-                        user['total_profit'] += real_pnl
-                        save_user(user_id)
+                        async with get_user_lock(user_id):
+                            user = get_user(user_id)  # Re-read with lock
+                            user['balance'] = sanitize_balance(user['balance'] + returned)
+                            user['total_profit'] += real_pnl
+                            save_user(user_id)
                         
                         # Закрываем в БД
                         db_close_position(pos['id'], exit_price, real_pnl, f'BYBIT_{reason}')
@@ -5981,9 +6053,13 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                 partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * partial_close_amount * LEVERAGE - partial_commission
                             
                             returned = partial_close_amount + partial_pnl
-                            user['balance'] = sanitize_balance(user['balance'] + returned)
-                            user['total_profit'] += partial_pnl
-                            save_user(user_id)
+                            
+                            # Защита от race conditions при изменении баланса
+                            async with get_user_lock(user_id):
+                                user = get_user(user_id)  # Re-read with lock
+                                user['balance'] = sanitize_balance(user['balance'] + returned)
+                                user['total_profit'] += partial_pnl
+                                save_user(user_id)
                             
                             pos['amount'] -= partial_close_amount
                             if pos.get('bybit_qty', 0) > 0:
@@ -6154,9 +6230,13 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                         exit_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                                     
                                     returned = close_amount + exit_pnl
-                                    user['balance'] = sanitize_balance(user['balance'] + returned)
-                                    user['total_profit'] += exit_pnl
-                                    save_user(user_id)
+                                    
+                                    # Защита от race conditions при изменении баланса
+                                    async with get_user_lock(user_id):
+                                        user = get_user(user_id)  # Re-read with lock
+                                        user['balance'] = sanitize_balance(user['balance'] + returned)
+                                        user['total_profit'] += exit_pnl
+                                        save_user(user_id)
                                     
                                     if close_percent >= 1.0:
                                         # Полное закрытие
@@ -6242,11 +6322,13 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 else:
                     partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                 
-                # Возвращаем часть и профит
+                # Возвращаем часть и профит (с локом для защиты от race conditions)
                 returned = close_amount + partial_pnl
-                user['balance'] = sanitize_balance(user['balance'] + returned)
-                user['total_profit'] += partial_pnl
-                save_user(user_id)
+                async with get_user_lock(user_id):
+                    user = get_user(user_id)  # Re-read with lock
+                    user['balance'] = sanitize_balance(user['balance'] + returned)
+                    user['total_profit'] += partial_pnl
+                    save_user(user_id)
                 
                 # Обновляем позицию
                 pos['amount'] = remaining_amount
@@ -6308,9 +6390,13 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
                 
                 returned = close_amount + partial_pnl
-                user['balance'] = sanitize_balance(user['balance'] + returned)
-                user['total_profit'] += partial_pnl
-                save_user(user_id)
+                
+                # Защита от race conditions при изменении баланса
+                async with get_user_lock(user_id):
+                    user = get_user(user_id)  # Re-read with lock
+                    user['balance'] = sanitize_balance(user['balance'] + returned)
+                    user['total_profit'] += partial_pnl
+                    save_user(user_id)
                 
                 pos['amount'] = remaining_amount
                 pos['tp2_hit'] = True
@@ -6391,9 +6477,13 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                             continue  # Пропускаем - попробуем в следующем цикле
                 
                 returned = pos['amount'] + real_pnl
-                user['balance'] = sanitize_balance(user['balance'] + returned)
-                user['total_profit'] += real_pnl
-                save_user(user_id)
+                
+                # Защита от race conditions при изменении баланса
+                async with get_user_lock(user_id):
+                    user = get_user(user_id)  # Re-read with lock
+                    user['balance'] = sanitize_balance(user['balance'] + returned)
+                    user['total_profit'] += real_pnl
+                    save_user(user_id)
                 
                 reason = 'TP3' if hit_tp3 else 'SL'
                 db_close_position(pos['id'], exit_price, real_pnl, reason)
@@ -6583,6 +6673,86 @@ async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_commission")])
     
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None)
+
+
+async def optimizer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """View optimizer stats and recommendations (admin)"""
+    admin_id = update.effective_user.id
+    
+    if admin_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    await update.message.reply_text("<b>⏳ Анализируем данные...</b>", parse_mode="HTML")
+    
+    try:
+        # Run analysis
+        result = await auto_optimizer.run_analysis()
+        
+        if result.get('status') == 'insufficient_data':
+            await update.message.reply_text(
+                f"<b>📊 Оптимизатор</b>\n\n"
+                f"Недостаточно данных для анализа.\n"
+                f"Сделок: {result.get('trades_analyzed', 0)}\n"
+                f"Минимум: 20",
+                parse_mode="HTML"
+            )
+            return
+        
+        overall = result.get('overall_stats', {})
+        recommendations = result.get('recommendations', [])
+        
+        # Format recommendations
+        rec_text = ""
+        if recommendations:
+            rec_text = "\n\n<b>💡 Рекомендации:</b>\n"
+            for i, rec in enumerate(recommendations[:5], 1):
+                conf = rec.get('confidence', 0) * 100
+                rec_text += f"\n{i}. <b>{rec.get('parameter', 'N/A')}</b>\n"
+                rec_text += f"   └ {rec.get('reason', 'N/A')}\n"
+                rec_text += f"   └ Уверенность: {conf:.0f}%\n"
+        
+        # Best/worst symbols
+        symbol_analysis = result.get('symbol_analysis', {})
+        best_symbols = sorted(
+            [(s, d) for s, d in symbol_analysis.items() if d['total_trades'] >= 5],
+            key=lambda x: x[1]['win_rate'], reverse=True
+        )[:3]
+        worst_symbols = sorted(
+            [(s, d) for s, d in symbol_analysis.items() if d['total_trades'] >= 5],
+            key=lambda x: x[1]['win_rate']
+        )[:3]
+        
+        symbol_text = ""
+        if best_symbols:
+            symbol_text += "\n\n<b>✅ Лучшие символы:</b>\n"
+            for s, d in best_symbols:
+                symbol_text += f"   {s}: {d['win_rate']:.0%} ({d['total_trades']} сделок)\n"
+        
+        if worst_symbols:
+            symbol_text += "\n<b>⚠️ Худшие символы:</b>\n"
+            for s, d in worst_symbols:
+                symbol_text += f"   {s}: {d['win_rate']:.0%} ({d['total_trades']} сделок)\n"
+        
+        text = f"""<b>📊 Авто-Оптимизатор</b>
+
+<b>Общая статистика (30 дней):</b>
+├ Сделок: {overall.get('total_trades', 0)}
+├ Win Rate: {overall.get('win_rate', 0):.1%}
+└ P&L: ${overall.get('total_pnl', 0):.2f}
+{symbol_text}{rec_text}
+
+<i>Анализ обновляется каждые 4 часа</i>"""
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"[OPTIMIZER] Command error: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"<b>❌ Ошибка анализа</b>\n\n{str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
 
 async def refresh_commission_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обновить статус комиссий"""
@@ -7791,6 +7961,7 @@ def main() -> None:
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("health", health_check))
     app.add_handler(CommandHandler("commission", commission_cmd))
+    app.add_handler(CommandHandler("optimizer", optimizer_cmd))
     app.add_handler(CommandHandler("syncprofits", sync_profits_cmd))
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
@@ -7876,6 +8047,54 @@ def main() -> None:
         if NEWS_FEATURES:
             logger.info("[INIT] News analyzer enabled (internal use only, no alerts)")
         
+        # === TRADE LOGGER MAINTENANCE JOB ===
+        async def logger_maintenance_job(context):
+            """Flush logs and clean up old entries"""
+            try:
+                trade_logger.flush()
+                # Clean up logs older than 30 days once per day (check if 24 hours passed)
+                import random
+                if random.random() < 0.0007:  # ~once per day with 5 min interval
+                    trade_logger.cleanup_old_logs(days=30)
+            except Exception as e:
+                logger.warning(f"[LOGGER] Maintenance error: {e}")
+        
+        app.job_queue.run_repeating(logger_maintenance_job, interval=300, first=60)  # Every 5 minutes
+        
+        # === AUTO OPTIMIZER JOB ===
+        async def auto_optimizer_job(context):
+            """Run automated optimization analysis"""
+            try:
+                if auto_optimizer.should_run_analysis():
+                    result = await auto_optimizer.run_analysis()
+                    
+                    if result.get('status') == 'completed':
+                        recommendations = result.get('recommendations', [])
+                        overall_stats = result.get('overall_stats', {})
+                        
+                        logger.info(
+                            f"[OPTIMIZER] Analysis complete: "
+                            f"{overall_stats.get('total_trades', 0)} trades, "
+                            f"{overall_stats.get('win_rate', 0):.1%} win rate, "
+                            f"{len(recommendations)} recommendations"
+                        )
+                        
+                        # Log significant recommendations
+                        for rec in recommendations:
+                            if rec.get('confidence', 0) >= 0.6:
+                                trade_logger.log_optimization(
+                                    parameter=rec.get('parameter'),
+                                    old_value=rec.get('current_value'),
+                                    new_value=rec.get('recommended_value'),
+                                    reason=rec.get('reason'),
+                                    expected_improvement=rec.get('expected_improvement')
+                                )
+            except Exception as e:
+                logger.error(f"[OPTIMIZER] Job error: {e}")
+        
+        # Run optimizer every 4 hours
+        app.job_queue.run_repeating(auto_optimizer_job, interval=14400, first=300)  # 4 hours, start after 5 min
+        
         logger.info("[JOBS] All periodic tasks registered")
     else:
         logger.warning("[JOBS] JobQueue NOT available!")
@@ -7898,6 +8117,17 @@ def main() -> None:
                 error_details['message_text'] = update.message.text[:100] if update.message.text else None
         
         logger.error(f"[ERROR_HANDLER] Details: {error_details}", exc_info=context.error)
+        
+        # Comprehensive error logging
+        try:
+            trade_logger.log_error(
+                message=f"Error: {error_details.get('error_type', 'Unknown')} - {error_details.get('error', 'No details')}",
+                error=context.error,
+                user_id=error_details.get('user_id'),
+                context=error_details
+            )
+        except:
+            pass
         
         # Notify user
         if update and hasattr(update, 'effective_user') and update.effective_user:
@@ -7942,11 +8172,25 @@ def main() -> None:
     logger.info("BOT STARTED SUCCESSFULLY")
     logger.info("=" * 50)
     
+    # Log startup to trade logger
+    trade_logger.log_system("Bot started", data={
+        'database': 'PostgreSQL' if USE_POSTGRES else 'SQLite',
+        'admin_ids': ADMIN_IDS,
+        'auto_trade_user': AUTO_TRADE_USER_ID,
+        'commission': COMMISSION_PERCENT,
+        'leverage': LEVERAGE,
+        'advanced_features': ADVANCED_FEATURES,
+        'advanced_position_management': ADVANCED_POSITION_MANAGEMENT,
+        'news_features': NEWS_FEATURES
+    })
+    
     # Graceful shutdown
     import signal as sig
     
     def shutdown(signum, frame):
         logger.info("Shutting down gracefully...")
+        trade_logger.log_system("Bot shutting down")
+        trade_logger.flush()  # Flush any buffered logs
         for user_id in users_cache:
             save_user(user_id)
         logger.info("Data saved. Goodbye!")
