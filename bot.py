@@ -1538,6 +1538,8 @@ ALLOWED_SYMBOLS = {
     # === Новые листинги (высокий потенциал) ===
     'JUP/USDT', 'ENA/USDT', 'W/USDT', 'ETHFI/USDT', 'AEVO/USDT',
     'PORTAL/USDT', 'DYM/USDT', 'ALT/USDT', 'PYTH/USDT',
+    'SOMI/USDT', 'ROSE/USDT', 'HYPE/USDT', 'FARTCOIN/USDT', 'PUMPFUN/USDT',
+    'IP/USDT', 'MYX/USDT', 'ACU/USDT', 'AXL/USDT', 'ENSO/USDT',
     
     # === Прочие ликвидные ===
     'LINK/USDT', 'LTC/USDT', 'TRX/USDT', 'ORDI/USDT', 'BCH/USDT',
@@ -2483,7 +2485,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 💰 Баланс: ${user['balance']:.2f}"""
         
-        keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
+        keyboard = [[InlineKeyboardButton("🏠 Домой", callback_data="back")]]
         
         # Отправляем с баннером если есть
         banner_id = get_banner("payment")
@@ -2794,7 +2796,7 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
 
 💰 Баланс: ${user['balance']:.2f}"""
             
-            keyboard = [[InlineKeyboardButton("🔙 Главное меню", callback_data="back")]]
+            keyboard = [[InlineKeyboardButton("🏠 Домой", callback_data="back")]]
             
             # Удаляем старое сообщение и отправляем с баннером
             banner_id = get_banner("payment")
@@ -2903,19 +2905,22 @@ async def check_pending_crypto_payments(context: ContextTypes.DEFAULT_TYPE) -> N
 Зачислено: <b>${amount:.2f}</b>
 
 💰 Баланс: ${user['balance']:.2f}"""
+                                payment_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="back")]])
                                 banner_id = get_banner("payment")
                                 if banner_id:
                                     await context.bot.send_photo(
                                         chat_id=user_id,
                                         photo=banner_id,
                                         caption=payment_text,
-                                        parse_mode="HTML"
+                                        parse_mode="HTML",
+                                        reply_markup=payment_keyboard
                                     )
                                 else:
                                     await context.bot.send_message(
                                         user_id,
                                         payment_text,
-                                        parse_mode="HTML"
+                                        parse_mode="HTML",
+                                        reply_markup=payment_keyboard
                                     )
                             except Exception as e:
                                 logger.warning(f"[CRYPTO_AUTO] Failed to notify user {user_id}: {e}")
@@ -4395,8 +4400,8 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     except Exception as e:
                         logger.warning(f"[AUTO_TRADE] User {auto_user_id}: ошибка корреляции: {e}")
                 
-                # Проверка символа
-                valid, error = validate_symbol(symbol)
+                # Проверка символа (асинхронная - позволяет динамические символы с Bybit)
+                valid, error = await validate_symbol_async(symbol)
                 if not valid:
                     logger.warning(f"[AUTO_TRADE] User {auto_user_id}: невалидный символ: {error}")
                     continue
