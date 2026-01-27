@@ -5917,9 +5917,14 @@ async def skip_signal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Ловим необработанные callbacks"""
-    query = update.callback_query
-    logger.warning(f"[UNKNOWN] User {update.effective_user.id}, data: {query.data}")
-    await query.answer("❌ Неизвестная команда")
+    try:
+        query = update.callback_query
+        if not query:
+            return
+        logger.warning(f"[UNKNOWN] User {update.effective_user.id}, data: {query.data}")
+        await query.answer("❌ Неизвестная команда")
+    except Exception as e:
+        logger.error(f"[UNKNOWN] Error handling unknown callback: {e}", exc_info=True)
 
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
 @isolate_errors
@@ -8284,7 +8289,10 @@ def main() -> None:
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
             app.job_queue.run_repeating(send_smart_signal, interval=120, first=10)  # 2 минуты
         
-        app.job_queue.run_repeating(lambda ctx: cleanup_caches(), interval=300, first=300)
+        # Cleanup caches - оборачиваем в async функцию
+        async def cleanup_caches_job(context):
+            cleanup_caches()
+        app.job_queue.run_repeating(cleanup_caches_job, interval=300, first=300)
         
         # Автоматическая проверка крипто-платежей каждые 15 секунд
         app.job_queue.run_repeating(check_pending_crypto_payments, interval=15, first=15)
@@ -8356,18 +8364,21 @@ def main() -> None:
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         # Log detailed error information
         error_details = {
-            'error': str(context.error),
-            'error_type': type(context.error).__name__,
+            'error': str(context.error) if context.error else 'Unknown error',
+            'error_type': type(context.error).__name__ if context.error else 'Unknown',
         }
         
         if update:
-            if hasattr(update, 'effective_user') and update.effective_user:
-                error_details['user_id'] = update.effective_user.id
-                error_details['username'] = update.effective_user.username
-            if hasattr(update, 'callback_query') and update.callback_query:
-                error_details['callback_data'] = update.callback_query.data
-            if hasattr(update, 'message') and update.message:
-                error_details['message_text'] = update.message.text[:100] if update.message.text else None
+            try:
+                if hasattr(update, 'effective_user') and update.effective_user:
+                    error_details['user_id'] = update.effective_user.id
+                    error_details['username'] = update.effective_user.username
+                if hasattr(update, 'callback_query') and update.callback_query:
+                    error_details['callback_data'] = update.callback_query.data
+                if hasattr(update, 'message') and update.message:
+                    error_details['message_text'] = update.message.text[:100] if update.message.text else None
+            except Exception as e:
+                logger.warning(f"[ERROR_HANDLER] Error extracting details: {e}")
         
         logger.error(f"[ERROR_HANDLER] Details: {error_details}", exc_info=context.error)
         
@@ -8379,10 +8390,10 @@ def main() -> None:
                 user_id=error_details.get('user_id'),
                 context=error_details
             )
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"[ERROR_HANDLER] Failed to log to trade_logger: {e}")
         
-        # Notify user
+        # Notify user (only for user-initiated updates, not for jobs)
         if update and hasattr(update, 'effective_user') and update.effective_user:
             try:
                 await context.bot.send_message(
