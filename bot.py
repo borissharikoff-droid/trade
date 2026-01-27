@@ -3604,12 +3604,17 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
     Returns:
         Количество синхронизированных (закрытых) позиций
     """
+    logger.info(f"[SYNC] Starting sync for user {user_id}")
     if not await is_hedging_enabled():
+        logger.info(f"[SYNC] Hedging disabled, skipping sync")
         return 0
 
     user_positions = get_positions(user_id)
     if not user_positions:
+        logger.info(f"[SYNC] No positions to sync for user {user_id}")
         return 0
+    
+    logger.info(f"[SYNC] Found {len(user_positions)} positions to check for user {user_id}")
 
     user = get_user(user_id)
     synced = 0
@@ -3626,152 +3631,174 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
         }
     
     # Получаем закрытые позиции за последние 7 дней
-    closed_pnl = await hedger.get_closed_pnl(limit=100)
+    try:
+        closed_pnl = await asyncio.wait_for(hedger.get_closed_pnl(limit=100), timeout=5.0)
+    except asyncio.TimeoutError:
+        logger.warning(f"[SYNC] Timeout getting closed PnL, using empty list")
+        closed_pnl = []
+    except Exception as e:
+        logger.error(f"[SYNC] Error getting closed PnL: {e}")
+        closed_pnl = []
 
     for pos in user_positions[:]:
-        bybit_symbol = pos['symbol'].replace("/", "")
-        bybit_info = bybit_data.get(bybit_symbol, {'size': 0, 'side': None})
-        bybit_size = bybit_info['size']
-        bybit_side = bybit_info['side']
-        expected_qty = pos.get('bybit_qty', 0)
-        
-        # Проверка направления: если направления разные, считаем позицию закрытой
-        direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
-        if direction_mismatch:
-            logger.warning(f"[SYNC] Direction mismatch for {bybit_symbol}: bot={pos['direction']}, bybit={bybit_side}")
+        try:
+            bybit_symbol = pos['symbol'].replace("/", "")
+            bybit_info = bybit_data.get(bybit_symbol, {'size': 0, 'side': None})
+            bybit_size = bybit_info['size']
+            bybit_side = bybit_info['side']
+            expected_qty = pos.get('bybit_qty', 0)
+            
+            # Проверка направления: если направления разные, считаем позицию закрытой
+            direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
+            if direction_mismatch:
+                logger.warning(f"[SYNC] Direction mismatch for {bybit_symbol}: bot={pos['direction']}, bybit={bybit_side}")
 
-        # Проверяем закрыта ли позиция:
-        # 1. bybit_qty > 0 и размер на Bybit = 0 -> позиция закрылась на Bybit
-        # 2. bybit_qty > 0 и размер сильно меньше ожидаемого -> частичное закрытие
-        # 3. bybit_qty == 0 при включенном хеджировании -> "фейковая" позиция (ошибка при открытии)
-        
-        if expected_qty == 0:
-            # Позиция без bybit_qty - возможно не открылась на Bybit
-            # Помечаем как "orphan" и закрываем без PnL
-            logger.warning(f"[SYNC] Orphan position {pos['id']}: {bybit_symbol} has no bybit_qty - closing")
+            # Проверяем закрыта ли позиция:
+            # 1. bybit_qty > 0 и размер на Bybit = 0 -> позиция закрылась на Bybit
+            # 2. bybit_qty > 0 и размер сильно меньше ожидаемого -> частичное закрытие
+            # 3. bybit_qty == 0 при включенном хеджировании -> "фейковая" позиция (ошибка при открытии)
             
-            # Возвращаем только amount без PnL (позиция не была реально открыта)
-            returned = pos['amount']
+            if expected_qty == 0:
+                # Позиция без bybit_qty - возможно не открылась на Bybit
+                # Помечаем как "orphan" и закрываем без PnL
+                logger.warning(f"[SYNC] Orphan position {pos['id']}: {bybit_symbol} has no bybit_qty - closing")
+                
+                # Возвращаем только amount без PnL (позиция не была реально открыта)
+                returned = pos['amount']
+                
+                # Защита от race conditions при изменении баланса
+                async with get_user_lock(user_id):
+                    user = get_user(user_id)  # Re-read with lock
+                    user['balance'] = sanitize_balance(user['balance'] + returned)
+                    save_user(user_id)
+                
+                db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
+                
+                # Явно удаляем из кэша по ID
+                pos_id_to_remove = pos['id']
+                if user_id in positions_cache:
+                    positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+                
+                synced += 1
+                logger.info(f"[SYNC] Orphan {pos_id_to_remove} removed from cache, remaining: {len(positions_cache.get(user_id, []))}")
+                
+                try:
+                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    await asyncio.wait_for(
+                        context.bot.send_message(
+                            user_id, 
+                            f"<b>📡 Синхронизация</b>\n\n"
+                            f"{ticker} закрыт (не был на Bybit)\n"
+                            f"Возврат: <b>${returned:.2f}</b>\n\n"
+                            f"💰 Баланс: ${user['balance']:.2f}",
+                            parse_mode="HTML"
+                        ),
+                        timeout=3.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[SYNC] Timeout sending orphan notification to user {user_id}")
+                except Exception as e:
+                    logger.error(f"[SYNC] Failed to notify orphan: {e}")
+                continue
             
-            # Защита от race conditions при изменении баланса
-            async with get_user_lock(user_id):
-                user = get_user(user_id)  # Re-read with lock
-                user['balance'] = sanitize_balance(user['balance'] + returned)
-                save_user(user_id)
-            
-            db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
-            
-            # Явно удаляем из кэша по ID
-            pos_id_to_remove = pos['id']
-            if user_id in positions_cache:
-                positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
-            
-            synced += 1
-            logger.info(f"[SYNC] Orphan {pos_id_to_remove} removed from cache, remaining: {len(positions_cache.get(user_id, []))}")
-            
-            try:
-                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                await context.bot.send_message(
-                    user_id, 
-                    f"<b>📡 Синхронизация</b>\n\n"
-                    f"{ticker} закрыт (не был на Bybit)\n"
-                    f"Возврат: <b>${returned:.2f}</b>\n\n"
-                    f"💰 Баланс: ${user['balance']:.2f}",
-                    parse_mode="HTML"
-                )
-            except Exception as e:
-                logger.error(f"[SYNC] Failed to notify orphan: {e}")
-            continue
-        
-        # Позиция закрыта если: размер=0, размер << ожидаемого, или направление не совпадает
-        is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1) or direction_mismatch
+            # Позиция закрыта если: размер=0, размер << ожидаемого, или направление не совпадает
+            is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1) or direction_mismatch
 
-        if is_closed:
-            # Позиция закрыта на Bybit - берём реальный PnL
-            real_pnl = pos.get('pnl', 0)  # Default - локальный
-            
-            # Ищем реальный PnL с Bybit с проверкой времени и qty
-            import time as time_module
-            current_time_ms = int(time_module.time() * 1000)
-            
-            for closed in closed_pnl:
-                if closed['symbol'] == bybit_symbol:
-                    bybit_pnl = closed['closed_pnl']
-                    bybit_qty = closed.get('qty', 0)
-                    bybit_time = closed.get('updated_time', 0)
-                    bybit_side = closed.get('side', '')
-                    
-                    # Проверка времени (< 10 мин)
-                    time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
-                    
-                    # Проверка qty (должно быть близко к expected_qty)
-                    qty_ratio = bybit_qty / expected_qty if expected_qty > 0 else 0
-                    
-                    # Проверка направления
-                    expected_side = "Sell" if pos['direction'] == "LONG" else "Buy"  # Закрытие - обратная сторона
-                    side_match = bybit_side == expected_side or not bybit_side
-                    
-                    logger.info(f"[SYNC] Checking Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f}, time_diff={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side={bybit_side}")
-                    
-                    # Используем Bybit PnL если проходит проверки
-                    if time_diff < 600 and qty_ratio > 0.5 and side_match:
-                        logger.info(f"[SYNC] Using Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f} (local: ${real_pnl:.2f})")
-                        real_pnl = bybit_pnl
-                        break
-                    else:
-                        logger.warning(f"[SYNC] Bybit PnL rejected: time={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side_match={side_match}")
+            if is_closed:
+                # Позиция закрыта на Bybit - берём реальный PnL
+                real_pnl = pos.get('pnl', 0)  # Default - локальный
+                
+                # Ищем реальный PnL с Bybit с проверкой времени и qty
+                import time as time_module
+                current_time_ms = int(time_module.time() * 1000)
+                
+                for closed in closed_pnl:
+                    if closed['symbol'] == bybit_symbol:
+                        bybit_pnl = closed['closed_pnl']
+                        bybit_qty = closed.get('qty', 0)
+                        bybit_time = closed.get('updated_time', 0)
+                        bybit_side = closed.get('side', '')
+                        
+                        # Проверка времени (< 10 мин)
+                        time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
+                        
+                        # Проверка qty (должно быть близко к expected_qty)
+                        qty_ratio = bybit_qty / expected_qty if expected_qty > 0 else 0
+                        
+                        # Проверка направления
+                        expected_side = "Sell" if pos['direction'] == "LONG" else "Buy"  # Закрытие - обратная сторона
+                        side_match = bybit_side == expected_side or not bybit_side
+                        
+                        logger.info(f"[SYNC] Checking Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f}, time_diff={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side={bybit_side}")
+                        
+                        # Используем Bybit PnL если проходит проверки
+                        if time_diff < 600 and qty_ratio > 0.5 and side_match:
+                            logger.info(f"[SYNC] Using Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f} (local: ${real_pnl:.2f})")
+                            real_pnl = bybit_pnl
+                            break
+                        else:
+                            logger.warning(f"[SYNC] Bybit PnL rejected: time={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side_match={side_match}")
 
-            logger.info(f"[SYNC] Closing {bybit_symbol}: bybit_size={bybit_size}, expected_qty={expected_qty}, PnL=${real_pnl:.2f}")
+                logger.info(f"[SYNC] Closing {bybit_symbol}: bybit_size={bybit_size}, expected_qty={expected_qty}, PnL=${real_pnl:.2f}")
 
-            # Закрываем позицию в боте (с валидацией)
-            real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)  # Max 200% от позиции
-            returned = sanitize_amount(pos['amount']) + real_pnl
-            
-            # Защита от race conditions при изменении баланса
-            async with get_user_lock(user_id):
-                user = get_user(user_id)  # Re-read with lock
-                user['balance'] = sanitize_balance(user['balance'] + returned)
-                user['total_profit'] += real_pnl
-                save_user(user_id)
+                # Закрываем позицию в боте (с валидацией)
+                real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)  # Max 200% от позиции
+                returned = sanitize_amount(pos['amount']) + real_pnl
+                
+                # Защита от race conditions при изменении баланса
+                async with get_user_lock(user_id):
+                    user = get_user(user_id)  # Re-read with lock
+                    user['balance'] = sanitize_balance(user['balance'] + returned)
+                    user['total_profit'] += real_pnl
+                    save_user(user_id)
 
-            # Переносим в историю
-            db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
-            
-            # Явно удаляем из кэша по ID (надёжнее чем remove)
-            pos_id_to_remove = pos['id']
-            if user_id in positions_cache:
-                positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+                # Переносим в историю
+                db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
+                
+                # Явно удаляем из кэша по ID (надёжнее чем remove)
+                pos_id_to_remove = pos['id']
+                if user_id in positions_cache:
+                    positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
 
-            synced += 1
-            logger.info(f"[SYNC] Position {pos_id_to_remove} synced: {pos['symbol']} PnL=${real_pnl:.2f}, cache remaining: {len(positions_cache.get(user_id, []))}")
+                synced += 1
+                logger.info(f"[SYNC] Position {pos_id_to_remove} synced: {pos['symbol']} PnL=${real_pnl:.2f}, cache remaining: {len(positions_cache.get(user_id, []))}")
 
-            # Отправляем уведомление
-            try:
-                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                pnl_abs = abs(real_pnl)
+                # Отправляем уведомление (с таймаутом 3 секунды)
+                try:
+                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    pnl_abs = abs(real_pnl)
 
-                if real_pnl > 0:
-                    text = f"""<b>📡 Bybit</b>
+                    if real_pnl > 0:
+                        text = f"""<b>📡 Bybit</b>
 
 {ticker} закрыт
 Итого: <b>+${pnl_abs:.2f}</b>
 
 💰 Баланс: ${user['balance']:.2f}"""
-                else:
-                    text = f"""<b>📡 Bybit</b>
+                    else:
+                        text = f"""<b>📡 Bybit</b>
 
 {ticker} закрыт
 Итого: <b>-${pnl_abs:.2f}</b>
 
 💰 Баланс: ${user['balance']:.2f}"""
 
-                await context.bot.send_message(user_id, text, parse_mode="HTML")
-            except Exception as e:
-                logger.error(f"[SYNC] Failed to notify user {user_id}: {e}")
+                    await asyncio.wait_for(
+                        context.bot.send_message(user_id, text, parse_mode="HTML"),
+                        timeout=3.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(f"[SYNC] Timeout sending notification to user {user_id}")
+                except Exception as e:
+                    logger.error(f"[SYNC] Failed to notify user {user_id}: {e}")
+        except Exception as e:
+            logger.error(f"[SYNC] Error processing position {pos.get('id', 'unknown')}: {e}", exc_info=True)
+            # Продолжаем обработку остальных позиций
 
     if synced > 0:
         logger.info(f"[SYNC] User {user_id}: synced {synced} positions from Bybit")
-
+    
+    logger.info(f"[SYNC] Completed sync for user {user_id}, synced={synced}")
     return synced
 
 
@@ -4166,19 +4193,23 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         cache_ids_before = [p.get('id') for p in positions_cache.get(user_id, [])]
         logger.info(f"[TRADES] Cache BEFORE sync: {cache_before} positions, IDs: {cache_ids_before}")
         
-        # Синхронизация с Bybit при обновлении
+        # Синхронизация с Bybit при обновлении (с таймаутом 10 секунд)
+        synced = 0
         try:
-            synced = await sync_bybit_positions(user_id, context)
+            synced = await asyncio.wait_for(sync_bybit_positions(user_id, context), timeout=10.0)
             if synced > 0:
                 logger.info(f"[TRADES] Synced {synced} positions from Bybit")
+        except asyncio.TimeoutError:
+            logger.warning(f"[TRADES] Sync timeout after 10s - continuing without sync")
+            trade_logger.log_error(f"Sync timeout in show_trades", error=None, user_id=user_id)
         except Exception as e:
             logger.error(f"[TRADES] Error during sync: {e}", exc_info=True)
             trade_logger.log_error(f"Error syncing positions in show_trades: {e}", error=e, user_id=user_id)
-            synced = 0
         
         # ОБНОВЛЯЕМ КЭШ после синхронизации - загружаем свежие данные из БД
         try:
             positions_cache.set(user_id, db_get_positions(user_id))
+            logger.info(f"[TRADES] Cache updated after sync")
         except Exception as e:
             logger.error(f"[TRADES] Error updating cache: {e}", exc_info=True)
         
@@ -4187,8 +4218,10 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         cache_ids_after = [p.get('id') for p in positions_cache.get(user_id, [])]
         logger.info(f"[TRADES] Cache AFTER sync: {cache_after} positions, IDs: {cache_ids_after}")
         
+        logger.info(f"[TRADES] Getting positions for user {user_id}")
         try:
             user_positions = get_positions(user_id)
+            logger.info(f"[TRADES] Got {len(user_positions)} positions from get_positions")
         except Exception as e:
             logger.error(f"[TRADES] Error getting positions: {e}", exc_info=True)
             user_positions = []
@@ -4222,6 +4255,7 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         if not user_positions:
             # Показываем статистику даже когда нет позиций
+            logger.info(f"[TRADES] No positions found, showing empty state")
             text = f"""<b>💼 Нет открытых позиций</b>
 
 📊 Статистика:
@@ -4235,6 +4269,7 @@ Winrate: <b>{winrate}%</b>
             keyboard = [
                 [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
             ]
+            logger.info(f"[TRADES] Attempting to send 'no positions' message to user {user_id}")
             try:
                 await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
                 logger.info(f"[TRADES] User {user_id}: показано сообщение 'Нет открытых позиций'")
@@ -4245,9 +4280,11 @@ Winrate: <b>{winrate}%</b>
                 trade_logger.log_error(f"Error sending trades message: {e}", error=e, user_id=user_id)
                 # Fallback - пытаемся отправить новое сообщение
                 try:
+                    logger.info(f"[TRADES] Trying fallback send for user {user_id}")
                     await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+                    logger.info(f"[TRADES] Fallback send successful for user {user_id}")
                 except Exception as e2:
-                    logger.error(f"[TRADES] Fallback also failed: {e2}")
+                    logger.error(f"[TRADES] Fallback also failed: {e2}", exc_info=True)
             return
         
         # Стакаем одинаковые позиции для отображения
@@ -4324,6 +4361,8 @@ Winrate: <b>{winrate}%</b>
         
         keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
+        
+        logger.info(f"[TRADES] Attempting to send trades list to user {user_id} with {len(stacked)} positions")
         try:
             await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
             logger.info(f"[TRADES] User {user_id}: показано {len(stacked)} позиций")
@@ -4334,6 +4373,7 @@ Winrate: <b>{winrate}%</b>
             trade_logger.log_error(f"Error sending trades list: {e}", error=e, user_id=user_id)
             # Fallback - пытаемся отправить новое сообщение
             try:
+                logger.info(f"[TRADES] Trying fallback send for user {user_id}")
                 await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
                 logger.info(f"[TRADES] User {user_id}: отправлено fallback сообщение с {len(stacked)} позициями")
             except Exception as e2:
