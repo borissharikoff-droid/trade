@@ -2299,14 +2299,36 @@ async def edit_or_send(query, text: str, reply_markup, parse_mode: str = "HTML")
         try:
             await message.edit_caption(caption=text, reply_markup=reply_markup, parse_mode=parse_mode)
             return
-        except Exception:
-            pass
+        except BadRequest as e:
+            # Сообщение не изменилось или другая BadRequest ошибка
+            logger.debug(f"[EDIT_OR_SEND] BadRequest on edit_caption: {e}")
+            raise  # Пробрасываем BadRequest дальше
+        except Exception as e:
+            logger.warning(f"[EDIT_OR_SEND] Error editing caption: {e}")
+            # Пробуем удалить и отправить новое
+            try:
+                await message.delete()
+                await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+            except Exception as e2:
+                logger.error(f"[EDIT_OR_SEND] Fallback failed: {e2}")
+                raise
     
     # Обычное текстовое сообщение
     try:
         await message.edit_text(text=text, reply_markup=reply_markup, parse_mode=parse_mode)
-    except Exception:
-        pass
+    except BadRequest as e:
+        # Сообщение не изменилось или другая BadRequest ошибка
+        logger.debug(f"[EDIT_OR_SEND] BadRequest on edit_text: {e}")
+        raise  # Пробрасываем BadRequest дальше
+    except Exception as e:
+        logger.warning(f"[EDIT_OR_SEND] Error editing text: {e}")
+        # Пробуем удалить и отправить новое
+        try:
+            await message.delete()
+            await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception as e2:
+            logger.error(f"[EDIT_OR_SEND] Fallback failed: {e2}")
+            raise
 
 # ==================== ГЛАВНЫЙ ЭКРАН ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4086,19 +4108,31 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     logger.info(f"[TRADES] Cache BEFORE sync: {cache_before} positions, IDs: {cache_ids_before}")
     
     # Синхронизация с Bybit при обновлении
-    synced = await sync_bybit_positions(user_id, context)
-    if synced > 0:
-        logger.info(f"[TRADES] Synced {synced} positions from Bybit")
+    try:
+        synced = await sync_bybit_positions(user_id, context)
+        if synced > 0:
+            logger.info(f"[TRADES] Synced {synced} positions from Bybit")
+    except Exception as e:
+        logger.error(f"[TRADES] Error during sync: {e}", exc_info=True)
+        trade_logger.log_error(f"Error syncing positions in show_trades: {e}", error=e, user_id=user_id)
+        synced = 0
     
     # ОБНОВЛЯЕМ КЭШ после синхронизации - загружаем свежие данные из БД
-    positions_cache.set(user_id, db_get_positions(user_id))
+    try:
+        positions_cache.set(user_id, db_get_positions(user_id))
+    except Exception as e:
+        logger.error(f"[TRADES] Error updating cache: {e}", exc_info=True)
     
     # Логируем состояние кэша ПОСЛЕ синхронизации
     cache_after = len(positions_cache.get(user_id, []))
     cache_ids_after = [p.get('id') for p in positions_cache.get(user_id, [])]
     logger.info(f"[TRADES] Cache AFTER sync: {cache_after} positions, IDs: {cache_ids_after}")
     
-    user_positions = get_positions(user_id)
+    try:
+        user_positions = get_positions(user_id)
+    except Exception as e:
+        logger.error(f"[TRADES] Error getting positions: {e}", exc_info=True)
+        user_positions = []
     
     # Удаляем позиции с amount=0 (полностью закрыты частичными тейками)
     zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
@@ -4144,8 +4178,17 @@ Winrate: <b>{winrate}%</b>
         ]
         try:
             await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
-        except BadRequest:
-            pass  # Сообщение не изменилось
+            logger.info(f"[TRADES] User {user_id}: показано сообщение 'Нет открытых позиций'")
+        except BadRequest as e:
+            logger.debug(f"[TRADES] BadRequest (message unchanged): {e}")
+        except Exception as e:
+            logger.error(f"[TRADES] Error sending 'no positions' message: {e}", exc_info=True)
+            trade_logger.log_error(f"Error sending trades message: {e}", error=e, user_id=user_id)
+            # Fallback - пытаемся отправить новое сообщение
+            try:
+                await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            except Exception as e2:
+                logger.error(f"[TRADES] Fallback also failed: {e2}")
         return
     
     # Стакаем одинаковые позиции для отображения
@@ -4224,8 +4267,18 @@ Winrate: <b>{winrate}%</b>
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
     try:
         await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
-    except BadRequest:
-        pass  # Сообщение не изменилось
+        logger.info(f"[TRADES] User {user_id}: показано {len(stacked)} позиций")
+    except BadRequest as e:
+        logger.debug(f"[TRADES] BadRequest (message unchanged): {e}")
+    except Exception as e:
+        logger.error(f"[TRADES] Error sending trades list: {e}", exc_info=True)
+        trade_logger.log_error(f"Error sending trades list: {e}", error=e, user_id=user_id)
+        # Fallback - пытаемся отправить новое сообщение
+        try:
+            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+            logger.info(f"[TRADES] User {user_id}: отправлено fallback сообщение с {len(stacked)} позициями")
+        except Exception as e2:
+            logger.error(f"[TRADES] Fallback also failed: {e2}", exc_info=True)
 
 # ==================== СИГНАЛЫ ====================
 # Кэш последних сигналов для предотвращения дубликатов
