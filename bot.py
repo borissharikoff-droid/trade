@@ -2450,10 +2450,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ==================== ПОПОЛНЕНИЕ ====================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    user_id = update.effective_user.id
-    logger.info(f"[DEPOSIT] User {user_id}")
-    await query.answer()
+    try:
+        query = update.callback_query
+        if not query:
+            logger.warning("[DEPOSIT] No callback_query in update")
+            return
+        
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            logger.warning("[DEPOSIT] No user_id in update")
+            return
+        
+        logger.info(f"[DEPOSIT] User {user_id}")
+        
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"[DEPOSIT] Error answering callback: {e}")
     
     user = get_user(user_id)
     balance = user['balance']
@@ -3357,10 +3370,21 @@ async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT
 # ==================== ТОРГОВЛЯ ====================
 @rate_limit(max_requests=10, window_seconds=60, action_type="toggle")
 async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = update.effective_user.id
+    try:
+        query = update.callback_query
+        if not query:
+            logger.warning("[TOGGLE] No callback_query in update")
+            return
+        
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"[TOGGLE] Error answering callback: {e}")
+        
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            logger.warning("[TOGGLE] No user_id in update")
+            return
     logger.info(f"[TOGGLE] User {user_id}")
     
     # Принудительно читаем из БД чтобы избежать рассинхрона
@@ -3387,10 +3411,21 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 @rate_limit(max_requests=20, window_seconds=60, action_type="auto_trade")
 async def auto_trade_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Меню настроек авто-трейда"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = update.effective_user.id
+    try:
+        query = update.callback_query
+        if not query:
+            logger.warning("[AUTO_TRADE_MENU] No callback_query in update")
+            return
+        
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"[AUTO_TRADE_MENU] Error answering callback: {e}")
+        
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            logger.warning("[AUTO_TRADE_MENU] No user_id in update")
+            return
     users_cache.pop(user_id, None)  # Обновляем из БД
     user = get_user(user_id)
     balance = user.get('balance', 0)
@@ -4095,75 +4130,88 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 @rate_limit(max_requests=30, window_seconds=60, action_type="show_trades")
 async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    logger.info(f"[TRADES] User {update.effective_user.id}")
-    await query.answer()
-    
-    user_id = update.effective_user.id
-    user = get_user(user_id)
-    
-    # Логируем состояние кэша ДО синхронизации
-    cache_before = len(positions_cache.get(user_id, []))
-    cache_ids_before = [p.get('id') for p in positions_cache.get(user_id, [])]
-    logger.info(f"[TRADES] Cache BEFORE sync: {cache_before} positions, IDs: {cache_ids_before}")
-    
-    # Синхронизация с Bybit при обновлении
     try:
-        synced = await sync_bybit_positions(user_id, context)
-        if synced > 0:
-            logger.info(f"[TRADES] Synced {synced} positions from Bybit")
-    except Exception as e:
-        logger.error(f"[TRADES] Error during sync: {e}", exc_info=True)
-        trade_logger.log_error(f"Error syncing positions in show_trades: {e}", error=e, user_id=user_id)
-        synced = 0
-    
-    # ОБНОВЛЯЕМ КЭШ после синхронизации - загружаем свежие данные из БД
-    try:
-        positions_cache.set(user_id, db_get_positions(user_id))
-    except Exception as e:
-        logger.error(f"[TRADES] Error updating cache: {e}", exc_info=True)
-    
-    # Логируем состояние кэша ПОСЛЕ синхронизации
-    cache_after = len(positions_cache.get(user_id, []))
-    cache_ids_after = [p.get('id') for p in positions_cache.get(user_id, [])]
-    logger.info(f"[TRADES] Cache AFTER sync: {cache_after} positions, IDs: {cache_ids_after}")
-    
-    try:
-        user_positions = get_positions(user_id)
-    except Exception as e:
-        logger.error(f"[TRADES] Error getting positions: {e}", exc_info=True)
-        user_positions = []
-    
-    # Удаляем позиции с amount=0 (полностью закрыты частичными тейками)
-    zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
-    for zero_pos in zero_amount:
-        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
-        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
-        logger.info(f"[TRADES] Auto-removed zero-amount position {zero_pos['id']}")
-    
-    # Фильтруем список
-    user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
-    
-    # Обновляем кэш если были удаления
-    if zero_amount:
-        positions_cache.set(user_id, user_positions)
-    
-    # Логируем количество позиций
-    logger.info(f"[TRADES] User {user_id}: {len(user_positions)} positions from get_positions")
-    
-    # Статистика побед - по ВСЕМ сделкам, не только последним 20
-    stats = db_get_user_stats(user_id)
-    wins = stats['wins']
-    total_trades = stats['total']
-    winrate = stats['winrate']
-    total_profit = stats['total_pnl']  # Используем сумму PnL из истории вместо users.total_profit
-    profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
-    
-    logger.info(f"[TRADES] User {user_id}: stats - wins={wins}, total={total_trades}, winrate={winrate}%")
-    
-    if not user_positions:
-        # Показываем статистику даже когда нет позиций
-        text = f"""<b>💼 Нет открытых позиций</b>
+        query = update.callback_query
+        if not query:
+            logger.warning("[TRADES] No callback_query in update")
+            return
+        
+        user_id = update.effective_user.id if update.effective_user else None
+        if not user_id:
+            logger.warning("[TRADES] No user_id in update")
+            return
+        
+        logger.info(f"[TRADES] User {user_id}")
+        
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"[TRADES] Error answering callback: {e}")
+        
+        user = get_user(user_id)
+        
+        # Логируем состояние кэша ДО синхронизации
+        cache_before = len(positions_cache.get(user_id, []))
+        cache_ids_before = [p.get('id') for p in positions_cache.get(user_id, [])]
+        logger.info(f"[TRADES] Cache BEFORE sync: {cache_before} positions, IDs: {cache_ids_before}")
+        
+        # Синхронизация с Bybit при обновлении
+        try:
+            synced = await sync_bybit_positions(user_id, context)
+            if synced > 0:
+                logger.info(f"[TRADES] Synced {synced} positions from Bybit")
+        except Exception as e:
+            logger.error(f"[TRADES] Error during sync: {e}", exc_info=True)
+            trade_logger.log_error(f"Error syncing positions in show_trades: {e}", error=e, user_id=user_id)
+            synced = 0
+        
+        # ОБНОВЛЯЕМ КЭШ после синхронизации - загружаем свежие данные из БД
+        try:
+            positions_cache.set(user_id, db_get_positions(user_id))
+        except Exception as e:
+            logger.error(f"[TRADES] Error updating cache: {e}", exc_info=True)
+        
+        # Логируем состояние кэша ПОСЛЕ синхронизации
+        cache_after = len(positions_cache.get(user_id, []))
+        cache_ids_after = [p.get('id') for p in positions_cache.get(user_id, [])]
+        logger.info(f"[TRADES] Cache AFTER sync: {cache_after} positions, IDs: {cache_ids_after}")
+        
+        try:
+            user_positions = get_positions(user_id)
+        except Exception as e:
+            logger.error(f"[TRADES] Error getting positions: {e}", exc_info=True)
+            user_positions = []
+        
+        # Удаляем позиции с amount=0 (полностью закрыты частичными тейками)
+        zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
+        for zero_pos in zero_amount:
+            realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+            db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+            logger.info(f"[TRADES] Auto-removed zero-amount position {zero_pos['id']}")
+        
+        # Фильтруем список
+        user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
+        
+        # Обновляем кэш если были удаления
+        if zero_amount:
+            positions_cache.set(user_id, user_positions)
+        
+        # Логируем количество позиций
+        logger.info(f"[TRADES] User {user_id}: {len(user_positions)} positions from get_positions")
+        
+        # Статистика побед - по ВСЕМ сделкам, не только последним 20
+        stats = db_get_user_stats(user_id)
+        wins = stats['wins']
+        total_trades = stats['total']
+        winrate = stats['winrate']
+        total_profit = stats['total_pnl']  # Используем сумму PnL из истории вместо users.total_profit
+        profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
+        
+        logger.info(f"[TRADES] User {user_id}: stats - wins={wins}, total={total_trades}, winrate={winrate}%")
+        
+        if not user_positions:
+            # Показываем статистику даже когда нет позиций
+            text = f"""<b>💼 Нет открытых позиций</b>
 
 📊 Статистика:
 Сделок: <b>{total_trades}</b>
@@ -4172,113 +4220,122 @@ Winrate: <b>{winrate}%</b>
 💵 Профит: {profit_str}
 
 💰 Баланс: ${user['balance']:.2f}"""
+            
+            keyboard = [
+                [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
+            ]
+            try:
+                await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
+                logger.info(f"[TRADES] User {user_id}: показано сообщение 'Нет открытых позиций'")
+            except BadRequest as e:
+                logger.debug(f"[TRADES] BadRequest (message unchanged): {e}")
+            except Exception as e:
+                logger.error(f"[TRADES] Error sending 'no positions' message: {e}", exc_info=True)
+                trade_logger.log_error(f"Error sending trades message: {e}", error=e, user_id=user_id)
+                # Fallback - пытаемся отправить новое сообщение
+                try:
+                    await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+                except Exception as e2:
+                    logger.error(f"[TRADES] Fallback also failed: {e2}")
+            return
         
-        keyboard = [
-            [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
-        ]
+        # Стакаем одинаковые позиции для отображения
+        stacked = stack_positions(user_positions)
+        logger.info(f"[TRADES] User {user_id}: {len(stacked)} stacked positions after grouping")
+        
+        text = "<b>💼 Позиции</b>\n\n"
+        
+        keyboard = []
+        for pos in stacked:
+            pnl = pos.get('pnl', 0)
+            emoji = "🟢" if pnl >= 0 else "🔴"
+            pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+            ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+            dir_text = "LONG" if pos['direction'] == "LONG" else "SHORT"
+            current = pos.get('current', pos['entry'])
+            
+            # Расчёт PnL в процентах
+            if pos['direction'] == "LONG":
+                pnl_percent = (current - pos['entry']) / pos['entry'] * 100 * LEVERAGE
+            else:
+                pnl_percent = (pos['entry'] - current) / pos['entry'] * 100 * LEVERAGE
+            pnl_pct_str = f"+{pnl_percent:.0f}%" if pnl_percent >= 0 else f"{pnl_percent:.0f}%"
+            
+            # Показываем количество стакнутых позиций
+            stack_info = f" x{pos['stacked_count']}" if pos.get('stacked_count', 1) > 1 else ""
+            
+            # Определяем какой TP активен
+            tp1_hit = pos.get('tp1_hit', False)
+            tp2_hit = pos.get('tp2_hit', False)
+            if tp2_hit:
+                tp_status = "TP3"
+                current_tp = pos.get('tp3', pos['tp'])
+            elif tp1_hit:
+                tp_status = "TP2"
+                current_tp = pos.get('tp2', pos['tp'])
+            else:
+                tp_status = "TP1"
+                current_tp = pos.get('tp1', pos['tp'])
+            
+            # Реализованный P&L для этой позиции
+            realized_pnl = pos.get('realized_pnl', 0) or 0
+            realized_pnl_str = f"+${realized_pnl:.2f}" if realized_pnl >= 0 else f"-${abs(realized_pnl):.2f}"
+            
+            pnl_indicator = "+" if pnl >= 0 else "-"
+            text += f"{ticker} | {dir_text} | <b>${pos['amount']:.2f}</b> | x{LEVERAGE}{stack_info} {pnl_indicator}\n"
+            text += f"${current:,.2f} → {tp_status}: ${current_tp:,.2f} | SL: ${pos['sl']:,.2f}\n"
+            text += f"\nPnL: <b>{pnl_str}</b> ({pnl_pct_str})"
+            if realized_pnl != 0:
+                text += f" | Реализованный: {realized_pnl_str}"
+            text += "\n"
+            
+            # Для стакнутых позиций передаём все ID через запятую
+            if pos.get('position_ids'):
+                close_data = f"closestack_{','.join(str(pid) for pid in pos['position_ids'])}"
+            else:
+                close_data = f"close_{pos['id']}"
+            
+            keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=close_data)])
+        
+        # Общий профит - используем сумму PnL из истории
+        total_profit = stats['total_pnl']
+        profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
+        
+        # Баланс и статистика всегда показываются внизу
+        if text.endswith("\n"):
+            text = text[:-1]  # Убираем последний \n от позиции
+        text += f"\n\n💰 Баланс: ${user['balance']:.2f}\n"
+        text += f"📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}"
+        
+        # Кнопка закрыть все (если больше 1 позиции)
+        if len(user_positions) > 0:
+            keyboard.append([InlineKeyboardButton("❌ Закрыть все", callback_data="close_all")])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
         try:
             await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
-            logger.info(f"[TRADES] User {user_id}: показано сообщение 'Нет открытых позиций'")
+            logger.info(f"[TRADES] User {user_id}: показано {len(stacked)} позиций")
         except BadRequest as e:
             logger.debug(f"[TRADES] BadRequest (message unchanged): {e}")
         except Exception as e:
-            logger.error(f"[TRADES] Error sending 'no positions' message: {e}", exc_info=True)
-            trade_logger.log_error(f"Error sending trades message: {e}", error=e, user_id=user_id)
+            logger.error(f"[TRADES] Error sending trades list: {e}", exc_info=True)
+            trade_logger.log_error(f"Error sending trades list: {e}", error=e, user_id=user_id)
             # Fallback - пытаемся отправить новое сообщение
             try:
                 await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
+                logger.info(f"[TRADES] User {user_id}: отправлено fallback сообщение с {len(stacked)} позициями")
             except Exception as e2:
-                logger.error(f"[TRADES] Fallback also failed: {e2}")
-        return
-    
-    # Стакаем одинаковые позиции для отображения
-    stacked = stack_positions(user_positions)
-    logger.info(f"[TRADES] User {user_id}: {len(stacked)} stacked positions after grouping")
-    
-    text = "<b>💼 Позиции</b>\n\n"
-    
-    keyboard = []
-    for pos in stacked:
-        pnl = pos.get('pnl', 0)
-        emoji = "🟢" if pnl >= 0 else "🔴"
-        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
-        ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-        dir_text = "LONG" if pos['direction'] == "LONG" else "SHORT"
-        current = pos.get('current', pos['entry'])
-        
-        # Расчёт PnL в процентах
-        if pos['direction'] == "LONG":
-            pnl_percent = (current - pos['entry']) / pos['entry'] * 100 * LEVERAGE
-        else:
-            pnl_percent = (pos['entry'] - current) / pos['entry'] * 100 * LEVERAGE
-        pnl_pct_str = f"+{pnl_percent:.0f}%" if pnl_percent >= 0 else f"{pnl_percent:.0f}%"
-        
-        # Показываем количество стакнутых позиций
-        stack_info = f" x{pos['stacked_count']}" if pos.get('stacked_count', 1) > 1 else ""
-        
-        # Определяем какой TP активен
-        tp1_hit = pos.get('tp1_hit', False)
-        tp2_hit = pos.get('tp2_hit', False)
-        if tp2_hit:
-            tp_status = "TP3"
-            current_tp = pos.get('tp3', pos['tp'])
-        elif tp1_hit:
-            tp_status = "TP2"
-            current_tp = pos.get('tp2', pos['tp'])
-        else:
-            tp_status = "TP1"
-            current_tp = pos.get('tp1', pos['tp'])
-        
-        # Реализованный P&L для этой позиции
-        realized_pnl = pos.get('realized_pnl', 0) or 0
-        realized_pnl_str = f"+${realized_pnl:.2f}" if realized_pnl >= 0 else f"-${abs(realized_pnl):.2f}"
-        
-        pnl_indicator = "+" if pnl >= 0 else "-"
-        text += f"{ticker} | {dir_text} | <b>${pos['amount']:.2f}</b> | x{LEVERAGE}{stack_info} {pnl_indicator}\n"
-        text += f"${current:,.2f} → {tp_status}: ${current_tp:,.2f} | SL: ${pos['sl']:,.2f}\n"
-        text += f"\nPnL: <b>{pnl_str}</b> ({pnl_pct_str})"
-        if realized_pnl != 0:
-            text += f" | Реализованный: {realized_pnl_str}"
-        text += "\n"
-        
-        # Для стакнутых позиций передаём все ID через запятую
-        if pos.get('position_ids'):
-            close_data = f"closestack_{','.join(str(pid) for pid in pos['position_ids'])}"
-        else:
-            close_data = f"close_{pos['id']}"
-        
-        keyboard.append([InlineKeyboardButton(f"❌ Закрыть {ticker}", callback_data=close_data)])
-    
-    # Общий профит - используем сумму PnL из истории
-    total_profit = stats['total_pnl']
-    profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
-    
-    # Баланс и статистика всегда показываются внизу
-    if text.endswith("\n"):
-        text = text[:-1]  # Убираем последний \n от позиции
-    text += f"\n\n💰 Баланс: ${user['balance']:.2f}\n"
-    text += f"📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}"
-    
-    # Кнопка закрыть все (если больше 1 позиции)
-    if len(user_positions) > 0:
-        keyboard.append([InlineKeyboardButton("❌ Закрыть все", callback_data="close_all")])
-    
-    keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
-    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
-    try:
-        await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
-        logger.info(f"[TRADES] User {user_id}: показано {len(stacked)} позиций")
-    except BadRequest as e:
-        logger.debug(f"[TRADES] BadRequest (message unchanged): {e}")
+                logger.error(f"[TRADES] Fallback also failed: {e2}", exc_info=True)
     except Exception as e:
-        logger.error(f"[TRADES] Error sending trades list: {e}", exc_info=True)
-        trade_logger.log_error(f"Error sending trades list: {e}", error=e, user_id=user_id)
-        # Fallback - пытаемся отправить новое сообщение
+        logger.error(f"[TRADES] Critical error: {e}", exc_info=True)
+        trade_logger.log_error(f"Critical error in show_trades: {e}", error=e, user_id=update.effective_user.id if update.effective_user else None)
+        # Пытаемся ответить пользователю
         try:
-            await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-            logger.info(f"[TRADES] User {user_id}: отправлено fallback сообщение с {len(stacked)} позициями")
-        except Exception as e2:
-            logger.error(f"[TRADES] Fallback also failed: {e2}", exc_info=True)
+            if update.callback_query:
+                await update.callback_query.answer("❌ Ошибка загрузки сделок", show_alert=True)
+        except:
+            pass
 
 # ==================== СИГНАЛЫ ====================
 # Кэш последних сигналов для предотвращения дубликатов
@@ -8279,8 +8336,21 @@ def main() -> None:
     # Обработка текста для своей суммы и адреса вывода
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_amount))
     
-    # Catch-all для неизвестных callbacks
+    # Catch-all для неизвестных callbacks (должен быть последним)
     app.add_handler(CallbackQueryHandler(unknown_callback))
+    
+    # Добавляем общий error handler для callback'ов
+    async def callback_error_wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Wrapper для обработки ошибок в callback'ах"""
+        try:
+            query = update.callback_query
+            if query:
+                try:
+                    await query.answer("❌ Произошла ошибка. Попробуйте позже.")
+                except:
+                    pass
+        except:
+            pass
     
     # Jobs
     if app.job_queue:

@@ -349,34 +349,54 @@ def rate_limit(max_requests: int = 30, window_seconds: int = 60,
     def decorator(func):
         @wraps(func)
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-            user_id = update.effective_user.id
-            
-            # Check rate limit
-            is_blocked, reason = await rate_limiter.check_rate_limit(
-                user_id, max_requests, window_seconds, context
-            )
-            
-            if is_blocked:
-                # Try to answer callback query if exists
-                if update.callback_query:
-                    try:
-                        await update.callback_query.answer(reason, show_alert=True)
-                    except:
-                        pass
+            try:
+                if not update or not update.effective_user:
+                    logger.warning("[RATE_LIMITER] Invalid update or user")
+                    return
                 
-                # Try to send message
+                user_id = update.effective_user.id
+                
+                # Check rate limit
                 try:
-                    if update.message:
-                        await update.message.reply_text(reason)
-                    elif update.callback_query:
-                        await context.bot.send_message(user_id, reason)
-                except:
-                    pass
+                    is_blocked, reason = await rate_limiter.check_rate_limit(
+                        user_id, max_requests, window_seconds, context
+                    )
+                except Exception as e:
+                    logger.error(f"[RATE_LIMITER] Error checking rate limit: {e}", exc_info=True)
+                    # При ошибке проверки лимита - пропускаем проверку и выполняем handler
+                    is_blocked = False
+                    reason = None
                 
-                return
-            
-            # Execute handler
-            return await func(update, context, *args, **kwargs)
+                if is_blocked:
+                    # Try to answer callback query if exists
+                    if update.callback_query:
+                        try:
+                            await update.callback_query.answer(reason, show_alert=True)
+                        except Exception as e:
+                            logger.debug(f"[RATE_LIMITER] Error answering callback: {e}")
+                    
+                    # Try to send message
+                    try:
+                        if update.message:
+                            await update.message.reply_text(reason)
+                        elif update.callback_query and context and context.bot:
+                            await context.bot.send_message(user_id, reason)
+                    except Exception as e:
+                        logger.debug(f"[RATE_LIMITER] Error sending rate limit message: {e}")
+                    
+                    return
+                
+                # Execute handler
+                try:
+                    return await func(update, context, *args, **kwargs)
+                except Exception as e:
+                    logger.error(f"[RATE_LIMITER] Error in handler {func.__name__}: {e}", exc_info=True)
+                    # Пробрасываем ошибку дальше для обработки error_handler
+                    raise
+            except Exception as e:
+                logger.error(f"[RATE_LIMITER] Critical error in wrapper: {e}", exc_info=True)
+                # Пробрасываем ошибку дальше
+                raise
         
         return wrapper
     return decorator
