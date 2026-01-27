@@ -4349,7 +4349,7 @@ Winrate: <b>{winrate}%</b>
             pnl_pct_str = f"+{pnl_percent:.0f}%" if pnl_percent >= 0 else f"{pnl_percent:.0f}%"
             
             # Показываем количество стакнутых позиций
-            stack_info = f" x{pos['stacked_count']}" if pos.get('stacked_count', 1) > 1 else ""
+            stack_info = f" (x{pos['stacked_count']})" if pos.get('stacked_count', 1) > 1 else ""
             
             # Определяем какой TP активен
             tp1_hit = pos.get('tp1_hit', False)
@@ -4368,13 +4368,12 @@ Winrate: <b>{winrate}%</b>
             realized_pnl = pos.get('realized_pnl', 0) or 0
             realized_pnl_str = f"+${realized_pnl:.2f}" if realized_pnl >= 0 else f"-${abs(realized_pnl):.2f}"
             
-            pnl_indicator = "+" if pnl >= 0 else "-"
-            text += f"{ticker} | {dir_text} | <b>${pos['amount']:.2f}</b> | x{LEVERAGE}{stack_info} {pnl_indicator}\n"
+            text += f"{ticker} | {dir_text} | ${pos['amount']:.2f} | x{LEVERAGE}{stack_info}\n"
             text += f"${current:,.2f} → {tp_status}: ${current_tp:,.2f} | SL: ${pos['sl']:,.2f}\n"
             text += f"\nPnL: <b>{pnl_str}</b> ({pnl_pct_str})"
             if realized_pnl != 0:
                 text += f" | Реализованный: {realized_pnl_str}"
-            text += "\n"
+            text += "\n\n"
             
             # Для стакнутых позиций передаём все ID через запятую
             if pos.get('position_ids'):
@@ -4389,8 +4388,8 @@ Winrate: <b>{winrate}%</b>
         profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
         
         # Баланс и статистика всегда показываются внизу
-        if text.endswith("\n"):
-            text = text[:-1]  # Убираем последний \n от позиции
+        # Убираем лишние переносы строк в конце
+        text = text.rstrip("\n")
         text += f"\n\n💰 Баланс: ${user['balance']:.2f}\n"
         text += f"📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}"
         
