@@ -3895,23 +3895,38 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     await edit_or_send(query, f"<b>⏳ Закрываем {ticker}...</b>", None)
     
-    # СНАЧАЛА закрываем на Bybit
-    hedging_enabled = await is_hedging_enabled()
+    # СНАЧАЛА закрываем на Bybit с timeout protection
+    try:
+        hedging_enabled = await asyncio.wait_for(is_hedging_enabled(), timeout=3.0)
+    except (asyncio.TimeoutError, Exception):
+        hedging_enabled = False
+    
     failed_positions = []
     
     if hedging_enabled:
         for pos in positions_to_close:
             bybit_qty = pos.get('bybit_qty', 0)
-            if bybit_qty > 0:
-                hedge_result = await hedge_close(pos['id'], symbol, pos['direction'], bybit_qty)
+            try:
+                if bybit_qty > 0:
+                    hedge_result = await asyncio.wait_for(
+                        hedge_close(pos['id'], symbol, pos['direction'], bybit_qty),
+                        timeout=5.0
+                    )
+                else:
+                    hedge_result = await asyncio.wait_for(
+                        hedge_close(pos['id'], symbol, pos['direction'], None),
+                        timeout=5.0
+                    )
+                
                 if not hedge_result:
-                    logger.error(f"[CLOSE_SYMBOL] ❌ Failed to close {symbol} pos {pos['id']} on Bybit")
+                    logger.warning(f"[CLOSE_SYMBOL] Failed to close {symbol} pos {pos['id']} on Bybit")
                     failed_positions.append(pos)
-            else:
-                hedge_result = await hedge_close(pos['id'], symbol, pos['direction'], None)
-                if not hedge_result:
-                    logger.error(f"[CLOSE_SYMBOL] ❌ Failed to close {symbol} pos {pos['id']} on Bybit")
-                    failed_positions.append(pos)
+            except asyncio.TimeoutError:
+                logger.error(f"[CLOSE_SYMBOL] Timeout closing {symbol} pos {pos['id']}")
+                failed_positions.append(pos)
+            except Exception as e:
+                logger.error(f"[CLOSE_SYMBOL] Error closing {symbol} pos {pos['id']}: {e}")
+                failed_positions.append(pos)
     
     # Убираем позиции которые не удалось закрыть на Bybit
     if failed_positions and hedging_enabled:
@@ -5298,42 +5313,58 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.error(f"[CLOSE] Invalid close price for position {pos_id}")
             close_price = pos.get('entry', 0)
         
-        hedging_enabled = await is_hedging_enabled()
+        try:
+            hedging_enabled = await asyncio.wait_for(is_hedging_enabled(), timeout=3.0)
+        except (asyncio.TimeoutError, Exception):
+            hedging_enabled = False
         
         if hedging_enabled:
             bybit_qty = pos.get('bybit_qty', 0)
             if bybit_qty > 0:
                 try:
-                    hedge_result = await hedge_close(pos_id, pos['symbol'], pos['direction'], bybit_qty)
+                    hedge_result = await asyncio.wait_for(
+                        hedge_close(pos_id, pos['symbol'], pos['direction'], bybit_qty),
+                        timeout=5.0
+                    )
                     if hedge_result:
-                        logger.info(f"[HEDGE] ✓ Position {pos_id} closed on Bybit (qty={bybit_qty})")
-                        
-                        # Верификация: проверяем что позиция реально закрылась
-                        await asyncio.sleep(0.5)
-                        bybit_pos = await hedger.get_position_data(pos['symbol'])
-                        
-                        # Получаем реальную цену закрытия с Bybit
-                        close_side = "Sell" if pos['direction'] == "LONG" else "Buy"
-                        order_info = await hedger.get_last_order_price(pos['symbol'], close_side)
-                        if order_info and order_info.get('price'):
-                            close_price = order_info['price']
-                            logger.info(f"[HEDGE] Real close price: ${close_price:.4f}")
-                        
-                        # Если позиция ещё есть на Bybit - возможно частичное закрытие
-                        if bybit_pos and bybit_pos.get('size', 0) > 0:
-                            remaining = bybit_pos['size']
-                            logger.warning(f"[HEDGE] ⚠️ Position partially closed, remaining: {remaining}")
+                        # Получаем реальную цену закрытия с Bybit (no delay needed)
+                        try:
+                            close_side = "Sell" if pos['direction'] == "LONG" else "Buy"
+                            order_info = await asyncio.wait_for(
+                                hedger.get_last_order_price(pos['symbol'], close_side),
+                                timeout=3.0
+                            )
+                            if order_info and order_info.get('price'):
+                                close_price = order_info['price']
+                        except (asyncio.TimeoutError, Exception):
+                            pass  # Use current price as fallback
                     else:
                         # Bybit не закрыл - НЕ закрываем в боте
-                        logger.error(f"[HEDGE] ❌ Failed to close on Bybit - position kept open")
+                        logger.warning(f"[HEDGE] Failed to close on Bybit - position kept open")
                         await edit_or_send(
                             query,
                             f"<b>❌ Ошибка закрытия</b>\n\n"
                             f"Не удалось закрыть позицию на Bybit.\n"
                             f"Позиция сохранена. Попробуйте ещё раз.",
-                            InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                            InlineKeyboardMarkup([
+                                [InlineKeyboardButton("🔄 Повторить", callback_data=f"close_{pos_id}")],
+                                [InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                            ])
                         )
                         return
+                except asyncio.TimeoutError:
+                    logger.error(f"[HEDGE] Timeout closing position {pos_id} on Bybit")
+                    await edit_or_send(
+                        query,
+                        f"<b>⏱️ Таймаут</b>\n\n"
+                        f"Закрытие заняло слишком много времени.\n"
+                        f"Попробуйте ещё раз.",
+                        InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 Повторить", callback_data=f"close_{pos_id}")],
+                            [InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                        ])
+                    )
+                    return
                 except Exception as e:
                     logger.error(f"[HEDGE] Error closing position {pos_id} on Bybit: {e}")
                     await edit_or_send(
@@ -5471,7 +5502,11 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     # === ГРУППИРУЕМ ПО СИМВОЛУ ДЛЯ BYBIT ===
     close_prices = {}  # symbol -> close_price
     failed_closes = []  # Позиции которые не удалось закрыть на Bybit
-    hedging_enabled = await is_hedging_enabled()
+    
+    try:
+        hedging_enabled = await asyncio.wait_for(is_hedging_enabled(), timeout=3.0)
+    except (asyncio.TimeoutError, Exception):
+        hedging_enabled = False
     
     if hedging_enabled:
         by_symbol = {}
@@ -5485,20 +5520,31 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         for (symbol, direction), positions in by_symbol.items():
             total_qty = sum(p.get('bybit_qty', 0) for p in positions)
             if total_qty > 0:
-                hedge_result = await hedge_close(positions[0]['id'], symbol, direction, total_qty)
-                if hedge_result:
-                    logger.info(f"[CLOSE_STACKED] Bybit closed {symbol} {direction} qty={total_qty}")
-                    
-                    # Получаем реальную цену закрытия
-                    await asyncio.sleep(0.3)
-                    close_side = "Sell" if direction == "LONG" else "Buy"
-                    order_info = await hedger.get_last_order_price(symbol, close_side)
-                    if order_info and order_info.get('price'):
-                        close_prices[(symbol, direction)] = order_info['price']
-                        logger.info(f"[CLOSE_STACKED] Real close price {symbol}: ${order_info['price']:.4f}")
-                else:
-                    # Не удалось закрыть на Bybit - помечаем эти позиции
-                    logger.error(f"[CLOSE_STACKED] ❌ Failed to close {symbol} {direction} on Bybit")
+                try:
+                    hedge_result = await asyncio.wait_for(
+                        hedge_close(positions[0]['id'], symbol, direction, total_qty),
+                        timeout=5.0
+                    )
+                    if hedge_result:
+                        # Получаем реальную цену закрытия (no delay needed)
+                        try:
+                            close_side = "Sell" if direction == "LONG" else "Buy"
+                            order_info = await asyncio.wait_for(
+                                hedger.get_last_order_price(symbol, close_side),
+                                timeout=3.0
+                            )
+                            if order_info and order_info.get('price'):
+                                close_prices[(symbol, direction)] = order_info['price']
+                        except (asyncio.TimeoutError, Exception):
+                            pass  # Use current price as fallback
+                    else:
+                        logger.warning(f"[CLOSE_STACKED] Failed to close {symbol} {direction} on Bybit")
+                        failed_closes.extend(positions)
+                except asyncio.TimeoutError:
+                    logger.error(f"[CLOSE_STACKED] Timeout closing {symbol} {direction}")
+                    failed_closes.extend(positions)
+                except Exception as e:
+                    logger.error(f"[CLOSE_STACKED] Error closing {symbol} {direction}: {e}")
                     failed_closes.extend(positions)
     
     # Убираем позиции которые не удалось закрыть на Bybit
