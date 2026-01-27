@@ -3678,8 +3678,9 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                 
                 # Явно удаляем из кэша по ID
                 pos_id_to_remove = pos['id']
-                if user_id in positions_cache:
-                    positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+                current_positions = positions_cache.get(user_id, [])
+                if current_positions:
+                    positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
                 
                 synced += 1
                 logger.info(f"[SYNC] Orphan {pos_id_to_remove} removed from cache, remaining: {len(positions_cache.get(user_id, []))}")
@@ -3759,8 +3760,9 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                 
                 # Явно удаляем из кэша по ID (надёжнее чем remove)
                 pos_id_to_remove = pos['id']
-                if user_id in positions_cache:
-                    positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+                current_positions = positions_cache.get(user_id, [])
+                if current_positions:
+                    positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
 
                 synced += 1
                 logger.info(f"[SYNC] Position {pos_id_to_remove} synced: {pos['symbol']} PnL=${real_pnl:.2f}, cache remaining: {len(positions_cache.get(user_id, []))}")
@@ -3971,8 +3973,9 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         db_close_position(pos['id'], close_price, pnl, 'MANUAL_CLOSE')
         # Явно удаляем из кэша по ID
         pos_id_to_remove = pos['id']
-        if user_id in positions_cache:
-            positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+        current_positions = positions_cache.get(user_id, [])
+        if current_positions:
+            positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
     
     # Обновляем баланс ОДИН РАЗ после всех закрытий (с локом для защиты от race conditions)
     async with get_user_lock(user_id):
@@ -4117,8 +4120,9 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         db_close_position(pos['id'], close_price, pnl, 'CLOSE_ALL')
         # Явно удаляем из кэша по ID
         pos_id_to_remove = pos['id']
-        if user_id in positions_cache:
-            positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+        current_positions = positions_cache.get(user_id, [])
+        if current_positions:
+            positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
     
     # Обновляем баланс (с локом для защиты от race conditions)
     async with get_user_lock(user_id):
@@ -4190,43 +4194,35 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         user = get_user(user_id)
         
-        # Логируем состояние кэша ДО синхронизации
-        cache_before = len(positions_cache.get(user_id, []))
-        cache_ids_before = [p.get('id') for p in positions_cache.get(user_id, [])]
-        logger.info(f"[TRADES] Cache BEFORE sync: {cache_before} positions, IDs: {cache_ids_before}")
-        
-        # Синхронизация с Bybit при обновлении (с таймаутом 10 секунд)
-        synced = 0
-        try:
-            synced = await asyncio.wait_for(sync_bybit_positions(user_id, context), timeout=10.0)
-            if synced > 0:
-                logger.info(f"[TRADES] Synced {synced} positions from Bybit")
-        except asyncio.TimeoutError:
-            logger.warning(f"[TRADES] Sync timeout after 10s - continuing without sync")
-            trade_logger.log_error(f"Sync timeout in show_trades", error=None, user_id=user_id)
-        except Exception as e:
-            logger.error(f"[TRADES] Error during sync: {e}", exc_info=True)
-            trade_logger.log_error(f"Error syncing positions in show_trades: {e}", error=e, user_id=user_id)
-        
-        # ОБНОВЛЯЕМ КЭШ после синхронизации - загружаем свежие данные из БД
-        try:
-            positions_cache.set(user_id, db_get_positions(user_id))
-            logger.info(f"[TRADES] Cache updated after sync")
-        except Exception as e:
-            logger.error(f"[TRADES] Error updating cache: {e}", exc_info=True)
-        
-        # Логируем состояние кэша ПОСЛЕ синхронизации
-        cache_after = len(positions_cache.get(user_id, []))
-        cache_ids_after = [p.get('id') for p in positions_cache.get(user_id, [])]
-        logger.info(f"[TRADES] Cache AFTER sync: {cache_after} positions, IDs: {cache_ids_after}")
-        
+        # Загружаем позиции из кэша сразу (быстрый ответ пользователю)
         logger.info(f"[TRADES] Getting positions for user {user_id}")
         try:
             user_positions = get_positions(user_id)
-            logger.info(f"[TRADES] Got {len(user_positions)} positions from get_positions")
+            logger.info(f"[TRADES] Got {len(user_positions)} positions from cache")
         except Exception as e:
             logger.error(f"[TRADES] Error getting positions: {e}", exc_info=True)
             user_positions = []
+        
+        # Запускаем синхронизацию в фоне (не блокируем ответ пользователю)
+        async def background_sync():
+            """Синхронизация в фоне - не блокирует ответ пользователю"""
+            try:
+                logger.info(f"[TRADES] Starting background sync for user {user_id}")
+                synced = await asyncio.wait_for(sync_bybit_positions(user_id, context), timeout=3.0)
+                if synced > 0:
+                    logger.info(f"[TRADES] Background sync completed: {synced} positions synced")
+                    # Обновляем кэш после синхронизации
+                    try:
+                        positions_cache.set(user_id, db_get_positions(user_id))
+                    except Exception as e:
+                        logger.error(f"[TRADES] Error updating cache after sync: {e}")
+            except asyncio.TimeoutError:
+                logger.debug(f"[TRADES] Background sync timeout after 3s (non-critical)")
+            except Exception as e:
+                logger.warning(f"[TRADES] Background sync error (non-critical): {e}")
+        
+        # Запускаем синхронизацию в фоне (не ждём её завершения)
+        asyncio.create_task(background_sync())
         
         # Удаляем позиции с amount=0 (полностью закрыты частичными тейками)
         zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
@@ -5523,8 +5519,9 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         db_close_position(pos['id'], close_price, pnl, 'MANUAL')
         # Явно удаляем из кэша по ID
         pos_id_to_remove = pos['id']
-        if user_id in positions_cache:
-            positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+        current_positions = positions_cache.get(user_id, [])
+        if current_positions:
+            positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
     
     # Обновляем баланс (с локом для защиты от race conditions)
     async with get_user_lock(user_id):
@@ -6745,8 +6742,9 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 db_close_position(pos['id'], exit_price, real_pnl, reason)
                 # Явно удаляем из кэша по ID
                 pos_id_to_remove = pos['id']
-                if user_id in positions_cache:
-                    positions_cache[user_id] = [p for p in positions_cache[user_id] if p.get('id') != pos_id_to_remove]
+                current_positions = positions_cache.get(user_id, [])
+                if current_positions:
+                    positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
                 
                 pnl_abs = abs(real_pnl)
                 
@@ -8014,8 +8012,7 @@ async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Закрыть позиции пользователя
         run_sql("DELETE FROM positions WHERE user_id = ?", (target_id,))
-        if target_id in positions_cache:
-            positions_cache[target_id] = []
+        positions_cache.set(target_id, [])
         
         # Установить баланс
         db_update_user(target_id, balance=balance)
