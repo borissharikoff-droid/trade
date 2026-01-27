@@ -2467,25 +2467,28 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await query.answer()
         except Exception as e:
             logger.warning(f"[DEPOSIT] Error answering callback: {e}")
-    
-    user = get_user(user_id)
-    balance = user['balance']
-    
-    text = f"""Минимум: ${MIN_DEPOSIT}
+        
+        user = get_user(user_id)
+        balance = user['balance']
+        
+        text = f"""Минимум: ${MIN_DEPOSIT}
 
 💰 Баланс: <b>${balance:.2f}</b>"""
-    
-    keyboard = [
-        [InlineKeyboardButton("⭐ Telegram Stars", callback_data="pay_stars")],
-        [InlineKeyboardButton("💎 Crypto (USDT/TON)", callback_data="pay_crypto")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back")]
-    ]
-    
-    await send_menu_photo(
-        context.bot, user_id, "deposit",
-        text, InlineKeyboardMarkup(keyboard),
-        message_to_edit=query.message
-    )
+        
+        keyboard = [
+            [InlineKeyboardButton("⭐ Telegram Stars", callback_data="pay_stars")],
+            [InlineKeyboardButton("💎 Crypto (USDT/TON)", callback_data="pay_crypto")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="back")]
+        ]
+        
+        await send_menu_photo(
+            context.bot, user_id, "deposit",
+            text, InlineKeyboardMarkup(keyboard),
+            message_to_edit=query.message
+        )
+    except Exception as e:
+        logger.error(f"[DEPOSIT] Error in deposit_menu: {e}")
+        trade_logger.log_error(f"Error in deposit_menu: {e}", error=e, user_id=user_id if 'user_id' in locals() else None)
 
 async def pay_stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -3385,27 +3388,31 @@ async def toggle_trading(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not user_id:
             logger.warning("[TOGGLE] No user_id in update")
             return
-    logger.info(f"[TOGGLE] User {user_id}")
-    
-    # Принудительно читаем из БД чтобы избежать рассинхрона
-    users_cache.pop(user_id, None)
-    user = get_user(user_id)
-    
-    new_state = not user['trading']
-    
-    # Разрешаем включать/выключать торговлю без проверки баланса
-    # (для тестирования на реальных деньгах с балансом $0)
-    # Обновляем состояние
-    user['trading'] = new_state
-    
-    # Сохраняем напрямую в БД
-    db_update_user(user_id, trading=new_state)
-    logger.info(f"[TOGGLE] User {user_id} trading = {new_state} (balance: ${user['balance']:.2f})")
-    
-    # Очищаем кэш чтобы start() получил свежие данные из БД
-    users_cache.pop(user_id, None)
-    
-    await start(update, context)
+        
+        logger.info(f"[TOGGLE] User {user_id}")
+        
+        # Принудительно читаем из БД чтобы избежать рассинхрона
+        users_cache.pop(user_id, None)
+        user = get_user(user_id)
+        
+        new_state = not user['trading']
+        
+        # Разрешаем включать/выключать торговлю без проверки баланса
+        # (для тестирования на реальных деньгах с балансом $0)
+        # Обновляем состояние
+        user['trading'] = new_state
+        
+        # Сохраняем напрямую в БД
+        db_update_user(user_id, trading=new_state)
+        logger.info(f"[TOGGLE] User {user_id} trading = {new_state} (balance: ${user['balance']:.2f})")
+        
+        # Очищаем кэш чтобы start() получил свежие данные из БД
+        users_cache.pop(user_id, None)
+        
+        await start(update, context)
+    except Exception as e:
+        logger.error(f"[TOGGLE] Error in toggle_trading: {e}")
+        trade_logger.log_error(f"Error in toggle_trading: {e}", error=e, user_id=user_id if 'user_id' in locals() else None)
 
 # ==================== АВТО-ТРЕЙД НАСТРОЙКИ ====================
 @rate_limit(max_requests=20, window_seconds=60, action_type="auto_trade")
