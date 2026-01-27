@@ -5,9 +5,10 @@ Minimalist web interface for monitoring trading statistics
 
 import os
 import logging
-from datetime import datetime
-from flask import Flask, jsonify, render_template
+from datetime import datetime, timedelta
+from flask import Flask, jsonify, render_template, request
 from threading import Thread
+from collections import deque
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +20,37 @@ app.config['JSON_SORT_KEYS'] = False
 _run_sql = None
 _use_postgres = False
 
+# In-memory log buffer (last 500 logs)
+_log_buffer = deque(maxlen=500)
+
+
+class DashboardLogHandler(logging.Handler):
+    """Custom log handler to capture logs for dashboard"""
+    def emit(self, record):
+        try:
+            log_entry = {
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'level': record.levelname,
+                'message': self.format(record)
+            }
+            _log_buffer.append(log_entry)
+        except Exception:
+            pass
+
 
 def init_dashboard(run_sql_func, use_postgres: bool = False):
     """Initialize dashboard with database function from bot.py"""
     global _run_sql, _use_postgres
     _run_sql = run_sql_func
     _use_postgres = use_postgres
+    
+    # Add log handler to capture bot logs
+    root_logger = logging.getLogger()
+    handler = DashboardLogHandler()
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    handler.setLevel(logging.INFO)
+    root_logger.addHandler(handler)
+    
     logger.info("[DASHBOARD] Initialized with database connection")
 
 
@@ -146,6 +172,137 @@ def get_recent_trades(limit: int = 20) -> list:
         return []
 
 
+def get_extended_stats() -> dict:
+    """Get extended statistics for dashboard"""
+    if not _run_sql:
+        return {}
+    
+    try:
+        # Best and worst trades
+        best_trade = _run_sql("""
+            SELECT symbol, direction, pnl, reason, closed_at
+            FROM history WHERE pnl IS NOT NULL
+            ORDER BY pnl DESC LIMIT 1
+        """, fetch="one")
+        
+        worst_trade = _run_sql("""
+            SELECT symbol, direction, pnl, reason, closed_at
+            FROM history WHERE pnl IS NOT NULL
+            ORDER BY pnl ASC LIMIT 1
+        """, fetch="one")
+        
+        # Average PnL
+        avg_stats = _run_sql("""
+            SELECT 
+                AVG(pnl) as avg_pnl,
+                AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
+                AVG(CASE WHEN pnl <= 0 THEN pnl END) as avg_loss,
+                SUM(amount) as total_volume
+            FROM history
+        """, fetch="one")
+        
+        # Today's stats
+        today_stats = _run_sql("""
+            SELECT 
+                COUNT(*) as today_trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as today_wins,
+                SUM(pnl) as today_pnl
+            FROM history
+            WHERE DATE(closed_at) = DATE('now')
+        """, fetch="one")
+        
+        # Streak calculation
+        streak_rows = _run_sql("""
+            SELECT pnl FROM history 
+            ORDER BY closed_at DESC LIMIT 20
+        """, fetch="all")
+        
+        current_streak = 0
+        streak_type = None
+        if streak_rows:
+            first_pnl = float(streak_rows[0].get('pnl', 0) or 0)
+            streak_type = 'win' if first_pnl > 0 else 'loss'
+            for row in streak_rows:
+                pnl = float(row.get('pnl', 0) or 0)
+                if (streak_type == 'win' and pnl > 0) or (streak_type == 'loss' and pnl <= 0):
+                    current_streak += 1
+                else:
+                    break
+        
+        # Users stats
+        users_stats = _run_sql("""
+            SELECT 
+                COUNT(DISTINCT user_id) as total_users,
+                SUM(balance) as total_balance
+            FROM users
+        """, fetch="one")
+        
+        # Positions by symbol
+        positions_by_symbol = _run_sql("""
+            SELECT symbol, COUNT(*) as count, SUM(amount) as total_amount
+            FROM positions
+            GROUP BY symbol
+            ORDER BY count DESC
+            LIMIT 5
+        """, fetch="all")
+        
+        return {
+            'best_trade': {
+                'symbol': best_trade.get('symbol', '-') if best_trade else '-',
+                'pnl': float(best_trade.get('pnl', 0) or 0) if best_trade else 0,
+                'direction': best_trade.get('direction', '-') if best_trade else '-'
+            } if best_trade else None,
+            'worst_trade': {
+                'symbol': worst_trade.get('symbol', '-') if worst_trade else '-',
+                'pnl': float(worst_trade.get('pnl', 0) or 0) if worst_trade else 0,
+                'direction': worst_trade.get('direction', '-') if worst_trade else '-'
+            } if worst_trade else None,
+            'avg_pnl': round(float(avg_stats.get('avg_pnl', 0) or 0), 2) if avg_stats else 0,
+            'avg_win': round(float(avg_stats.get('avg_win', 0) or 0), 2) if avg_stats else 0,
+            'avg_loss': round(float(avg_stats.get('avg_loss', 0) or 0), 2) if avg_stats else 0,
+            'total_volume': round(float(avg_stats.get('total_volume', 0) or 0), 2) if avg_stats else 0,
+            'today_trades': int(today_stats.get('today_trades', 0) or 0) if today_stats else 0,
+            'today_wins': int(today_stats.get('today_wins', 0) or 0) if today_stats else 0,
+            'today_pnl': round(float(today_stats.get('today_pnl', 0) or 0), 2) if today_stats else 0,
+            'current_streak': current_streak,
+            'streak_type': streak_type,
+            'total_users': int(users_stats.get('total_users', 0) or 0) if users_stats else 0,
+            'total_balance': round(float(users_stats.get('total_balance', 0) or 0), 2) if users_stats else 0,
+            'positions_by_symbol': positions_by_symbol or []
+        }
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting extended stats: {e}")
+        return {}
+
+
+def get_logs(limit: int = 100, level: str = None) -> list:
+    """Get recent logs from buffer"""
+    logs = list(_log_buffer)
+    logs.reverse()  # Newest first
+    
+    if level:
+        logs = [l for l in logs if l['level'] == level.upper()]
+    
+    return logs[:limit]
+
+
+def get_db_logs(limit: int = 50) -> list:
+    """Get logs from trading_logs table"""
+    if not _run_sql:
+        return []
+    try:
+        logs = _run_sql("""
+            SELECT timestamp, category, level, message, symbol, direction
+            FROM trading_logs
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (limit,), fetch="all")
+        return logs or []
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting DB logs: {e}")
+        return []
+
+
 # API Routes
 @app.route('/api/stats')
 def api_stats():
@@ -184,6 +341,35 @@ def api_trades():
     return jsonify({
         'count': len(trades),
         'trades': trades,
+        'timestamp': datetime.now().isoformat()
+    })
+
+
+@app.route('/api/extended')
+def api_extended():
+    """Extended statistics endpoint"""
+    stats = get_extended_stats()
+    return jsonify({
+        **stats,
+        'timestamp': datetime.now().isoformat()
+    })
+
+
+@app.route('/api/logs')
+def api_logs():
+    """Logs endpoint"""
+    limit = request.args.get('limit', 100, type=int)
+    level = request.args.get('level', None)
+    
+    # Get in-memory logs
+    memory_logs = get_logs(limit, level)
+    
+    # Get DB logs
+    db_logs = get_db_logs(limit)
+    
+    return jsonify({
+        'memory_logs': memory_logs,
+        'db_logs': db_logs,
         'timestamp': datetime.now().isoformat()
     })
 

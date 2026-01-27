@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Trading Bot Dashboard</title>
+    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -20,7 +21,7 @@
         }
         
         .container {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
         }
         
@@ -28,15 +29,52 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 30px;
+            margin-bottom: 24px;
             padding-bottom: 15px;
             border-bottom: 1px solid #21262d;
+            flex-wrap: wrap;
+            gap: 12px;
         }
         
         h1 {
             font-size: 1.5rem;
             font-weight: 600;
             color: #f0f6fc;
+        }
+        
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            background: #21262d;
+            color: #c9d1d9;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn:hover {
+            background: #30363d;
+            border-color: #8b949e;
+        }
+        
+        .btn-primary {
+            background: #238636;
+            border-color: #238636;
+            color: #fff;
+        }
+        
+        .btn-primary:hover {
+            background: #2ea043;
         }
         
         .status {
@@ -61,105 +99,114 @@
         
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 16px;
-            margin-bottom: 30px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 24px;
         }
         
         .card {
             background: #161b22;
             border: 1px solid #21262d;
             border-radius: 6px;
-            padding: 20px;
+            padding: 16px;
         }
         
         .card-label {
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             text-transform: uppercase;
             letter-spacing: 0.05em;
             color: #8b949e;
-            margin-bottom: 8px;
+            margin-bottom: 6px;
         }
         
         .card-value {
-            font-size: 2rem;
+            font-size: 1.5rem;
             font-weight: 600;
             color: #f0f6fc;
         }
         
-        .card-value.positive {
-            color: #238636;
-        }
+        .card-value.positive { color: #238636; }
+        .card-value.negative { color: #da3633; }
+        .card-value.neutral { color: #58a6ff; }
+        .card-value.small { font-size: 1.1rem; }
         
-        .card-value.negative {
-            color: #da3633;
-        }
-        
-        .card-value.neutral {
-            color: #58a6ff;
+        .card-sub {
+            font-size: 0.75rem;
+            color: #8b949e;
+            margin-top: 4px;
         }
         
         .section {
-            margin-bottom: 30px;
+            margin-bottom: 24px;
+        }
+        
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
         }
         
         .section-title {
             font-size: 1rem;
             font-weight: 600;
-            margin-bottom: 15px;
             color: #f0f6fc;
+        }
+        
+        .tabs {
+            display: flex;
+            gap: 4px;
+        }
+        
+        .tab {
+            padding: 6px 12px;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            background: transparent;
+            color: #8b949e;
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+        
+        .tab.active {
+            background: #21262d;
+            color: #f0f6fc;
+            border-color: #8b949e;
         }
         
         .reasons-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
-            gap: 16px;
+            gap: 12px;
         }
         
         .reasons-list {
             background: #161b22;
             border: 1px solid #21262d;
             border-radius: 6px;
-            padding: 16px;
+            padding: 14px;
         }
         
         .reasons-list h3 {
-            font-size: 0.875rem;
+            font-size: 0.8rem;
             font-weight: 600;
-            margin-bottom: 12px;
-            display: flex;
-            align-items: center;
-            gap: 6px;
+            margin-bottom: 10px;
         }
         
-        .reasons-list h3.wins {
-            color: #238636;
-        }
-        
-        .reasons-list h3.losses {
-            color: #da3633;
-        }
+        .reasons-list h3.wins { color: #238636; }
+        .reasons-list h3.losses { color: #da3633; }
         
         .reason-item {
             display: flex;
             justify-content: space-between;
-            padding: 8px 0;
+            padding: 6px 0;
             border-bottom: 1px solid #21262d;
-            font-size: 0.875rem;
+            font-size: 0.8rem;
         }
         
-        .reason-item:last-child {
-            border-bottom: none;
-        }
-        
-        .reason-name {
-            color: #c9d1d9;
-        }
-        
-        .reason-count {
-            color: #8b949e;
-            font-weight: 500;
-        }
+        .reason-item:last-child { border-bottom: none; }
+        .reason-name { color: #c9d1d9; }
+        .reason-count { color: #8b949e; font-weight: 500; }
         
         .trades-table {
             width: 100%;
@@ -168,14 +215,14 @@
             border: 1px solid #21262d;
             border-radius: 6px;
             overflow: hidden;
+            font-size: 0.8rem;
         }
         
         .trades-table th,
         .trades-table td {
-            padding: 12px;
+            padding: 10px 12px;
             text-align: left;
             border-bottom: 1px solid #21262d;
-            font-size: 0.875rem;
         }
         
         .trades-table th {
@@ -183,39 +230,25 @@
             color: #8b949e;
             font-weight: 500;
             text-transform: uppercase;
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             letter-spacing: 0.05em;
         }
         
-        .trades-table tr:last-child td {
-            border-bottom: none;
-        }
+        .trades-table tr:last-child td { border-bottom: none; }
         
         .badge {
             display: inline-block;
             padding: 2px 8px;
             border-radius: 12px;
-            font-size: 0.75rem;
+            font-size: 0.7rem;
             font-weight: 500;
         }
         
-        .badge-long {
-            background: rgba(35, 134, 54, 0.2);
-            color: #238636;
-        }
+        .badge-long { background: rgba(35, 134, 54, 0.2); color: #238636; }
+        .badge-short { background: rgba(218, 54, 51, 0.2); color: #da3633; }
         
-        .badge-short {
-            background: rgba(218, 54, 51, 0.2);
-            color: #da3633;
-        }
-        
-        .pnl-positive {
-            color: #238636;
-        }
-        
-        .pnl-negative {
-            color: #da3633;
-        }
+        .pnl-positive { color: #238636; }
+        .pnl-negative { color: #da3633; }
         
         .no-data {
             color: #8b949e;
@@ -229,19 +262,116 @@
             color: #8b949e;
         }
         
+        /* Logs section */
+        .logs-container {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .log-entry {
+            padding: 8px 12px;
+            border-bottom: 1px solid #21262d;
+            font-family: monospace;
+            font-size: 0.75rem;
+            display: flex;
+            gap: 12px;
+        }
+        
+        .log-entry:last-child { border-bottom: none; }
+        
+        .log-time { color: #8b949e; min-width: 140px; }
+        .log-level { min-width: 60px; font-weight: 600; }
+        .log-level.INFO { color: #58a6ff; }
+        .log-level.WARNING { color: #d29922; }
+        .log-level.ERROR { color: #da3633; }
+        .log-message { color: #c9d1d9; word-break: break-all; }
+        
+        /* Share card (hidden, for screenshot) */
+        #shareCard {
+            position: fixed;
+            left: -9999px;
+            top: 0;
+            width: 500px;
+            padding: 24px;
+            background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
+            border-radius: 12px;
+        }
+        
+        .share-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #21262d;
+        }
+        
+        .share-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: #f0f6fc;
+        }
+        
+        .share-date {
+            font-size: 0.8rem;
+            color: #8b949e;
+        }
+        
+        .share-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        
+        .share-stat {
+            background: rgba(255,255,255,0.03);
+            padding: 14px;
+            border-radius: 8px;
+            border: 1px solid #21262d;
+        }
+        
+        .share-stat-label {
+            font-size: 0.7rem;
+            color: #8b949e;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        
+        .share-stat-value {
+            font-size: 1.4rem;
+            font-weight: 700;
+        }
+        
+        .share-footer {
+            margin-top: 16px;
+            padding-top: 12px;
+            border-top: 1px solid #21262d;
+            font-size: 0.7rem;
+            color: #8b949e;
+            text-align: center;
+        }
+        
+        /* Streak badge */
+        .streak-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+        
+        .streak-win { background: rgba(35, 134, 54, 0.2); color: #238636; }
+        .streak-loss { background: rgba(218, 54, 51, 0.2); color: #da3633; }
+        
         @media (max-width: 768px) {
-            .reasons-grid {
-                grid-template-columns: 1fr;
-            }
-            
-            .trades-table {
-                font-size: 0.75rem;
-            }
-            
-            .trades-table th,
-            .trades-table td {
-                padding: 8px;
-            }
+            .reasons-grid { grid-template-columns: 1fr; }
+            .grid { grid-template-columns: repeat(2, 1fr); }
+            .header-actions { width: 100%; justify-content: flex-end; }
         }
     </style>
 </head>
@@ -249,14 +379,30 @@
     <div class="container">
         <header>
             <h1>Trading Bot</h1>
-            <div class="status">
-                <span class="status-dot"></span>
-                <span>Live</span>
-                <span class="updated" id="lastUpdate">-</span>
+            <div class="header-actions">
+                <div class="status">
+                    <span class="status-dot"></span>
+                    <span>Live</span>
+                    <span class="updated" id="lastUpdate">-</span>
+                </div>
+                <button class="btn" onclick="refreshAll()">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+                        <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+                    </svg>
+                    Refresh
+                </button>
+                <button class="btn btn-primary" onclick="shareStats()">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M13.5 1a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM11 2.5a2.5 2.5 0 1 1 .603 1.628l-6.718 3.12a2.499 2.499 0 0 1 0 1.504l6.718 3.12a2.5 2.5 0 1 1-.488.876l-6.718-3.12a2.5 2.5 0 1 1 0-3.256l6.718-3.12A2.5 2.5 0 0 1 11 2.5zm-8.5 4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm11 5.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
+                    </svg>
+                    Share
+                </button>
             </div>
         </header>
         
-        <div class="grid">
+        <!-- Main Stats Grid -->
+        <div class="grid" id="statsCard">
             <div class="card">
                 <div class="card-label">Open Deals</div>
                 <div class="card-value neutral" id="openDeals">-</div>
@@ -281,26 +427,54 @@
                 <div class="card-label">Total Closed</div>
                 <div class="card-value" id="totalClosed">-</div>
             </div>
+            <div class="card">
+                <div class="card-label">Today's PnL</div>
+                <div class="card-value" id="todayPnl">-</div>
+                <div class="card-sub" id="todayTrades">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Avg Win / Loss</div>
+                <div class="card-value small">
+                    <span class="positive" id="avgWin">-</span> / 
+                    <span class="negative" id="avgLoss">-</span>
+                </div>
+            </div>
+            <div class="card">
+                <div class="card-label">Best Trade</div>
+                <div class="card-value small positive" id="bestTrade">-</div>
+                <div class="card-sub" id="bestTradeInfo">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Worst Trade</div>
+                <div class="card-value small negative" id="worstTrade">-</div>
+                <div class="card-sub" id="worstTradeInfo">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Current Streak</div>
+                <div class="card-value" id="streak">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Total Volume</div>
+                <div class="card-value small" id="totalVolume">-</div>
+            </div>
         </div>
         
+        <!-- Reasons Section -->
         <div class="section">
             <h2 class="section-title">Reasons Analysis</h2>
             <div class="reasons-grid">
                 <div class="reasons-list">
                     <h3 class="wins">Winning Reasons</h3>
-                    <div id="winReasons">
-                        <div class="no-data">No data</div>
-                    </div>
+                    <div id="winReasons"><div class="no-data">No data</div></div>
                 </div>
                 <div class="reasons-list">
                     <h3 class="losses">Losing Reasons</h3>
-                    <div id="lossReasons">
-                        <div class="no-data">No data</div>
-                    </div>
+                    <div id="lossReasons"><div class="no-data">No data</div></div>
                 </div>
             </div>
         </div>
         
+        <!-- Recent Trades Section -->
         <div class="section">
             <h2 class="section-title">Recent Trades</h2>
             <table class="trades-table">
@@ -314,17 +488,71 @@
                     </tr>
                 </thead>
                 <tbody id="tradesBody">
-                    <tr>
-                        <td colspan="5" class="no-data">Loading...</td>
-                    </tr>
+                    <tr><td colspan="5" class="no-data">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
+        
+        <!-- Logs Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">Bot Logs</h2>
+                <div class="tabs">
+                    <button class="tab active" onclick="filterLogs('all')">All</button>
+                    <button class="tab" onclick="filterLogs('INFO')">Info</button>
+                    <button class="tab" onclick="filterLogs('WARNING')">Warning</button>
+                    <button class="tab" onclick="filterLogs('ERROR')">Error</button>
+                </div>
+            </div>
+            <div class="logs-container" id="logsContainer">
+                <div class="no-data">Loading logs...</div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Hidden Share Card -->
+    <div id="shareCard">
+        <div class="share-header">
+            <span class="share-title">Trading Bot Stats</span>
+            <span class="share-date" id="shareDate">-</span>
+        </div>
+        <div class="share-grid">
+            <div class="share-stat">
+                <div class="share-stat-label">Win Rate</div>
+                <div class="share-stat-value" id="shareWinRate" style="color: #238636">-</div>
+            </div>
+            <div class="share-stat">
+                <div class="share-stat-label">Total PnL</div>
+                <div class="share-stat-value" id="sharePnl">-</div>
+            </div>
+            <div class="share-stat">
+                <div class="share-stat-label">Profitable</div>
+                <div class="share-stat-value" style="color: #238636" id="shareProfitable">-</div>
+            </div>
+            <div class="share-stat">
+                <div class="share-stat-label">Losing</div>
+                <div class="share-stat-value" style="color: #da3633" id="shareLosing">-</div>
+            </div>
+            <div class="share-stat">
+                <div class="share-stat-label">Today's PnL</div>
+                <div class="share-stat-value" id="shareTodayPnl">-</div>
+            </div>
+            <div class="share-stat">
+                <div class="share-stat-label">Open Deals</div>
+                <div class="share-stat-value" style="color: #58a6ff" id="shareOpen">-</div>
+            </div>
+        </div>
+        <div class="share-footer">Generated by Trading Bot Dashboard</div>
     </div>
     
     <script>
+        let currentStats = {};
+        let currentExtended = {};
+        let allLogs = [];
+        let currentLogFilter = 'all';
+        
         function formatPnl(value) {
-            const num = parseFloat(value);
+            const num = parseFloat(value) || 0;
             const sign = num >= 0 ? '+' : '';
             return sign + '$' + num.toFixed(2);
         }
@@ -332,7 +560,26 @@
         function formatTime(isoString) {
             if (!isoString) return '-';
             const date = new Date(isoString);
-            return date.toLocaleString();
+            return date.toLocaleString('ru-RU', { 
+                hour: '2-digit', 
+                minute: '2-digit',
+                second: '2-digit',
+                day: '2-digit',
+                month: '2-digit',
+                hour12: false 
+            });
+        }
+        
+        function formatTime24(date) {
+            return date.toLocaleString('ru-RU', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                hour12: false
+            });
         }
         
         function renderReasons(reasons, containerId) {
@@ -362,7 +609,7 @@
             }
             
             let html = '';
-            for (const trade of trades) {
+            for (const trade of trades.slice(0, 15)) {
                 const pnl = parseFloat(trade.pnl || 0);
                 const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
                 const dirClass = trade.direction === 'LONG' ? 'badge-long' : 'badge-short';
@@ -381,10 +628,44 @@
             tbody.innerHTML = html;
         }
         
+        function renderLogs(logs) {
+            const container = document.getElementById('logsContainer');
+            
+            let filteredLogs = logs;
+            if (currentLogFilter !== 'all') {
+                filteredLogs = logs.filter(l => l.level === currentLogFilter);
+            }
+            
+            if (!filteredLogs || filteredLogs.length === 0) {
+                container.innerHTML = '<div class="no-data">No logs</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const log of filteredLogs.slice(0, 100)) {
+                html += `
+                    <div class="log-entry">
+                        <span class="log-time">${log.timestamp || '-'}</span>
+                        <span class="log-level ${log.level}">${log.level}</span>
+                        <span class="log-message">${log.message || '-'}</span>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function filterLogs(level) {
+            currentLogFilter = level;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            renderLogs(allLogs);
+        }
+        
         async function fetchStats() {
             try {
                 const response = await fetch('/api/stats');
                 const data = await response.json();
+                currentStats = data;
                 
                 document.getElementById('openDeals').textContent = data.open_deals;
                 document.getElementById('winRate').textContent = data.win_rate + '%';
@@ -404,11 +685,58 @@
                 renderReasons(data.win_reasons, 'winReasons');
                 renderReasons(data.loss_reasons, 'lossReasons');
                 
-                document.getElementById('lastUpdate').textContent = 
-                    new Date().toLocaleTimeString();
+                document.getElementById('lastUpdate').textContent = formatTime24(new Date());
                     
             } catch (error) {
                 console.error('Error fetching stats:', error);
+            }
+        }
+        
+        async function fetchExtended() {
+            try {
+                const response = await fetch('/api/extended');
+                const data = await response.json();
+                currentExtended = data;
+                
+                // Today
+                const todayPnl = parseFloat(data.today_pnl || 0);
+                const todayEl = document.getElementById('todayPnl');
+                todayEl.textContent = formatPnl(todayPnl);
+                todayEl.className = 'card-value ' + (todayPnl >= 0 ? 'positive' : 'negative');
+                document.getElementById('todayTrades').textContent = 
+                    `${data.today_wins || 0}/${data.today_trades || 0} wins today`;
+                
+                // Avg
+                document.getElementById('avgWin').textContent = '+$' + (data.avg_win || 0).toFixed(2);
+                document.getElementById('avgLoss').textContent = '$' + (data.avg_loss || 0).toFixed(2);
+                
+                // Best/Worst
+                if (data.best_trade) {
+                    document.getElementById('bestTrade').textContent = formatPnl(data.best_trade.pnl);
+                    document.getElementById('bestTradeInfo').textContent = 
+                        `${data.best_trade.symbol?.split('/')[0] || '-'} ${data.best_trade.direction || ''}`;
+                }
+                if (data.worst_trade) {
+                    document.getElementById('worstTrade').textContent = formatPnl(data.worst_trade.pnl);
+                    document.getElementById('worstTradeInfo').textContent = 
+                        `${data.worst_trade.symbol?.split('/')[0] || '-'} ${data.worst_trade.direction || ''}`;
+                }
+                
+                // Streak
+                const streakEl = document.getElementById('streak');
+                if (data.current_streak && data.streak_type) {
+                    const streakClass = data.streak_type === 'win' ? 'streak-win' : 'streak-loss';
+                    const streakIcon = data.streak_type === 'win' ? '🔥' : '❄️';
+                    streakEl.innerHTML = `<span class="streak-badge ${streakClass}">${streakIcon} ${data.current_streak} ${data.streak_type}s</span>`;
+                } else {
+                    streakEl.textContent = '-';
+                }
+                
+                // Volume
+                document.getElementById('totalVolume').textContent = '$' + (data.total_volume || 0).toLocaleString();
+                
+            } catch (error) {
+                console.error('Error fetching extended:', error);
             }
         }
         
@@ -422,13 +750,92 @@
             }
         }
         
-        // Initial fetch
-        fetchStats();
-        fetchTrades();
+        async function fetchLogs() {
+            try {
+                const response = await fetch('/api/logs?limit=100');
+                const data = await response.json();
+                allLogs = data.memory_logs || [];
+                renderLogs(allLogs);
+            } catch (error) {
+                console.error('Error fetching logs:', error);
+            }
+        }
         
-        // Auto-refresh every 3 seconds
+        function refreshAll() {
+            fetchStats();
+            fetchExtended();
+            fetchTrades();
+            fetchLogs();
+        }
+        
+        async function shareStats() {
+            // Update share card data
+            document.getElementById('shareDate').textContent = formatTime24(new Date());
+            document.getElementById('shareWinRate').textContent = (currentStats.win_rate || 0) + '%';
+            
+            const pnl = parseFloat(currentStats.total_pnl || 0);
+            const sharePnlEl = document.getElementById('sharePnl');
+            sharePnlEl.textContent = formatPnl(pnl);
+            sharePnlEl.style.color = pnl >= 0 ? '#238636' : '#da3633';
+            
+            document.getElementById('shareProfitable').textContent = currentStats.profitable || 0;
+            document.getElementById('shareLosing').textContent = currentStats.losing || 0;
+            
+            const todayPnl = parseFloat(currentExtended.today_pnl || 0);
+            const shareTodayEl = document.getElementById('shareTodayPnl');
+            shareTodayEl.textContent = formatPnl(todayPnl);
+            shareTodayEl.style.color = todayPnl >= 0 ? '#238636' : '#da3633';
+            
+            document.getElementById('shareOpen').textContent = currentStats.open_deals || 0;
+            
+            // Move card temporarily to visible area
+            const shareCard = document.getElementById('shareCard');
+            shareCard.style.left = '0';
+            shareCard.style.top = '0';
+            shareCard.style.position = 'absolute';
+            shareCard.style.zIndex = '-1';
+            
+            try {
+                const canvas = await html2canvas(shareCard, {
+                    backgroundColor: '#0d1117',
+                    scale: 2
+                });
+                
+                // Convert to blob and copy/download
+                canvas.toBlob(async (blob) => {
+                    try {
+                        // Try to copy to clipboard
+                        await navigator.clipboard.write([
+                            new ClipboardItem({ 'image/png': blob })
+                        ]);
+                        alert('Screenshot copied to clipboard!');
+                    } catch (e) {
+                        // Fallback: download
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = 'trading-stats-' + new Date().toISOString().slice(0,10) + '.png';
+                        a.click();
+                        URL.revokeObjectURL(url);
+                    }
+                }, 'image/png');
+            } catch (error) {
+                console.error('Error creating screenshot:', error);
+                alert('Error creating screenshot');
+            }
+            
+            // Hide card again
+            shareCard.style.left = '-9999px';
+        }
+        
+        // Initial fetch
+        refreshAll();
+        
+        // Auto-refresh
         setInterval(fetchStats, 3000);
+        setInterval(fetchExtended, 5000);
         setInterval(fetchTrades, 5000);
+        setInterval(fetchLogs, 10000);
     </script>
 </body>
 </html>
