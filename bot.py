@@ -3139,19 +3139,19 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         # Валидация
         if amount < MIN_WITHDRAW:
-            await query.edit_message_text(
+            await edit_or_send(
+                query,
                 f"<b>❌ Ошибка</b>\n\nМинимальная сумма для вывода: ${MIN_WITHDRAW:.2f}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
-                parse_mode="HTML"
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]])
             )
             return
         
         balance = user.get('balance', 0) or 0
         if amount > balance:
-            await query.edit_message_text(
+            await edit_or_send(
+                query,
                 f"<b>❌ Ошибка</b>\n\nНедостаточно средств.\n\n💰 Баланс: ${balance:.2f}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
-                parse_mode="HTML"
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]])
             )
             return
         
@@ -3162,22 +3162,22 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             available = balance - total_in_positions
             
             if amount > available:
-                await query.edit_message_text(
+                await edit_or_send(
+                    query,
                     f"<b>❌ Ошибка</b>\n\nНедостаточно свободных средств.\n\n"
                     f"📊 В позициях: ${total_in_positions:.2f}\n"
                     f"💵 Доступно: ${available:.2f}\n\n"
                     f"💰 Баланс: ${balance:.2f}",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
-                    parse_mode="HTML"
+                    InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]])
                 )
                 return
     except Exception as e:
         logger.error(f"[WITHDRAW] Error handling withdraw for user {user_id}: {e}", exc_info=True)
         try:
-            await query.edit_message_text(
+            await edit_or_send(
+                query,
                 "<b>❌ Ошибка</b>\n\nНе удалось обработать запрос на вывод.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]]),
-                parse_mode="HTML"
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]])
             )
         except:
             pass
@@ -3212,16 +3212,18 @@ async def withdraw_custom_handler(update: Update, context: ContextTypes.DEFAULT_
     
     context.user_data['awaiting_withdraw_amount'] = True
     
-    await query.edit_message_text(
-        f"""<b>💸 Своя сумма</b>
+    text = f"""<b>💸 Своя сумма</b>
 
 Минимум: <b>${MIN_WITHDRAW:.2f} USDT</b>
 
 Введи сумму для вывода:
 
-💰 Баланс: ${user['balance']:.2f}""",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]]),
-        parse_mode="HTML"
+💰 Баланс: ${user['balance']:.2f}"""
+    
+    await edit_or_send(
+        query,
+        text,
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="withdraw_menu")]])
     )
 
 async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
