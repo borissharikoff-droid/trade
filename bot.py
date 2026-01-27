@@ -2215,51 +2215,58 @@ async def send_menu_photo(bot, chat_id: int, banner_type: str, text: str, reply_
     """Отправить или отредактировать сообщение с фото"""
     from telegram import InputMediaPhoto
     
-    banner_id = get_banner(banner_type)
+    try:
+        banner_id = get_banner(banner_type)
+    except Exception as e:
+        logger.warning(f"[BANNER] Error getting banner {banner_type}: {e}")
+        banner_id = None
     
     if message_to_edit:
-        current_has_photo = message_to_edit.photo is not None and len(message_to_edit.photo) > 0
-        
-        if current_has_photo and banner_id:
-            # Оба с фото - редактируем media
-            try:
-                await message_to_edit.edit_media(
-                    media=InputMediaPhoto(media=banner_id, caption=text, parse_mode="HTML"),
-                    reply_markup=reply_markup
-                )
-                return
-            except Exception as e:
-                logger.warning(f"[BANNER] edit_media failed: {e}")
-        
-        elif current_has_photo and not banner_id:
-            # Было фото, нужен текст - редактируем caption
-            try:
-                await message_to_edit.edit_caption(
-                    caption=text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
-                return
-            except Exception as e:
-                logger.warning(f"[BANNER] edit_caption failed: {e}")
-        
-        elif not current_has_photo and not banner_id:
-            # Оба текст - редактируем текст
-            try:
-                await message_to_edit.edit_text(
-                    text=text,
-                    reply_markup=reply_markup,
-                    parse_mode="HTML"
-                )
-                return
-            except Exception as e:
-                logger.warning(f"[BANNER] edit_text failed: {e}")
-        
-        # Если текст->фото или что-то пошло не так - удаляем и отправляем новое
         try:
-            await message_to_edit.delete()
-        except:
-            pass
+            current_has_photo = message_to_edit.photo is not None and len(message_to_edit.photo) > 0
+            
+            if current_has_photo and banner_id:
+                # Оба с фото - редактируем media
+                try:
+                    await message_to_edit.edit_media(
+                        media=InputMediaPhoto(media=banner_id, caption=text, parse_mode="HTML"),
+                        reply_markup=reply_markup
+                    )
+                    return
+                except Exception as e:
+                    logger.warning(f"[BANNER] edit_media failed: {e}")
+            
+            elif current_has_photo and not banner_id:
+                # Было фото, нужен текст - редактируем caption
+                try:
+                    await message_to_edit.edit_caption(
+                        caption=text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML"
+                    )
+                    return
+                except Exception as e:
+                    logger.warning(f"[BANNER] edit_caption failed: {e}")
+            
+            elif not current_has_photo and not banner_id:
+                # Оба текст - редактируем текст
+                try:
+                    await message_to_edit.edit_text(
+                        text=text,
+                        reply_markup=reply_markup,
+                        parse_mode="HTML"
+                    )
+                    return
+                except Exception as e:
+                    logger.warning(f"[BANNER] edit_text failed: {e}")
+            
+            # Если текст->фото или что-то пошло не так - удаляем и отправляем новое
+            try:
+                await message_to_edit.delete()
+            except Exception as e:
+                logger.debug(f"[BANNER] Could not delete message: {e}")
+        except Exception as e:
+            logger.warning(f"[BANNER] Error processing message_to_edit: {e}")
     
     # Отправляем новое сообщение
     if banner_id:
@@ -2273,10 +2280,14 @@ async def send_menu_photo(bot, chat_id: int, banner_type: str, text: str, reply_
             )
             return
         except Exception as e:
-            logger.warning(f"[BANNER] Failed to send photo: {e}")
+            logger.warning(f"[BANNER] Failed to send photo: {e}, falling back to text")
     
     # Fallback - просто текст
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"[BANNER] Failed to send message to {chat_id}: {e}", exc_info=True)
+        raise  # Пробрасываем ошибку выше для обработки
 
 
 async def edit_or_send(query, text: str, reply_markup, parse_mode: str = "HTML"):
@@ -2301,71 +2312,119 @@ async def edit_or_send(query, text: str, reply_markup, parse_mode: str = "HTML")
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     
-    logger.info(f"[START] User {user_id}")
-    
-    # Принудительно читаем из БД (не из кэша) для актуального баланса
-    users_cache.pop(user_id, None)
-    
-    # Обработка реферальной ссылки ДО создания пользователя
-    referrer_id_to_set = None
-    if context.args and len(context.args) > 0:
-        ref_arg = context.args[0]
-        if ref_arg.startswith("ref_"):
-            try:
-                referrer_id_to_set = int(ref_arg.replace("ref_", ""))
-                logger.info(f"[REF] Referral link detected: user {user_id} from {referrer_id_to_set}")
-            except ValueError:
-                pass
-    
-    # Получаем пользователя (создастся если не существует)
-    user = get_user(user_id)
-    
-    # Устанавливаем реферера если ссылка была и пользователь новый (без реферера)
-    if referrer_id_to_set and not user.get('referrer_id'):
-        if db_set_referrer(user_id, referrer_id_to_set):
-            logger.info(f"[REF] User {user_id} registered via referral from {referrer_id_to_set}")
-            # Обновляем кэш
-            users_cache.pop(user_id, None)
+    try:
+        logger.info(f"[START] User {user_id}")
+        
+        # Принудительно читаем из БД (не из кэша) для актуального баланса
+        users_cache.pop(user_id, None)
+        
+        # Обработка реферальной ссылки ДО создания пользователя
+        referrer_id_to_set = None
+        if context.args and len(context.args) > 0:
+            ref_arg = context.args[0]
+            if ref_arg.startswith("ref_"):
+                try:
+                    referrer_id_to_set = int(ref_arg.replace("ref_", ""))
+                    logger.info(f"[REF] Referral link detected: user {user_id} from {referrer_id_to_set}")
+                except ValueError:
+                    pass
+        
+        # Получаем пользователя (создастся если не существует)
+        try:
             user = get_user(user_id)
-    
-    balance = user['balance']
-    trading_status = "ВКЛ" if user['trading'] else "ВЫКЛ"
-    auto_trade_status = "ВКЛ" if user.get('auto_trade') else "ВЫКЛ"
-    
-    # Получаем статистику пользователя
-    stats = db_get_user_stats(user_id)
-    wins = stats['wins']
-    total_trades = stats['total']
-    winrate = stats['winrate']
-    total_profit = stats['total_pnl']
-    profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
-    
-    text = f"""Торговля: {trading_status}
+        except Exception as e:
+            logger.error(f"[START] Error getting user {user_id}: {e}", exc_info=True)
+            trade_logger.log_error(f"Error getting user in /start: {e}", error=e, user_id=user_id)
+            # Пытаемся отправить сообщение об ошибке
+            try:
+                await update.message.reply_text(
+                    "<b>❌ Ошибка</b>\n\nПроизошла ошибка при загрузке данных. Попробуйте позже.",
+                    parse_mode="HTML"
+                )
+            except:
+                pass
+            return
+        
+        # Устанавливаем реферера если ссылка была и пользователь новый (без реферера)
+        if referrer_id_to_set and not user.get('referrer_id'):
+            try:
+                if db_set_referrer(user_id, referrer_id_to_set):
+                    logger.info(f"[REF] User {user_id} registered via referral from {referrer_id_to_set}")
+                    # Обновляем кэш
+                    users_cache.pop(user_id, None)
+                    user = get_user(user_id)
+            except Exception as e:
+                logger.warning(f"[START] Error setting referrer: {e}")
+        
+        balance = user.get('balance', 0.0)
+        trading_status = "ВКЛ" if user.get('trading', False) else "ВЫКЛ"
+        auto_trade_status = "ВКЛ" if user.get('auto_trade', False) else "ВЫКЛ"
+        
+        # Получаем статистику пользователя
+        try:
+            stats = db_get_user_stats(user_id)
+            wins = stats.get('wins', 0)
+            total_trades = stats.get('total', 0)
+            winrate = stats.get('winrate', '0%')
+            total_profit = stats.get('total_pnl', 0.0)
+            profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
+        except Exception as e:
+            logger.warning(f"[START] Error getting stats for user {user_id}: {e}")
+            wins = 0
+            total_trades = 0
+            winrate = '0%'
+            profit_str = "$0.00"
+        
+        text = f"""Торговля: {trading_status}
 Авто-трейд: {auto_trade_status}
 
 📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}
 
 💰 Баланс: <b>${balance:.2f}</b>"""
-    
-    keyboard = [
-        [InlineKeyboardButton(f"{'❌ Выкл' if user['trading'] else '✅ Вкл'}", callback_data="toggle"),
-         InlineKeyboardButton(f"{'✅' if user.get('auto_trade') else '❌'} Авто-трейд", callback_data="auto_trade_menu")],
-        [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")],
-        [InlineKeyboardButton("Дополнительно", callback_data="more_menu")]
-    ]
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        # Возврат с другого меню - редактируем
-        await send_menu_photo(
-            context.bot, user_id, "menu",
-            text, reply_markup,
-            message_to_edit=update.callback_query.message
-        )
-    else:
-        # Новый /start
-        await send_menu_photo(context.bot, user_id, "menu", text, reply_markup)
+        
+        keyboard = [
+            [InlineKeyboardButton(f"{'❌ Выкл' if user.get('trading', False) else '✅ Вкл'}", callback_data="toggle"),
+             InlineKeyboardButton(f"{'✅' if user.get('auto_trade', False) else '❌'} Авто-трейд", callback_data="auto_trade_menu")],
+            [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")],
+            [InlineKeyboardButton("Дополнительно", callback_data="more_menu")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        try:
+            if update.callback_query:
+                # Возврат с другого меню - редактируем
+                await send_menu_photo(
+                    context.bot, user_id, "menu",
+                    text, reply_markup,
+                    message_to_edit=update.callback_query.message
+                )
+            else:
+                # Новый /start
+                await send_menu_photo(context.bot, user_id, "menu", text, reply_markup)
+        except Exception as e:
+            logger.error(f"[START] Error sending menu to user {user_id}: {e}", exc_info=True)
+            trade_logger.log_error(f"Error sending menu in /start: {e}", error=e, user_id=user_id)
+            # Fallback - отправляем простое текстовое сообщение
+            try:
+                if update.message:
+                    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+                elif update.callback_query:
+                    await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="HTML")
+            except Exception as fallback_error:
+                logger.error(f"[START] Fallback also failed for user {user_id}: {fallback_error}")
+    except Exception as e:
+        logger.error(f"[START] Critical error for user {user_id}: {e}", exc_info=True)
+        trade_logger.log_error(f"Critical error in /start: {e}", error=e, user_id=user_id)
+        # Пытаемся отправить сообщение об ошибке
+        try:
+            if update.message:
+                await update.message.reply_text(
+                    "<b>❌ Ошибка</b>\n\nПроизошла критическая ошибка. Попробуйте позже или обратитесь к администратору.",
+                    parse_mode="HTML"
+                )
+        except:
+            pass
 
 # ==================== ПОПОЛНЕНИЕ ====================
 async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4315,6 +4374,8 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     auto_balance = max_balance_row['max_bal'] if max_balance_row and max_balance_row['max_bal'] else 0
     
+    logger.info(f"[SMART] Активных юзеров: {len(active_users)}, Авто-трейд юзеров: {auto_trade_users_count}, Auto balance: ${auto_balance:.2f}")
+    
     if not active_users and not has_auto_trade:
         logger.info("[SMART] Нет активных юзеров и авто-трейд юзеров")
         return
@@ -4399,6 +4460,9 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         
         logger.info(f"[AUTO_TRADE] Найдено {len(all_auto_trade_users)} пользователей с авто-трейдом")
         
+        if len(all_auto_trade_users) == 0:
+            logger.info("[AUTO_TRADE] Нет пользователей с auto_trade=1 и балансом >= AUTO_TRADE_MIN_BET")
+        
         # Проверяем каждого пользователя с auto_trade
         for auto_user_row in all_auto_trade_users:
             auto_user_id = auto_user_row['user_id']
@@ -4438,6 +4502,8 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if skip_reason:
                     logger.info(f"[AUTO_TRADE] User {auto_user_id}: пропуск - {skip_reason}")
                     continue
+                
+                logger.info(f"[AUTO_TRADE] User {auto_user_id}: проверка пройдена, открываем сделку")
                 
                 # === ВАЛИДАЦИЯ ===
                 auto_positions = get_positions(auto_user_id)
@@ -4596,13 +4662,16 @@ R/R: 1:{setup.risk_reward:.1f}
                 db_update_user(auto_user_id, auto_trade_today=user_today_count + 1)
                 
             except Exception as e:
-                logger.error(f"[AUTO_TRADE] User {auto_user_id}: критическая ошибка: {e}")
+                logger.error(f"[AUTO_TRADE] User {auto_user_id}: критическая ошибка: {e}", exc_info=True)
+                trade_logger.log_error(f"Critical error in auto_trade for user {auto_user_id}: {e}", error=e, user_id=auto_user_id, symbol=symbol)
                 continue
         
         logger.info(f"[AUTO_TRADE] Выполнено для {len(auto_trade_executed_users)} пользователей")
         
         # === ОТПРАВКА СИГНАЛОВ ОСТАЛЬНЫМ ЮЗЕРАМ ===
         signal_sent_to_users = False
+        
+        logger.info(f"[SMART] Отправка сигналов {len(active_users)} активным пользователям (trading=1)")
         
         for user_id in active_users:
             # Пропускаем тех, для кого авто-трейд уже выполнен
@@ -4626,8 +4695,10 @@ R/R: 1:{setup.risk_reward:.1f}
             if not trading_enabled:
                 # Если для этого пользователя авто-трейд сработал - уже получил уведомление
                 if user_id in auto_trade_executed_users:
+                    logger.debug(f"[SMART] User {user_id}: trading=0, но auto_trade выполнен")
                     continue
                 # Если авто-трейд не сработал, но trading выключен - просто пропускаем
+                logger.debug(f"[SMART] User {user_id}: trading=0, пропуск сигнала")
                 continue
             
             # Если ручной трейд включен - отправляем обычный сигнал для входа
@@ -5803,37 +5874,53 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обновление цен и PnL с реальными данными Bybit (если хеджирование) или Binance
     Errors are isolated to prevent one user's failure from affecting others
     """
-    
-    # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
-    bybit_open_symbols = set()
-    bybit_sync_available = False  # Флаг что данные с Bybit получены успешно
-    
-    if await is_hedging_enabled():
+    try:
+        # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
+        bybit_open_symbols = set()
+        bybit_sync_available = False  # Флаг что данные с Bybit получены успешно
+        
+        if await is_hedging_enabled():
+            try:
+                bybit_positions = await hedger.get_all_positions()
+                bybit_open_symbols = {p['symbol'] for p in bybit_positions}
+                bybit_sync_available = True  # Успешно получили данные (даже если список пустой)
+                logger.debug(f"[BYBIT_SYNC] Открытых позиций на Bybit: {len(bybit_positions)}")
+            except Exception as e:
+                logger.warning(f"[BYBIT_SYNC] Ошибка получения позиций: {e}", exc_info=True)
+                trade_logger.log_error(f"Error getting Bybit positions: {e}", error=e)
+        
+        # Process users in batches with locking
+        user_ids = list(positions_cache.keys())
+        total_positions = sum(len(positions_cache.get(uid, [])) for uid in user_ids)
+        logger.debug(f"[UPDATE_POSITIONS] Обработка {len(user_ids)} пользователей, {total_positions} позиций")
+        BATCH_SIZE = 10  # Process 10 users at a time
+        
+        for batch_start in range(0, len(user_ids), BATCH_SIZE):
+            batch_user_ids = user_ids[batch_start:batch_start + BATCH_SIZE]
+            
+            # Process batch concurrently
+            tasks = []
+            for user_id in batch_user_ids:
+                tasks.append(process_user_positions(user_id, bybit_sync_available, bybit_open_symbols, context))
+            
+            # Wait for batch to complete - errors are isolated per user
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Log any exceptions that occurred
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    user_id = batch_user_ids[i]
+                    logger.error(f"[UPDATE_POSITIONS] Error processing user {user_id}: {result}", exc_info=True)
+                    trade_logger.log_error(f"Error in update_positions for user {user_id}: {result}", error=result, user_id=user_id)
+        
+        # Cleanup expired cache entries
         try:
-            bybit_positions = await hedger.get_all_positions()
-            bybit_open_symbols = {p['symbol'] for p in bybit_positions}
-            bybit_sync_available = True  # Успешно получили данные (даже если список пустой)
-            logger.debug(f"[BYBIT_SYNC] Открытых позиций на Bybit: {len(bybit_positions)}")
+            cleanup_caches()
         except Exception as e:
-            logger.warning(f"[BYBIT_SYNC] Ошибка получения позиций: {e}")
-    
-    # Process users in batches with locking
-    user_ids = list(positions_cache.keys())
-    BATCH_SIZE = 10  # Process 10 users at a time
-    
-    for batch_start in range(0, len(user_ids), BATCH_SIZE):
-        batch_user_ids = user_ids[batch_start:batch_start + BATCH_SIZE]
-        
-        # Process batch concurrently
-        tasks = []
-        for user_id in batch_user_ids:
-            tasks.append(process_user_positions(user_id, bybit_sync_available, bybit_open_symbols, context))
-        
-        # Wait for batch to complete
-        await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Cleanup expired cache entries
-    cleanup_caches()
+            logger.warning(f"[UPDATE_POSITIONS] Error cleaning caches: {e}")
+    except Exception as e:
+        logger.error(f"[UPDATE_POSITIONS] Critical error: {e}", exc_info=True)
+        trade_logger.log_error(f"Critical error in update_positions: {e}", error=e)
 
 
 async def process_user_positions(user_id: int, bybit_sync_available: bool, 
@@ -5847,6 +5934,7 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
             if not user_positions:
                 return
             
+            logger.debug(f"[PROCESS_USER] User {user_id}: {len(user_positions)} позиций")
             user = get_user(user_id)
             
             # === ПРОВЕРКА: позиция закрылась на Bybit? ===
@@ -6527,7 +6615,8 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 except Exception as e:
                     logger.error(f"[AUTO-CLOSE] Failed to notify user {user_id}: {e}")
     except Exception as e:
-        logger.error(f"[PROCESS_USER] Error processing user {user_id}: {e}")
+        logger.error(f"[PROCESS_USER] Error processing user {user_id}: {e}", exc_info=True)
+        trade_logger.log_error(f"Error processing positions for user {user_id}: {e}", error=e, user_id=user_id)
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 def db_get_stats() -> Dict:
@@ -6592,6 +6681,116 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 🏦 Комиссии: ${stats['commissions']:.2f}"""
     
     await update.message.reply_text(text, parse_mode="HTML")
+
+async def logs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Просмотр логов ошибок: /logs [hours] [limit]"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    # Параметры
+    hours = 24
+    limit = 20
+    if context.args:
+        try:
+            if len(context.args) >= 1:
+                hours = int(context.args[0])
+            if len(context.args) >= 2:
+                limit = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text(
+                "<b>❌ Ошибка</b>\n\nИспользование: /logs [hours] [limit]\n"
+                "Пример: /logs 24 20",
+                parse_mode="HTML"
+            )
+            return
+    
+    try:
+        # Получаем ошибки
+        error_summary = trade_logger.get_error_summary(hours=hours)
+        recent_errors = trade_logger.get_recent_logs(
+            category=LogCategory.ERROR,
+            hours=hours,
+            limit=limit
+        )
+        
+        # Ошибки /start
+        start_errors = []
+        for err in recent_errors:
+            msg = err.get('message', '').upper()
+            if 'START' in msg or '/START' in msg or 'start' in err.get('message', ''):
+                start_errors.append(err)
+        
+        # Ошибки сделок
+        trade_errors = []
+        for err in recent_errors:
+            cat = err.get('category', '')
+            if cat in ['TRADE_OPEN', 'TRADE_CLOSE']:
+                trade_errors.append(err)
+        
+        # Формируем отчет
+        text = f"""<b>📋 ЛОГИ ОШИБОК</b>
+
+⏰ Период: {hours} часов
+📊 Лимит: {limit} записей
+
+<b>📈 Статистика:</b>
+Всего ошибок: {error_summary.get('total_errors', 0)}
+Уникальных: {error_summary.get('unique_errors', 0)}
+
+<b>🔴 Ошибки /start:</b> {len(start_errors)}
+<b>💼 Ошибки сделок:</b> {len(trade_errors)}
+
+<b>🔝 Топ ошибок:</b>
+"""
+        
+        top_errors = error_summary.get('top_errors', [])[:5]
+        if top_errors:
+            for i, err in enumerate(top_errors, 1):
+                msg = err.get('message', 'N/A')[:60]
+                count = err.get('count', 0)
+                text += f"{i}. ({count}x) {msg}\n"
+        else:
+            text += "Нет ошибок\n"
+        
+        # Детали последних ошибок
+        if recent_errors:
+            text += f"\n<b>📝 Последние ошибки:</b>\n"
+            for i, err in enumerate(recent_errors[:5], 1):
+                timestamp = err.get('timestamp', 'N/A')
+                if isinstance(timestamp, str) and len(timestamp) > 19:
+                    timestamp = timestamp[:19]
+                msg = err.get('message', 'N/A')[:50]
+                user_id_err = err.get('user_id', 'N/A')
+                text += f"\n{i}. [{timestamp}]\n"
+                text += f"   User: {user_id_err}\n"
+                text += f"   {msg}\n"
+        else:
+            text += "\n✅ Ошибок не найдено!"
+        
+        # Разбиваем на части если слишком длинное
+        if len(text) > 4000:
+            parts = text.split('\n\n')
+            current_part = ""
+            for part in parts:
+                if len(current_part) + len(part) > 4000:
+                    await update.message.reply_text(current_part, parse_mode="HTML")
+                    current_part = part + "\n\n"
+                else:
+                    current_part += part + "\n\n"
+            if current_part:
+                await update.message.reply_text(current_part, parse_mode="HTML")
+        else:
+            await update.message.reply_text(text, parse_mode="HTML")
+            
+    except Exception as e:
+        logger.error(f"[LOGS] Error getting logs: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"<b>❌ Ошибка получения логов</b>\n\n{str(e)}",
+            parse_mode="HTML"
+        )
 
 async def sync_profits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Синхронизация total_profit всех пользователей с историей сделок (админ)"""
@@ -7959,6 +8158,7 @@ def main() -> None:
     # Команды
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("logs", logs_cmd))
     app.add_handler(CommandHandler("health", health_check))
     app.add_handler(CommandHandler("commission", commission_cmd))
     app.add_handler(CommandHandler("optimizer", optimizer_cmd))
