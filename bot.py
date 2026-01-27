@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, PreCheckoutQueryHandler, MessageHandler, filters
-from telegram.error import BadRequest
+from telegram.error import BadRequest, Conflict
 
 from hedger import hedge_open, hedge_close, is_hedging_enabled, hedger
 from smart_analyzer import (
@@ -8483,6 +8483,21 @@ def main() -> None:
     
     # Error handler with detailed logging
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        # Special handling for Conflict errors (multiple bot instances)
+        if isinstance(context.error, Conflict):
+            error_msg = str(context.error)
+            if "getUpdates" in error_msg or "terminated by other" in error_msg:
+                logger.critical(
+                    "[ERROR_HANDLER] CONFLICT: Multiple bot instances detected! "
+                    "This usually means:\n"
+                    "1. Another instance is still running (check deployments)\n"
+                    "2. Multiple replicas are configured (should be 1)\n"
+                    "3. Old instance didn't shut down properly\n"
+                    "The bot will retry automatically, but you should check your deployment configuration."
+                )
+                # Don't notify users about this - it's an infrastructure issue
+                return
+        
         # Log detailed error information
         error_details = {
             'error': str(context.error) if context.error else 'Unknown error',
@@ -8598,7 +8613,24 @@ def main() -> None:
         )
     else:
         logger.info("[MODE] Polling")
-        app.run_polling(drop_pending_updates=True)
+        logger.info("[POLLING] Starting with drop_pending_updates=True")
+        logger.info("[POLLING] If you see Conflict errors, check:")
+        logger.info("[POLLING] 1. Only ONE replica/instance should be running")
+        logger.info("[POLLING] 2. Old instances must be fully stopped before starting new ones")
+        logger.info("[POLLING] 3. Check deployment configuration for multiple instances")
+        try:
+            app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=None,  # Allow all update types
+                close_loop=False  # Don't close event loop on shutdown
+            )
+        except Conflict as e:
+            logger.critical(
+                f"[POLLING] Conflict error during startup: {e}\n"
+                "This means another bot instance is already running.\n"
+                "Please stop all other instances before starting this one."
+            )
+            raise
 
 if __name__ == "__main__":
     main()
