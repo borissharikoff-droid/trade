@@ -178,9 +178,16 @@ class ThreadSafeCache:
 users_cache = ThreadSafeCache()
 positions_cache = ThreadSafeCache()  # {user_id: List[Dict]}
 price_cache = LRUCache(max_size=500, default_ttl=3)  # 3 seconds TTL for prices
+stats_cache = LRUCache(max_size=1000, default_ttl=30)  # 30 seconds TTL for user stats
+
+
+def invalidate_stats_cache(user_id: int):
+    """Invalidate stats cache for a user when positions are closed"""
+    stats_cache.delete(user_id)
 
 
 def cleanup_caches():
     """Periodic cleanup of expired cache entries"""
     price_cache.cleanup_expired()
-    logger.debug(f"[CACHE] Cleanup complete. Price cache: {price_cache.size()} entries")
+    stats_cache.cleanup_expired()
+    logger.debug(f"[CACHE] Cleanup complete. Price cache: {price_cache.size()}, Stats cache: {stats_cache.size()} entries")

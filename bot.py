@@ -20,9 +20,10 @@ from smart_analyzer import (
 )
 from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
 from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
-from cache_manager import users_cache, positions_cache, price_cache, cleanup_caches
+from cache_manager import users_cache, positions_cache, price_cache, stats_cache, cleanup_caches, invalidate_stats_cache
 from trade_logger import trade_logger, init_trade_logger, LogCategory, LogLevel
 from auto_optimizer import auto_optimizer, init_auto_optimizer
+from dashboard import init_dashboard, start_dashboard_thread
 
 load_dotenv()
 
@@ -400,6 +401,7 @@ def init_db():
             c.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_history_user_id ON history(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_history_closed_at ON history(closed_at)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_history_user_pnl ON history(user_id, pnl)")  # Composite index for stats
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON alerts(triggered)")
             # Indexes for referral_earnings
@@ -411,6 +413,7 @@ def init_db():
             c.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_history_user_id ON history(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_history_closed_at ON history(closed_at)")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_history_user_pnl ON history(user_id, pnl)")  # Composite index for stats
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id)")
             c.execute("CREATE INDEX IF NOT EXISTS idx_alerts_triggered ON alerts(triggered)")
             # Indexes for referral_earnings
@@ -550,6 +553,9 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     # Удаляем из активных
     run_sql("DELETE FROM positions WHERE id = ?", (pos_id,))
     
+    # Invalidate stats cache for this user (stats changed with new trade in history)
+    invalidate_stats_cache(pos['user_id'])
+    
     # Записываем результат для статистики smart analyzer
     record_trade_result(pnl)
     
@@ -579,8 +585,14 @@ def db_get_history(user_id: int, limit: int = 20) -> List[Dict]:
     """Получить историю сделок"""
     return run_sql("SELECT * FROM history WHERE user_id = ? ORDER BY closed_at DESC LIMIT ?", (user_id, limit), fetch="all")
 
-def db_get_user_stats(user_id: int) -> Dict:
-    """Полная статистика пользователя по ВСЕМ сделкам"""
+def db_get_user_stats(user_id: int, use_cache: bool = True) -> Dict:
+    """Полная статистика пользователя по ВСЕМ сделкам (с кэшированием)"""
+    # Check cache first (30 second TTL)
+    if use_cache:
+        cached = stats_cache.get(user_id)
+        if cached is not None:
+            return cached
+    
     row = run_sql("""
         SELECT 
             COUNT(*) as total,
@@ -591,15 +603,18 @@ def db_get_user_stats(user_id: int) -> Dict:
     """, (user_id,), fetch="one")
     
     if not row:
-        return {'total': 0, 'wins': 0, 'losses': 0, 'winrate': 0, 'total_pnl': 0}
+        result = {'total': 0, 'wins': 0, 'losses': 0, 'winrate': 0, 'total_pnl': 0}
+    else:
+        total = int(row['total'] or 0)
+        wins = int(row['wins'] or 0)
+        losses = int(row['losses'] or 0)
+        total_pnl = float(row['total_pnl'] or 0)
+        winrate = int(wins / total * 100) if total > 0 else 0
+        result = {'total': total, 'wins': wins, 'losses': losses, 'winrate': winrate, 'total_pnl': total_pnl}
     
-    total = int(row['total'] or 0)
-    wins = int(row['wins'] or 0)
-    losses = int(row['losses'] or 0)
-    total_pnl = float(row['total_pnl'] or 0)
-    winrate = int(wins / total * 100) if total > 0 else 0
-    
-    return {'total': total, 'wins': wins, 'losses': losses, 'winrate': winrate, 'total_pnl': total_pnl}
+    # Cache the result
+    stats_cache.set(user_id, result)
+    return result
 
 def db_sync_user_profit(user_id: int) -> float:
     """
@@ -2177,23 +2192,32 @@ def save_user(user_id: int):
         )
 
 def get_positions(user_id: int) -> List[Dict]:
-    """Получить позиции (с кэшированием, thread-safe)"""
-    positions = positions_cache.get(user_id)
-    if positions is None:
-        positions = db_get_positions(user_id)
+    """Получить позиции (с кэшированием, thread-safe)
+    
+    Returns a copy of cached positions to prevent external modification.
+    """
+    try:
+        positions = positions_cache.get(user_id)
+        if positions is None:
+            positions = db_get_positions(user_id)
+            if positions:
+                positions_cache.set(user_id, positions)
+        # Return a shallow copy to prevent cache corruption
+        return list(positions) if positions else []
+    except Exception as e:
+        logger.error(f"[CACHE] Error getting positions for user {user_id}: {e}")
+        # Fallback to DB on cache error
+        try:
+            return db_get_positions(user_id)
+        except Exception:
+            return []
+
+def update_positions_cache(user_id: int, positions: List[Dict]):
+    """Обновить кэш позиций (thread-safe)"""
+    try:
         positions_cache.set(user_id, positions)
-        logger.debug(f"[CACHE] User {user_id}: loaded {len(positions)} positions from DB into cache")
-    else:
-        logger.debug(f"[CACHE] User {user_id}: {len(positions)} positions from cache")
-    return positions
-
-def update_positions_cache(user_id: int, positions: List[Dict]):
-    """Обновить кэш позиций (thread-safe)"""
-    positions_cache.set(user_id, positions)
-
-def update_positions_cache(user_id: int, positions: List[Dict]):
-    """Обновить кэш позиций (thread-safe)"""
-    positions_cache.set(user_id, positions)
+    except Exception as e:
+        logger.error(f"[CACHE] Error updating positions cache for user {user_id}: {e}")
 
 # ==================== БАННЕРЫ ДЛЯ МЕНЮ ====================
 # Кэш file_id для баннеров (загружается из БД)
@@ -3600,30 +3624,36 @@ async def auto_trade_set_winrate(update: Update, context: ContextTypes.DEFAULT_T
 
 async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
-    Синхронизация позиций с Bybit - закрывает позиции которые закрылись на бирже
-    Проверяет размер позиции, а не только наличие символа.
+    Синхронизация позиций с Bybit - закрывает позиции которые закрылись на бирже.
+    Оптимизированная версия с таймаутами и батчингом.
 
     Returns:
         Количество синхронизированных (закрытых) позиций
     """
-    logger.info(f"[SYNC] Starting sync for user {user_id}")
-    if not await is_hedging_enabled():
-        logger.info(f"[SYNC] Hedging disabled, skipping sync")
+    try:
+        # Quick check if hedging is enabled with timeout
+        hedging_enabled = await asyncio.wait_for(is_hedging_enabled(), timeout=2.0)
+        if not hedging_enabled:
+            return 0
+    except (asyncio.TimeoutError, Exception):
         return 0
 
     user_positions = get_positions(user_id)
     if not user_positions:
-        logger.info(f"[SYNC] No positions to sync for user {user_id}")
         return 0
-    
-    logger.info(f"[SYNC] Found {len(user_positions)} positions to check for user {user_id}")
 
     user = get_user(user_id)
     synced = 0
+    closed_pos_ids = []  # Track closed positions for batch cache update
 
-    # Получаем все открытые позиции на Bybit
-    bybit_positions = await hedger.get_all_positions()
-    # Словарь: symbol -> {size, side} (размер и направление позиции)
+    # Get all open positions on Bybit with timeout
+    try:
+        bybit_positions = await asyncio.wait_for(hedger.get_all_positions(), timeout=5.0)
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"[SYNC] Timeout/error getting Bybit positions: {e}")
+        return 0
+    
+    # Build lookup dict: symbol -> {size, side}
     bybit_data = {}
     for bp in bybit_positions:
         bybit_side = "LONG" if bp.get('side') == "Buy" else "SHORT"
@@ -3632,17 +3662,16 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             'side': bybit_side
         }
     
-    # Получаем закрытые позиции за последние 7 дней
+    # Get closed positions with timeout
     try:
         closed_pnl = await asyncio.wait_for(hedger.get_closed_pnl(limit=100), timeout=5.0)
-    except asyncio.TimeoutError:
-        logger.warning(f"[SYNC] Timeout getting closed PnL, using empty list")
-        closed_pnl = []
-    except Exception as e:
-        logger.error(f"[SYNC] Error getting closed PnL: {e}")
+    except (asyncio.TimeoutError, Exception):
         closed_pnl = []
 
-    for pos in user_positions[:]:
+    import time as time_module
+    current_time_ms = int(time_module.time() * 1000)
+
+    for pos in user_positions:
         try:
             bybit_symbol = pos['symbol'].replace("/", "")
             bybit_info = bybit_data.get(bybit_symbol, {'size': 0, 'side': None})
@@ -3650,160 +3679,109 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             bybit_side = bybit_info['side']
             expected_qty = pos.get('bybit_qty', 0)
             
-            # Проверка направления: если направления разные, считаем позицию закрытой
+            # Direction mismatch check
             direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
-            if direction_mismatch:
-                logger.warning(f"[SYNC] Direction mismatch for {bybit_symbol}: bot={pos['direction']}, bybit={bybit_side}")
 
-            # Проверяем закрыта ли позиция:
-            # 1. bybit_qty > 0 и размер на Bybit = 0 -> позиция закрылась на Bybit
-            # 2. bybit_qty > 0 и размер сильно меньше ожидаемого -> частичное закрытие
-            # 3. bybit_qty == 0 при включенном хеджировании -> "фейковая" позиция (ошибка при открытии)
-            
+            # Handle orphan positions (no bybit_qty)
             if expected_qty == 0:
-                # Позиция без bybit_qty - возможно не открылась на Bybit
-                # Помечаем как "orphan" и закрываем без PnL
-                logger.warning(f"[SYNC] Orphan position {pos['id']}: {bybit_symbol} has no bybit_qty - closing")
-                
-                # Возвращаем только amount без PnL (позиция не была реально открыта)
                 returned = pos['amount']
                 
-                # Защита от race conditions при изменении баланса
                 async with get_user_lock(user_id):
-                    user = get_user(user_id)  # Re-read with lock
+                    user = get_user(user_id)
                     user['balance'] = sanitize_balance(user['balance'] + returned)
                     save_user(user_id)
                 
                 db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
-                
-                # Явно удаляем из кэша по ID
-                pos_id_to_remove = pos['id']
-                current_positions = positions_cache.get(user_id, [])
-                if current_positions:
-                    positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
-                
+                closed_pos_ids.append(pos['id'])
                 synced += 1
-                logger.info(f"[SYNC] Orphan {pos_id_to_remove} removed from cache, remaining: {len(positions_cache.get(user_id, []))}")
                 
-                try:
-                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                    await asyncio.wait_for(
-                        context.bot.send_message(
-                            user_id, 
-                            f"<b>📡 Синхронизация</b>\n\n"
-                            f"{ticker} закрыт (не был на Bybit)\n"
-                            f"Возврат: <b>${returned:.2f}</b>\n\n"
-                            f"💰 Баланс: ${user['balance']:.2f}",
-                            parse_mode="HTML"
-                        ),
-                        timeout=3.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"[SYNC] Timeout sending orphan notification to user {user_id}")
-                except Exception as e:
-                    logger.error(f"[SYNC] Failed to notify orphan: {e}")
+                # Non-blocking notification
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                asyncio.create_task(_send_sync_notification(
+                    context, user_id, ticker, 0, user['balance'], is_orphan=True, returned=returned
+                ))
                 continue
             
-            # Позиция закрыта если: размер=0, размер << ожидаемого, или направление не совпадает
+            # Position is closed if: size=0, size << expected, or direction mismatch
             is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1) or direction_mismatch
 
             if is_closed:
-                # Позиция закрыта на Bybit - берём реальный PnL
-                real_pnl = pos.get('pnl', 0)  # Default - локальный
+                real_pnl = pos.get('pnl', 0)
                 
-                # Ищем реальный PnL с Bybit с проверкой времени и qty
-                import time as time_module
-                current_time_ms = int(time_module.time() * 1000)
-                
+                # Find real PnL from Bybit closed trades
                 for closed in closed_pnl:
                     if closed['symbol'] == bybit_symbol:
                         bybit_pnl = closed['closed_pnl']
                         bybit_qty = closed.get('qty', 0)
                         bybit_time = closed.get('updated_time', 0)
-                        bybit_side = closed.get('side', '')
+                        closed_side = closed.get('side', '')
                         
-                        # Проверка времени (< 10 мин)
                         time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
-                        
-                        # Проверка qty (должно быть близко к expected_qty)
                         qty_ratio = bybit_qty / expected_qty if expected_qty > 0 else 0
+                        expected_side = "Sell" if pos['direction'] == "LONG" else "Buy"
+                        side_match = closed_side == expected_side or not closed_side
                         
-                        # Проверка направления
-                        expected_side = "Sell" if pos['direction'] == "LONG" else "Buy"  # Закрытие - обратная сторона
-                        side_match = bybit_side == expected_side or not bybit_side
-                        
-                        logger.info(f"[SYNC] Checking Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f}, time_diff={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side={bybit_side}")
-                        
-                        # Используем Bybit PnL если проходит проверки
+                        # Use Bybit PnL if validation passes
                         if time_diff < 600 and qty_ratio > 0.5 and side_match:
-                            logger.info(f"[SYNC] Using Bybit PnL for {bybit_symbol}: ${bybit_pnl:.2f} (local: ${real_pnl:.2f})")
                             real_pnl = bybit_pnl
                             break
-                        else:
-                            logger.warning(f"[SYNC] Bybit PnL rejected: time={time_diff:.0f}s, qty_ratio={qty_ratio:.2f}, side_match={side_match}")
 
-                logger.info(f"[SYNC] Closing {bybit_symbol}: bybit_size={bybit_size}, expected_qty={expected_qty}, PnL=${real_pnl:.2f}")
-
-                # Закрываем позицию в боте (с валидацией)
-                real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)  # Max 200% от позиции
+                # Sanitize and calculate return
+                real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)
                 returned = sanitize_amount(pos['amount']) + real_pnl
                 
-                # Защита от race conditions при изменении баланса
+                # Update balance with lock
                 async with get_user_lock(user_id):
-                    user = get_user(user_id)  # Re-read with lock
+                    user = get_user(user_id)
                     user['balance'] = sanitize_balance(user['balance'] + returned)
                     user['total_profit'] += real_pnl
                     save_user(user_id)
 
-                # Переносим в историю
+                # Close in DB
                 db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
-                
-                # Явно удаляем из кэша по ID (надёжнее чем remove)
-                pos_id_to_remove = pos['id']
-                current_positions = positions_cache.get(user_id, [])
-                if current_positions:
-                    positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
-
+                closed_pos_ids.append(pos['id'])
                 synced += 1
-                logger.info(f"[SYNC] Position {pos_id_to_remove} synced: {pos['symbol']} PnL=${real_pnl:.2f}, cache remaining: {len(positions_cache.get(user_id, []))}")
 
-                # Отправляем уведомление (с таймаутом 3 секунды)
-                try:
-                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                    pnl_abs = abs(real_pnl)
-
-                    if real_pnl > 0:
-                        text = f"""<b>📡 Bybit</b>
-
-{ticker} закрыт
-Итого: <b>+${pnl_abs:.2f}</b>
-
-💰 Баланс: ${user['balance']:.2f}"""
-                    else:
-                        text = f"""<b>📡 Bybit</b>
-
-{ticker} закрыт
-Итого: <b>-${pnl_abs:.2f}</b>
-
-💰 Баланс: ${user['balance']:.2f}"""
-
-                    await asyncio.wait_for(
-                        context.bot.send_message(user_id, text, parse_mode="HTML"),
-                        timeout=3.0
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"[SYNC] Timeout sending notification to user {user_id}")
-                except Exception as e:
-                    logger.error(f"[SYNC] Failed to notify user {user_id}: {e}")
+                # Non-blocking notification
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                asyncio.create_task(_send_sync_notification(
+                    context, user_id, ticker, real_pnl, user['balance']
+                ))
+                
         except Exception as e:
-            logger.error(f"[SYNC] Error processing position {pos.get('id', 'unknown')}: {e}", exc_info=True)
-            # Продолжаем обработку остальных позиций
+            logger.error(f"[SYNC] Error processing position {pos.get('id')}: {e}")
+            continue
+
+    # Batch update cache once at the end
+    if closed_pos_ids:
+        try:
+            positions_cache.set(user_id, db_get_positions(user_id))
+        except Exception:
+            pass
 
     if synced > 0:
-        logger.info(f"[SYNC] User {user_id}: synced {synced} positions from Bybit")
+        logger.info(f"[SYNC] User {user_id}: synced {synced} positions")
     
-    logger.info(f"[SYNC] Completed sync for user {user_id}, synced={synced}")
     return synced
+
+
+async def _send_sync_notification(context, user_id: int, ticker: str, pnl: float, balance: float, 
+                                   is_orphan: bool = False, returned: float = 0):
+    """Helper to send sync notification without blocking"""
+    try:
+        if is_orphan:
+            text = f"<b>📡 Синхронизация</b>\n\n{ticker} закрыт (не был на Bybit)\nВозврат: <b>${returned:.2f}</b>\n\n💰 Баланс: ${balance:.2f}"
+        else:
+            pnl_abs = abs(pnl)
+            pnl_sign = "+" if pnl >= 0 else "-"
+            text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\nИтого: <b>{pnl_sign}${pnl_abs:.2f}</b>\n\n💰 Баланс: ${balance:.2f}"
+        
+        await asyncio.wait_for(
+            context.bot.send_message(user_id, text, parse_mode="HTML"),
+            timeout=3.0
+        )
+    except (asyncio.TimeoutError, Exception):
+        pass  # Non-critical, silently ignore
 
 
 def stack_positions(positions: List[Dict]) -> List[Dict]:
@@ -4002,38 +3980,57 @@ PnL: {pnl_sign}${total_pnl:.2f}
 
 @rate_limit(max_requests=5, window_seconds=60, action_type="close_all")
 async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Закрыть все открытые позиции пользователя"""
+    """Закрыть все открытые позиции пользователя с улучшенной обработкой ошибок"""
     query = update.callback_query
-    await query.answer()
+    
+    try:
+        await query.answer()
+    except Exception:
+        pass
     
     user_id = update.effective_user.id
     user = get_user(user_id)
     user_positions = get_positions(user_id)
     
-    # Фильтруем позиции с amount > 0, удаляем "пустые"
+    # Filter positions with amount > 0, remove "empty" ones in background
     zero_amount_positions = [p for p in user_positions if p.get('amount', 0) <= 0]
-    for zero_pos in zero_amount_positions:
-        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
-        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
-        logger.info(f"[CLOSE_ALL] Removed zero-amount position {zero_pos['id']}")
+    if zero_amount_positions:
+        async def cleanup_zero():
+            for zero_pos in zero_amount_positions:
+                try:
+                    realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+                    db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+                except Exception:
+                    pass
+        asyncio.create_task(cleanup_zero())
     
     user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
     
     if not user_positions:
-        await edit_or_send(
-            query,
-            "<b>💼 Нет позиций</b>\n\nНет открытых сделок",
-            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
-        )
+        try:
+            await edit_or_send(
+                query,
+                "<b>💼 Нет позиций</b>\n\nНет открытых сделок",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
+            )
+        except Exception:
+            pass
         return
     
-    await edit_or_send(query, "<b>⏳ Закрываем позиции...</b>", None)
+    try:
+        await edit_or_send(query, "<b>⏳ Закрываем позиции...</b>", None)
+    except Exception:
+        pass
     
-    # === ГРУППИРУЕМ ПОЗИЦИИ ПО СИМВОЛУ ДЛЯ ЗАКРЫТИЯ НА BYBIT ===
-    # Bybit хранит одну позицию на символ, поэтому закрываем один раз за группу
+    # === GROUP POSITIONS BY SYMBOL FOR BYBIT CLOSING ===
     close_prices = {}  # (symbol, direction) -> close_price
-    failed_symbols = []  # Символы которые не удалось закрыть
-    hedging_enabled = await is_hedging_enabled()
+    failed_symbols = []  # Symbols that failed to close
+    bybit_errors = []  # Error messages for user
+    
+    try:
+        hedging_enabled = await asyncio.wait_for(is_hedging_enabled(), timeout=3.0)
+    except (asyncio.TimeoutError, Exception):
+        hedging_enabled = False
     
     if hedging_enabled:
         by_symbol = {}
@@ -4043,123 +4040,168 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 by_symbol[key] = []
             by_symbol[key].append(pos)
         
-        # Закрываем на Bybit по символам и получаем реальные цены
+        # Close on Bybit by symbol with timeout protection
         for (symbol, direction), positions in by_symbol.items():
             total_qty = sum(p.get('bybit_qty', 0) for p in positions)
-            if total_qty > 0:
-                hedge_result = await hedge_close(positions[0]['id'], symbol, direction, total_qty)
-                if hedge_result:
-                    logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} qty={total_qty}")
-                else:
-                    logger.error(f"[CLOSE_ALL] ❌ Failed to close {symbol} {direction} on Bybit")
-                    failed_symbols.append((symbol, direction))
-                    continue
-            else:
-                # Если bybit_qty не сохранён, закрываем всю позицию на Bybit
-                hedge_result = await hedge_close(positions[0]['id'], symbol, direction, None)
-                if hedge_result:
-                    logger.info(f"[CLOSE_ALL] Bybit closed {symbol} {direction} (full)")
-                else:
-                    logger.error(f"[CLOSE_ALL] ❌ Failed to close {symbol} {direction} on Bybit")
-                    failed_symbols.append((symbol, direction))
-                    continue
+            ticker = symbol.split("/")[0] if "/" in symbol else symbol
             
-            # Получаем реальную цену закрытия
-            await asyncio.sleep(0.3)
-            close_side = "Sell" if direction == "LONG" else "Buy"
-            order_info = await hedger.get_last_order_price(symbol, close_side)
-            if order_info and order_info.get('price'):
-                close_prices[(symbol, direction)] = order_info['price']
-                logger.info(f"[CLOSE_ALL] Real close price {symbol}: ${order_info['price']:.4f}")
+            try:
+                # Timeout protection for hedge_close (5 seconds)
+                if total_qty > 0:
+                    hedge_result = await asyncio.wait_for(
+                        hedge_close(positions[0]['id'], symbol, direction, total_qty),
+                        timeout=5.0
+                    )
+                else:
+                    hedge_result = await asyncio.wait_for(
+                        hedge_close(positions[0]['id'], symbol, direction, None),
+                        timeout=5.0
+                    )
+                
+                if not hedge_result:
+                    logger.warning(f"[CLOSE_ALL] Failed to close {symbol} {direction} on Bybit")
+                    failed_symbols.append((symbol, direction))
+                    bybit_errors.append(f"{ticker}")
+                    continue
+                
+                # Get real close price with timeout (no delay needed - just check)
+                try:
+                    close_side = "Sell" if direction == "LONG" else "Buy"
+                    order_info = await asyncio.wait_for(
+                        hedger.get_last_order_price(symbol, close_side),
+                        timeout=3.0
+                    )
+                    if order_info and order_info.get('price'):
+                        close_prices[(symbol, direction)] = order_info['price']
+                except (asyncio.TimeoutError, Exception):
+                    pass  # Use current price as fallback
+                    
+            except asyncio.TimeoutError:
+                logger.error(f"[CLOSE_ALL] Timeout closing {symbol} {direction}")
+                failed_symbols.append((symbol, direction))
+                bybit_errors.append(f"{ticker} (таймаут)")
+            except Exception as e:
+                logger.error(f"[CLOSE_ALL] Error closing {symbol} {direction}: {e}")
+                failed_symbols.append((symbol, direction))
+                bybit_errors.append(f"{ticker}")
     
-    # Убираем позиции которые не удалось закрыть на Bybit
+    # Filter positions that failed to close on Bybit
     positions_to_close = user_positions[:]
     if failed_symbols and hedging_enabled:
         positions_to_close = [p for p in user_positions if (p['symbol'], p['direction']) not in failed_symbols]
+        
         if not positions_to_close:
-            await edit_or_send(
-                query,
-                f"<b>❌ Ошибка закрытия</b>\n\n"
-                f"Не удалось закрыть позиции на Bybit.\n"
-                f"Попробуйте ещё раз.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
-            )
+            error_list = ", ".join(bybit_errors[:5])  # Show max 5 failed symbols
+            if len(bybit_errors) > 5:
+                error_list += f" и ещё {len(bybit_errors) - 5}"
+            
+            try:
+                await edit_or_send(
+                    query,
+                    f"<b>❌ Ошибка закрытия</b>\n\n"
+                    f"Не удалось закрыть: {error_list}\n\n"
+                    f"Попробуйте ещё раз или закройте вручную.",
+                    InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 Повторить", callback_data="close_all")],
+                        [InlineKeyboardButton("📊 Сделки", callback_data="trades")]
+                    ])
+                )
+            except Exception:
+                pass
             return
     
-    # === ЗАКРЫВАЕМ ВСЕ ПОЗИЦИИ В БД ===
+    # === CLOSE ALL POSITIONS IN DB ===
     total_pnl = 0
     total_returned = 0
     closed_count = 0
     winners = 0
     losers = 0
+    close_errors = 0
     
     for pos in positions_to_close:
-        # Получаем реальную цену закрытия если есть
-        close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
-        
-        # Пересчитываем PnL с реальной ценой
-        if pos['direction'] == "LONG":
-            pnl_percent = (close_price - pos['entry']) / pos['entry']
-        else:
-            pnl_percent = (pos['entry'] - close_price) / pos['entry']
-        pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
-        
-        returned = pos['amount'] + pnl
-        
-        # Обновляем статистику
-        total_pnl += pnl
-        total_returned += returned
-        closed_count += 1
-        
-        if pnl > 0:
-            winners += 1
-        elif pnl < 0:
-            losers += 1
-        
-        # Закрываем в БД с реальной ценой
-        db_close_position(pos['id'], close_price, pnl, 'CLOSE_ALL')
-        # Явно удаляем из кэша по ID
-        pos_id_to_remove = pos['id']
-        current_positions = positions_cache.get(user_id, [])
-        if current_positions:
-            positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
+        try:
+            # Get real close price if available
+            close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
+            
+            # Calculate PnL with real price
+            if pos['direction'] == "LONG":
+                pnl_percent = (close_price - pos['entry']) / pos['entry']
+            else:
+                pnl_percent = (pos['entry'] - close_price) / pos['entry']
+            pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
+            
+            returned = pos['amount'] + pnl
+            
+            # Update stats
+            total_pnl += pnl
+            total_returned += returned
+            closed_count += 1
+            
+            if pnl > 0:
+                winners += 1
+            elif pnl < 0:
+                losers += 1
+            
+            # Close in DB with real price
+            db_close_position(pos['id'], close_price, pnl, 'CLOSE_ALL')
+            
+        except Exception as e:
+            logger.error(f"[CLOSE_ALL] Error closing position {pos.get('id')}: {e}")
+            close_errors += 1
     
-    # Обновляем баланс (с локом для защиты от race conditions)
-    async with get_user_lock(user_id):
-        user = get_user(user_id)  # Re-read with lock
-        user['balance'] = sanitize_balance(user['balance'] + total_returned)
-        user['total_profit'] += total_pnl
-        save_user(user_id)
+    # Update cache once after all closures
+    try:
+        positions_cache.set(user_id, db_get_positions(user_id))
+    except Exception:
+        pass
     
-    # Формируем итоговое сообщение
+    # Update balance with lock for race condition protection
+    try:
+        async with get_user_lock(user_id):
+            user = get_user(user_id)  # Re-read with lock
+            user['balance'] = sanitize_balance(user['balance'] + total_returned)
+            user['total_profit'] += total_pnl
+            save_user(user_id)
+    except Exception as e:
+        logger.error(f"[CLOSE_ALL] Error updating balance: {e}")
+    
+    # Build result message
     pnl_abs = abs(total_pnl)
     
+    # Add warning about failed positions if any
+    warning_text = ""
+    if failed_symbols and hedging_enabled:
+        failed_count = len(failed_symbols)
+        warning_text = f"\n⚠️ {failed_count} позиций не закрыто на Bybit\n"
+    if close_errors > 0:
+        warning_text += f"\n⚠️ {close_errors} ошибок при закрытии\n"
+    
     if total_pnl > 0:
-        text = f"""<b>📊 Все сделки закрыты</b>
+        text = f"""<b>📊 Сделки закрыты</b>
 
 Закрыто: {closed_count}
 ✅ {winners} прибыльных
-❌ {losers} убыточных
+❌ {losers} убыточных{warning_text}
 
 Итого: <b>+${pnl_abs:.2f}</b>
 Хороший сет.
 
 💰 Баланс: ${user['balance']:.2f}"""
     elif total_pnl < 0:
-        text = f"""<b>📊 Все сделки закрыты</b>
+        text = f"""<b>📊 Сделки закрыты</b>
 
 Закрыто: {closed_count}
 ✅ {winners} прибыльных
-❌ {losers} убыточных
+❌ {losers} убыточных{warning_text}
 
 Итого: <b>-${pnl_abs:.2f}</b>
 Следующий будет лучше.
 
 💰 Баланс: ${user['balance']:.2f}"""
     else:
-        text = f"""<b>📊 Все сделки закрыты</b>
+        text = f"""<b>📊 Сделки закрыты</b>
 
-Закрыто: {closed_count}
+Закрыто: {closed_count}{warning_text}
 
 Итого: $0.00
 Капитал сохранён.
@@ -4167,7 +4209,11 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 💰 Баланс: ${user['balance']:.2f}"""
     
     keyboard = [[InlineKeyboardButton("📊 Новые сигналы", callback_data="back")]]
-    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
+    
+    try:
+        await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
+    except Exception:
+        pass
     
     logger.info(f"[CLOSE_ALL] User {user_id}: closed {closed_count} positions, total PnL: ${total_pnl:.2f}")
 
@@ -4177,79 +4223,66 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     try:
         query = update.callback_query
         if not query:
-            logger.warning("[TRADES] No callback_query in update")
             return
         
         user_id = update.effective_user.id if update.effective_user else None
         if not user_id:
-            logger.warning("[TRADES] No user_id in update")
             return
         
-        logger.info(f"[TRADES] User {user_id}")
-        
+        # Answer callback immediately to prevent Telegram timeout
         try:
             await query.answer()
-        except Exception as e:
-            logger.warning(f"[TRADES] Error answering callback: {e}")
+        except Exception:
+            pass
         
         user = get_user(user_id)
         
-        # Загружаем позиции из кэша сразу (быстрый ответ пользователю)
-        logger.info(f"[TRADES] Getting positions for user {user_id}")
+        # Load positions from cache first (fast response)
         try:
             user_positions = get_positions(user_id)
-            logger.info(f"[TRADES] Got {len(user_positions)} positions from cache")
         except Exception as e:
-            logger.error(f"[TRADES] Error getting positions: {e}", exc_info=True)
+            logger.error(f"[TRADES] Error getting positions: {e}")
             user_positions = []
         
-        # Запускаем синхронизацию в фоне (не блокируем ответ пользователю)
+        # Background sync - truly non-blocking with fire-and-forget
         async def background_sync():
-            """Синхронизация в фоне - не блокирует ответ пользователю"""
+            """Background sync - doesn't block user response"""
             try:
-                logger.info(f"[TRADES] Starting background sync for user {user_id}")
                 synced = await asyncio.wait_for(sync_bybit_positions(user_id, context), timeout=3.0)
                 if synced > 0:
-                    logger.info(f"[TRADES] Background sync completed: {synced} positions synced")
-                    # Обновляем кэш после синхронизации
-                    try:
-                        positions_cache.set(user_id, db_get_positions(user_id))
-                    except Exception as e:
-                        logger.error(f"[TRADES] Error updating cache after sync: {e}")
-            except asyncio.TimeoutError:
-                logger.debug(f"[TRADES] Background sync timeout after 3s (non-critical)")
-            except Exception as e:
-                logger.warning(f"[TRADES] Background sync error (non-critical): {e}")
+                    positions_cache.set(user_id, db_get_positions(user_id))
+            except (asyncio.TimeoutError, Exception):
+                pass  # Non-critical, silently ignore
         
-        # Запускаем синхронизацию в фоне (не ждём её завершения)
+        # Fire and forget - don't await
         asyncio.create_task(background_sync())
         
-        # Удаляем позиции с amount=0 (полностью закрыты частичными тейками)
+        # Clean up zero-amount positions in background (don't block UI)
         zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
-        for zero_pos in zero_amount:
-            realized_pnl = zero_pos.get('realized_pnl', 0) or 0
-            db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
-            logger.info(f"[TRADES] Auto-removed zero-amount position {zero_pos['id']}")
+        if zero_amount:
+            async def cleanup_zero_positions():
+                for zero_pos in zero_amount:
+                    try:
+                        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+                        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+                    except Exception:
+                        pass
+            asyncio.create_task(cleanup_zero_positions())
         
-        # Фильтруем список
+        # Filter positions for display
         user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
         
-        # Обновляем кэш если были удаления
+        # Update cache if we filtered any
         if zero_amount:
             positions_cache.set(user_id, user_positions)
         
-        # Логируем количество позиций
-        logger.info(f"[TRADES] User {user_id}: {len(user_positions)} positions from get_positions")
-        
-        # Статистика побед - по ВСЕМ сделкам, не только последним 20
+        # Get stats (now cached with 30s TTL - fast)
         stats = db_get_user_stats(user_id)
         wins = stats['wins']
         total_trades = stats['total']
         winrate = stats['winrate']
-        total_profit = stats['total_pnl']  # Используем сумму PnL из истории вместо users.total_profit
+        total_profit = stats['total_pnl']
         profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
-        
-        logger.info(f"[TRADES] User {user_id}: stats - wins={wins}, total={total_trades}, winrate={winrate}%")
         
         if not user_positions:
             # Показываем статистику даже когда нет позиций
@@ -4267,27 +4300,20 @@ Winrate: <b>{winrate}%</b>
             keyboard = [
                 [InlineKeyboardButton("🔙 Назад", callback_data="back"), InlineKeyboardButton("🔄 Обновить", callback_data="trades")]
             ]
-            logger.info(f"[TRADES] Attempting to send 'no positions' message to user {user_id}")
             try:
                 await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
-                logger.info(f"[TRADES] User {user_id}: показано сообщение 'Нет открытых позиций'")
-            except BadRequest as e:
-                logger.debug(f"[TRADES] BadRequest (message unchanged): {e}")
+            except BadRequest:
+                pass  # Message unchanged - normal
             except Exception as e:
-                logger.error(f"[TRADES] Error sending 'no positions' message: {e}", exc_info=True)
-                trade_logger.log_error(f"Error sending trades message: {e}", error=e, user_id=user_id)
-                # Fallback - пытаемся отправить новое сообщение
+                logger.error(f"[TRADES] Error sending message: {e}")
                 try:
-                    logger.info(f"[TRADES] Trying fallback send for user {user_id}")
                     await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-                    logger.info(f"[TRADES] Fallback send successful for user {user_id}")
-                except Exception as e2:
-                    logger.error(f"[TRADES] Fallback also failed: {e2}", exc_info=True)
+                except Exception:
+                    pass
             return
         
-        # Стакаем одинаковые позиции для отображения
+        # Stack identical positions for display
         stacked = stack_positions(user_positions)
-        logger.info(f"[TRADES] User {user_id}: {len(stacked)} stacked positions after grouping")
         
         text = "<b>💼 Позиции</b>\n\n"
         
@@ -4360,29 +4386,21 @@ Winrate: <b>{winrate}%</b>
         keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="trades")])
         keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back")])
         
-        logger.info(f"[TRADES] Attempting to send trades list to user {user_id} with {len(stacked)} positions")
         try:
             await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
-            logger.info(f"[TRADES] User {user_id}: показано {len(stacked)} позиций")
-        except BadRequest as e:
-            logger.debug(f"[TRADES] BadRequest (message unchanged): {e}")
+        except BadRequest:
+            pass  # Message unchanged - normal
         except Exception as e:
-            logger.error(f"[TRADES] Error sending trades list: {e}", exc_info=True)
-            trade_logger.log_error(f"Error sending trades list: {e}", error=e, user_id=user_id)
-            # Fallback - пытаемся отправить новое сообщение
+            logger.error(f"[TRADES] Error sending trades: {e}")
             try:
-                logger.info(f"[TRADES] Trying fallback send for user {user_id}")
                 await query.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
-                logger.info(f"[TRADES] User {user_id}: отправлено fallback сообщение с {len(stacked)} позициями")
-            except Exception as e2:
-                logger.error(f"[TRADES] Fallback also failed: {e2}", exc_info=True)
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"[TRADES] Critical error: {e}", exc_info=True)
-        trade_logger.log_error(f"Critical error in show_trades: {e}", error=e, user_id=update.effective_user.id if update.effective_user else None)
-        # Пытаемся ответить пользователю
         try:
             if update.callback_query:
-                await update.callback_query.answer("❌ Ошибка загрузки сделок", show_alert=True)
+                await update.callback_query.answer("❌ Ошибка загрузки", show_alert=True)
         except:
             pass
 
@@ -8570,6 +8588,14 @@ def main() -> None:
     logger.info("=" * 50)
     logger.info("BOT STARTED SUCCESSFULLY")
     logger.info("=" * 50)
+    
+    # Start dashboard in background thread
+    try:
+        init_dashboard(run_sql, USE_POSTGRES)
+        dashboard_thread = start_dashboard_thread()
+        logger.info(f"[CONFIG] Dashboard: Running on port {os.getenv('DASHBOARD_PORT', 5000)}")
+    except Exception as e:
+        logger.warning(f"[DASHBOARD] Failed to start: {e}")
     
     # Log startup to trade logger
     trade_logger.log_system("Bot started", data={

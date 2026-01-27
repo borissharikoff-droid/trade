@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #21262d;
+        }
+        
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #238636;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 16px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            padding: 20px;
+        }
+        
+        .card-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #8b949e;
+            margin-bottom: 8px;
+        }
+        
+        .card-value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+        
+        .card-value.positive {
+            color: #238636;
+        }
+        
+        .card-value.negative {
+            color: #da3633;
+        }
+        
+        .card-value.neutral {
+            color: #58a6ff;
+        }
+        
+        .section {
+            margin-bottom: 30px;
+        }
+        
+        .section-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #f0f6fc;
+        }
+        
+        .reasons-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
+        
+        .reasons-list {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            padding: 16px;
+        }
+        
+        .reasons-list h3 {
+            font-size: 0.875rem;
+            font-weight: 600;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .reasons-list h3.wins {
+            color: #238636;
+        }
+        
+        .reasons-list h3.losses {
+            color: #da3633;
+        }
+        
+        .reason-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #21262d;
+            font-size: 0.875rem;
+        }
+        
+        .reason-item:last-child {
+            border-bottom: none;
+        }
+        
+        .reason-name {
+            color: #c9d1d9;
+        }
+        
+        .reason-count {
+            color: #8b949e;
+            font-weight: 500;
+        }
+        
+        .trades-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        
+        .trades-table th,
+        .trades-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #21262d;
+            font-size: 0.875rem;
+        }
+        
+        .trades-table th {
+            background: #0d1117;
+            color: #8b949e;
+            font-weight: 500;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+        }
+        
+        .trades-table tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .badge-long {
+            background: rgba(35, 134, 54, 0.2);
+            color: #238636;
+        }
+        
+        .badge-short {
+            background: rgba(218, 54, 51, 0.2);
+            color: #da3633;
+        }
+        
+        .pnl-positive {
+            color: #238636;
+        }
+        
+        .pnl-negative {
+            color: #da3633;
+        }
+        
+        .no-data {
+            color: #8b949e;
+            font-style: italic;
+            padding: 20px;
+            text-align: center;
+        }
+        
+        .updated {
+            font-size: 0.75rem;
+            color: #8b949e;
+        }
+        
+        @media (max-width: 768px) {
+            .reasons-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .trades-table {
+                font-size: 0.75rem;
+            }
+            
+            .trades-table th,
+            .trades-table td {
+                padding: 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Trading Bot</h1>
+            <div class="status">
+                <span class="status-dot"></span>
+                <span>Live</span>
+                <span class="updated" id="lastUpdate">-</span>
+            </div>
+        </header>
+        
+        <div class="grid">
+            <div class="card">
+                <div class="card-label">Open Deals</div>
+                <div class="card-value neutral" id="openDeals">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Win Rate</div>
+                <div class="card-value" id="winRate">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Profitable</div>
+                <div class="card-value positive" id="profitable">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Losing</div>
+                <div class="card-value negative" id="losing">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Total PnL</div>
+                <div class="card-value" id="totalPnl">-</div>
+            </div>
+            <div class="card">
+                <div class="card-label">Total Closed</div>
+                <div class="card-value" id="totalClosed">-</div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Reasons Analysis</h2>
+            <div class="reasons-grid">
+                <div class="reasons-list">
+                    <h3 class="wins">Winning Reasons</h3>
+                    <div id="winReasons">
+                        <div class="no-data">No data</div>
+                    </div>
+                </div>
+                <div class="reasons-list">
+                    <h3 class="losses">Losing Reasons</h3>
+                    <div id="lossReasons">
+                        <div class="no-data">No data</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">Recent Trades</h2>
+            <table class="trades-table">
+                <thead>
+                    <tr>
+                        <th>Symbol</th>
+                        <th>Direction</th>
+                        <th>PnL</th>
+                        <th>Reason</th>
+                        <th>Time</th>
+                    </tr>
+                </thead>
+                <tbody id="tradesBody">
+                    <tr>
+                        <td colspan="5" class="no-data">Loading...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <script>
+        function formatPnl(value) {
+            const num = parseFloat(value);
+            const sign = num >= 0 ? '+' : '';
+            return sign + '$' + num.toFixed(2);
+        }
+        
+        function formatTime(isoString) {
+            if (!isoString) return '-';
+            const date = new Date(isoString);
+            return date.toLocaleString();
+        }
+        
+        function renderReasons(reasons, containerId) {
+            const container = document.getElementById(containerId);
+            if (!reasons || Object.keys(reasons).length === 0) {
+                container.innerHTML = '<div class="no-data">No data</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const [reason, count] of Object.entries(reasons)) {
+                html += `
+                    <div class="reason-item">
+                        <span class="reason-name">${reason || 'Unknown'}</span>
+                        <span class="reason-count">${count}</span>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderTrades(trades) {
+            const tbody = document.getElementById('tradesBody');
+            if (!trades || trades.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="no-data">No trades yet</td></tr>';
+                return;
+            }
+            
+            let html = '';
+            for (const trade of trades) {
+                const pnl = parseFloat(trade.pnl || 0);
+                const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                const dirClass = trade.direction === 'LONG' ? 'badge-long' : 'badge-short';
+                const symbol = trade.symbol ? trade.symbol.split('/')[0] : '-';
+                
+                html += `
+                    <tr>
+                        <td>${symbol}</td>
+                        <td><span class="badge ${dirClass}">${trade.direction || '-'}</span></td>
+                        <td class="${pnlClass}">${formatPnl(pnl)}</td>
+                        <td>${trade.reason || '-'}</td>
+                        <td>${formatTime(trade.closed_at)}</td>
+                    </tr>
+                `;
+            }
+            tbody.innerHTML = html;
+        }
+        
+        async function fetchStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const data = await response.json();
+                
+                document.getElementById('openDeals').textContent = data.open_deals;
+                document.getElementById('winRate').textContent = data.win_rate + '%';
+                document.getElementById('profitable').textContent = data.profitable;
+                document.getElementById('losing').textContent = data.losing;
+                document.getElementById('totalClosed').textContent = data.total_closed;
+                
+                const pnl = parseFloat(data.total_pnl || 0);
+                const pnlEl = document.getElementById('totalPnl');
+                pnlEl.textContent = formatPnl(pnl);
+                pnlEl.className = 'card-value ' + (pnl >= 0 ? 'positive' : 'negative');
+                
+                const winRateEl = document.getElementById('winRate');
+                const wr = parseFloat(data.win_rate || 0);
+                winRateEl.className = 'card-value ' + (wr >= 50 ? 'positive' : wr > 0 ? 'negative' : '');
+                
+                renderReasons(data.win_reasons, 'winReasons');
+                renderReasons(data.loss_reasons, 'lossReasons');
+                
+                document.getElementById('lastUpdate').textContent = 
+                    new Date().toLocaleTimeString();
+                    
+            } catch (error) {
+                console.error('Error fetching stats:', error);
+            }
+        }
+        
+        async function fetchTrades() {
+            try {
+                const response = await fetch('/api/trades');
+                const data = await response.json();
+                renderTrades(data.trades);
+            } catch (error) {
+                console.error('Error fetching trades:', error);
+            }
+        }
+        
+        // Initial fetch
+        fetchStats();
+        fetchTrades();
+        
+        // Auto-refresh every 3 seconds
+        setInterval(fetchStats, 3000);
+        setInterval(fetchTrades, 5000);
+    </script>
+</body>
+</html>
