@@ -3904,14 +3904,14 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.info(f"[CLOSE_SYMBOL] Removed zero-amount position {zero_pos['id']}")
     
     if not positions_to_close:
-        await query.edit_message_text(
+        await edit_or_send(
+            query,
             f"<b>📭 Нет открытых позиций</b>\n\nПо {ticker}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]]),
-            parse_mode="HTML"
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
         )
         return
     
-    await query.edit_message_text(f"<b>⏳ Закрываем {ticker}...</b>", parse_mode="HTML")
+    await edit_or_send(query, f"<b>⏳ Закрываем {ticker}...</b>", None)
     
     # СНАЧАЛА закрываем на Bybit
     hedging_enabled = await is_hedging_enabled()
@@ -3935,12 +3935,12 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
     if failed_positions and hedging_enabled:
         positions_to_close = [p for p in positions_to_close if p not in failed_positions]
         if not positions_to_close:
-            await query.edit_message_text(
+            await edit_or_send(
+                query,
                 f"<b>❌ Ошибка закрытия</b>\n\n"
                 f"Не удалось закрыть позиции на Bybit.\n"
                 f"Попробуйте ещё раз.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
             )
             return
     
@@ -4015,14 +4015,14 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
     
     if not user_positions:
-        await query.edit_message_text(
+        await edit_or_send(
+            query,
             "<b>💼 Нет позиций</b>\n\nНет открытых сделок",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]]),
-            parse_mode="HTML"
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="back")]])
         )
         return
     
-    await query.edit_message_text("<b>⏳ Закрываем позиции...</b>", parse_mode="HTML")
+    await edit_or_send(query, "<b>⏳ Закрываем позиции...</b>", None)
     
     # === ГРУППИРУЕМ ПОЗИЦИИ ПО СИМВОЛУ ДЛЯ ЗАКРЫТИЯ НА BYBIT ===
     # Bybit хранит одну позицию на символ, поэтому закрываем один раз за группу
@@ -4072,12 +4072,12 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if failed_symbols and hedging_enabled:
         positions_to_close = [p for p in user_positions if (p['symbol'], p['direction']) not in failed_symbols]
         if not positions_to_close:
-            await query.edit_message_text(
+            await edit_or_send(
+                query,
                 f"<b>❌ Ошибка закрытия</b>\n\n"
                 f"Не удалось закрыть позиции на Bybit.\n"
                 f"Попробуйте ещё раз.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
             )
             return
     
@@ -5274,7 +5274,7 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
         
         # Показываем статус
-        await query.edit_message_text(f"<b>⏳ Закрываем {ticker}...</b>", parse_mode="HTML")
+        await edit_or_send(query, f"<b>⏳ Закрываем {ticker}...</b>", None)
         
         # === ХЕДЖИРОВАНИЕ: СНАЧАЛА закрываем на Bybit ===
         close_price = pos.get('current') or pos.get('entry', 0)
@@ -5310,22 +5310,22 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     else:
                         # Bybit не закрыл - НЕ закрываем в боте
                         logger.error(f"[HEDGE] ❌ Failed to close on Bybit - position kept open")
-                        await query.edit_message_text(
+                        await edit_or_send(
+                            query,
                             f"<b>❌ Ошибка закрытия</b>\n\n"
                             f"Не удалось закрыть позицию на Bybit.\n"
                             f"Позиция сохранена. Попробуйте ещё раз.",
-                            parse_mode="HTML",
-                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                            InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
                         )
                         return
                 except Exception as e:
                     logger.error(f"[HEDGE] Error closing position {pos_id} on Bybit: {e}")
-                    await query.edit_message_text(
+                    await edit_or_send(
+                        query,
                         f"<b>❌ Ошибка Bybit</b>\n\n"
                         f"Ошибка при закрытии на Bybit: {str(e)[:50]}\n"
                         f"Позиция сохранена.",
-                        parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                        InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
                     )
                     return
         
@@ -5396,10 +5396,10 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         logger.error(f"[CLOSE] Critical error closing position {pos_id} for user {user_id}: {e}", exc_info=True)
         try:
-            await query.edit_message_text(
+            await edit_or_send(
+                query,
                 "<b>❌ Ошибка</b>\n\nНе удалось закрыть позицию. Попробуйте позже.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
             )
         except:
             pass
