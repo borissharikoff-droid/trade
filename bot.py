@@ -4791,31 +4791,42 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 
                 await add_commission(commission, user_id=auto_user_id)
                 
-                # Создаём позицию
-                position = {
-                    'symbol': symbol,
-                    'direction': direction,
-                    'entry': float(entry),
-                    'current': float(entry),
-                    'amount': float(auto_bet),
-                    'tp': float(tp1),
-                    'tp1': float(tp1),
-                    'tp2': float(tp2),
-                    'tp3': float(tp3),
-                    'tp1_hit': False,
-                    'tp2_hit': False,
-                    'sl': float(sl),
-                    'commission': float(commission),
-                    'pnl': float(-commission),
-                    'bybit_qty': bybit_qty if auto_user_id == AUTO_TRADE_USER_ID else 0,
-                    'original_amount': float(auto_bet)
-                }
-                
-                pos_id = db_add_position(auto_user_id, position)
-                position['id'] = pos_id
-                
-                # Обновляем кэш
-                positions_cache.set(auto_user_id, db_get_positions(auto_user_id))
+                # Создаём позицию С ЗАЩИТОЙ ОТ ПОТЕРИ ДЕНЕГ
+                try:
+                    position = {
+                        'symbol': symbol,
+                        'direction': direction,
+                        'entry': float(entry),
+                        'current': float(entry),
+                        'amount': float(auto_bet),
+                        'tp': float(tp1),
+                        'tp1': float(tp1),
+                        'tp2': float(tp2),
+                        'tp3': float(tp3),
+                        'tp1_hit': False,
+                        'tp2_hit': False,
+                        'sl': float(sl),
+                        'commission': float(commission),
+                        'pnl': float(-commission),
+                        'bybit_qty': bybit_qty if auto_user_id == AUTO_TRADE_USER_ID else 0,
+                        'original_amount': float(auto_bet)
+                    }
+                    
+                    pos_id = db_add_position(auto_user_id, position)
+                    position['id'] = pos_id
+                    
+                    # Обновляем кэш
+                    positions_cache.set(auto_user_id, db_get_positions(auto_user_id))
+                except Exception as pos_error:
+                    # КРИТИЧЕСКАЯ ОШИБКА: позиция не создалась, возвращаем деньги
+                    logger.critical(f"[AUTO_TRADE] ❌ CRITICAL: Position creation failed for user {auto_user_id}, restoring ${auto_bet}! Error: {pos_error}")
+                    async with get_user_lock(auto_user_id):
+                        auto_user = get_user(auto_user_id)
+                        auto_user['balance'] += auto_bet  # Возвращаем деньги
+                        auto_user['balance'] = sanitize_balance(auto_user['balance'])
+                        save_user(auto_user_id)
+                    trade_logger.log_error(f"Auto-trade position creation failed, restored ${auto_bet} to user {auto_user_id}", error=pos_error, user_id=auto_user_id)
+                    continue  # Пропускаем этого юзера
                 
                 # Отправляем уведомление
                 auto_msg = f"""<b>🤖 АВТО-ТРЕЙД</b>
@@ -5132,90 +5143,108 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Добавляем комиссию в накопитель (авто-вывод) с учетом рефералов
     await add_commission(commission, user_id=user_id)
 
-    # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
-    existing = None
-    for p in user_positions:
-        if p['symbol'] == symbol and p['direction'] == direction:
-            existing = p
-            break
+    # === СОЗДАЁМ ПОЗИЦИЮ С ЗАЩИТОЙ ОТ ПОТЕРИ ДЕНЕГ ===
+    try:
+        # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
+        existing = None
+        for p in user_positions:
+            if p['symbol'] == symbol and p['direction'] == direction:
+                existing = p
+                break
 
-    if existing:
-        # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
-        if hedging_enabled and existing.get('bybit_qty', 0) > 0:
-            bybit_pos = await hedger.get_position_data(symbol)
-            if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
-                existing = None  # Создаём новую позицию вместо усреднения
-        
-    if existing:
-        # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
-        old_amount = existing['amount']
-        new_amount = old_amount + amount
-        
-        # Weighted average entry price
-        new_entry = (existing['entry'] * old_amount + entry * amount) / new_amount
-        
-        # Добавляем qty к существующему
-        new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
-        
-        # Обновляем позицию
-        existing['amount'] = new_amount
-        existing['entry'] = new_entry
-        existing['commission'] = existing.get('commission', 0) + commission
-        existing['bybit_qty'] = new_bybit_qty
-        # Пересчитываем PnL
-        existing['pnl'] = -existing['commission']
-        
-        # Обновляем в БД
-        db_update_position(existing['id'], 
-            amount=new_amount, 
-            entry=new_entry, 
-            commission=existing['commission'],
-            bybit_qty=new_bybit_qty,
-            pnl=existing['pnl']
+        if existing:
+            # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
+            if hedging_enabled and existing.get('bybit_qty', 0) > 0:
+                bybit_pos = await hedger.get_position_data(symbol)
+                if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                    logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
+                    existing = None  # Создаём новую позицию вместо усреднения
+            
+        if existing:
+            # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
+            old_amount = existing['amount']
+            new_amount = old_amount + amount
+            
+            # Weighted average entry price
+            new_entry = (existing['entry'] * old_amount + entry * amount) / new_amount
+            
+            # Добавляем qty к существующему
+            new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
+            
+            # Обновляем позицию
+            existing['amount'] = new_amount
+            existing['entry'] = new_entry
+            existing['commission'] = existing.get('commission', 0) + commission
+            existing['bybit_qty'] = new_bybit_qty
+            # Пересчитываем PnL
+            existing['pnl'] = -existing['commission']
+            
+            # Обновляем в БД
+            db_update_position(existing['id'], 
+                amount=new_amount, 
+                entry=new_entry, 
+                commission=existing['commission'],
+                bybit_qty=new_bybit_qty,
+                pnl=existing['pnl']
+            )
+            
+            pos_id = existing['id']
+            logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol}, total=${new_amount}")
+            
+            # Обновляем кэш после изменения позиции
+            positions_cache.set(user_id, db_get_positions(user_id))
+        else:
+            # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
+            position = {
+                'symbol': symbol,
+                'direction': direction,
+                'amount': amount,
+                'entry': entry,
+                'current': entry,
+                'sl': sl,
+                'tp': tp1,  # Основной TP = TP1
+                'tp1': tp1,
+                'tp2': tp2,
+                'tp3': tp3,
+                'tp1_hit': False,  # Флаги частичных тейков
+                'tp2_hit': False,
+                'pnl': -commission,
+                'commission': commission,
+                'bybit_qty': bybit_qty,
+                'realized_pnl': 0,  # Реализованный P&L для этой позиции
+                'original_amount': amount  # Для расчёта частичных закрытий
+            }
+
+            pos_id = db_add_position(user_id, position)
+            position['id'] = pos_id
+
+            # Обновляем кэш - загружаем все позиции из БД
+            positions_cache.set(user_id, db_get_positions(user_id))
+            
+            logger.info(f"[TRADE] ✅ Позиция открыта: User {user_id} {direction} {symbol} ${amount:.2f}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
+            
+            # Comprehensive logging
+            trade_logger.log_trade_open(
+                user_id=user_id, symbol=symbol, direction=direction,
+                amount=amount, entry=entry, sl=sl, tp=tp1,
+                bybit_qty=bybit_qty, position_id=pos_id
+            )
+    except Exception as e:
+        # КРИТИЧЕСКАЯ ОШИБКА: позиция не создалась, возвращаем деньги
+        logger.critical(f"[TRADE] ❌ CRITICAL: Position creation failed for user {user_id}, restoring ${amount}! Error: {e}")
+        async with get_user_lock(user_id):
+            user = get_user(user_id)
+            user['balance'] += amount  # Возвращаем деньги
+            user['balance'] = sanitize_balance(user['balance'])
+            save_user(user_id)
+        trade_logger.log_error(f"Position creation failed, restored ${amount} to user {user_id}", error=e, user_id=user_id)
+        await query.edit_message_text(
+            f"<b>❌ Ошибка создания позиции</b>\n\n"
+            f"Деньги возвращены на баланс.\n"
+            f"Попробуйте ещё раз.",
+            parse_mode="HTML"
         )
-        
-        pos_id = existing['id']
-        logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol}, total=${new_amount}")
-        
-        # Обновляем кэш после изменения позиции
-        positions_cache.set(user_id, db_get_positions(user_id))
-    else:
-        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
-        position = {
-            'symbol': symbol,
-            'direction': direction,
-            'amount': amount,
-            'entry': entry,
-            'current': entry,
-            'sl': sl,
-            'tp': tp1,  # Основной TP = TP1
-            'tp1': tp1,
-            'tp2': tp2,
-            'tp3': tp3,
-            'tp1_hit': False,  # Флаги частичных тейков
-            'tp2_hit': False,
-            'pnl': -commission,
-            'commission': commission,
-            'bybit_qty': bybit_qty,
-            'realized_pnl': 0,  # Реализованный P&L для этой позиции
-            'original_amount': amount  # Для расчёта частичных закрытий
-        }
-
-        pos_id = db_add_position(user_id, position)
-        position['id'] = pos_id
-
-        # Обновляем кэш - загружаем все позиции из БД
-        positions_cache.set(user_id, db_get_positions(user_id))
-        
-        logger.info(f"[TRADE] ✅ Позиция открыта: User {user_id} {direction} {symbol} ${amount:.2f}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
-        
-        # Comprehensive logging
-        trade_logger.log_trade_open(
-            user_id=user_id, symbol=symbol, direction=direction,
-            amount=amount, entry=entry, sl=sl, tp=tp1,
-            bybit_qty=bybit_qty, position_id=pos_id
-        )
+        return
     
     dir_text = "LONG" if direction == "LONG" else "SHORT"
     tp1_percent = abs(tp1 - entry) / entry * 100
@@ -5973,79 +6002,97 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     # Добавляем комиссию в накопитель (авто-вывод) с учетом рефералов
     await add_commission(commission, user_id=user_id)
 
-    # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
-    existing = None
-    for p in user_positions:
-        if p['symbol'] == symbol and p['direction'] == direction:
-            existing = p
-            break
+    # === СОЗДАЁМ ПОЗИЦИЮ С ЗАЩИТОЙ ОТ ПОТЕРИ ДЕНЕГ ===
+    try:
+        # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
+        existing = None
+        for p in user_positions:
+            if p['symbol'] == symbol and p['direction'] == direction:
+                existing = p
+                break
 
-    if existing:
-        # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
-        if hedging_enabled and existing.get('bybit_qty', 0) > 0:
-            bybit_pos = await hedger.get_position_data(symbol)
-            if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
-                existing = None  # Создаём новую позицию вместо усреднения
-        
-    if existing:
-        # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
-        old_amount = existing['amount']
-        new_amount = old_amount + amount
-        
-        # Weighted average entry price
-        new_entry = (existing['entry'] * old_amount + entry * amount) / new_amount
-        
-        # Добавляем qty к существующему
-        new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
-        
-        # Обновляем позицию
-        existing['amount'] = new_amount
-        existing['entry'] = new_entry
-        existing['commission'] = existing.get('commission', 0) + commission
-        existing['bybit_qty'] = new_bybit_qty
-        existing['pnl'] = -existing['commission']
-        
-        # Обновляем в БД
-        db_update_position(existing['id'], 
-            amount=new_amount, 
-            entry=new_entry, 
-            commission=existing['commission'],
-            bybit_qty=new_bybit_qty,
-            pnl=existing['pnl']
+        if existing:
+            # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
+            if hedging_enabled and existing.get('bybit_qty', 0) > 0:
+                bybit_pos = await hedger.get_position_data(symbol)
+                if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                    logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
+                    existing = None  # Создаём новую позицию вместо усреднения
+            
+        if existing:
+            # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
+            old_amount = existing['amount']
+            new_amount = old_amount + amount
+            
+            # Weighted average entry price
+            new_entry = (existing['entry'] * old_amount + entry * amount) / new_amount
+            
+            # Добавляем qty к существующему
+            new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
+            
+            # Обновляем позицию
+            existing['amount'] = new_amount
+            existing['entry'] = new_entry
+            existing['commission'] = existing.get('commission', 0) + commission
+            existing['bybit_qty'] = new_bybit_qty
+            existing['pnl'] = -existing['commission']
+            
+            # Обновляем в БД
+            db_update_position(existing['id'], 
+                amount=new_amount, 
+                entry=new_entry, 
+                commission=existing['commission'],
+                bybit_qty=new_bybit_qty,
+                pnl=existing['pnl']
+            )
+            
+            pos_id = existing['id']
+            logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol} (custom), total=${new_amount}")
+        else:
+            # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
+            position = {
+                'symbol': symbol,
+                'direction': direction,
+                'amount': amount,
+                'entry': entry,
+                'current': entry,
+                'sl': sl,
+                'tp': tp1,
+                'tp1': tp1,
+                'tp2': tp2,
+                'tp3': tp3,
+                'tp1_hit': False,
+                'tp2_hit': False,
+                'pnl': -commission,
+                'commission': commission,
+                'bybit_qty': bybit_qty,
+                'realized_pnl': 0,  # Реализованный P&L для этой позиции
+                'original_amount': amount
+            }
+
+            pos_id = db_add_position(user_id, position)
+            position['id'] = pos_id
+
+            # Обновляем кэш - загружаем все позиции из БД
+            positions_cache.set(user_id, db_get_positions(user_id))
+            
+            logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom), TP1/2/3={tp1:.4f}/{tp2:.4f}/{tp3:.4f}")
+    except Exception as e:
+        # КРИТИЧЕСКАЯ ОШИБКА: позиция не создалась, возвращаем деньги
+        logger.critical(f"[TRADE] ❌ CRITICAL: Position creation failed for user {user_id}, restoring ${amount}! Error: {e}")
+        async with get_user_lock(user_id):
+            user = get_user(user_id)
+            user['balance'] += amount  # Возвращаем деньги
+            user['balance'] = sanitize_balance(user['balance'])
+            save_user(user_id)
+        trade_logger.log_error(f"Position creation failed (custom), restored ${amount} to user {user_id}", error=e, user_id=user_id)
+        await update.message.reply_text(
+            f"<b>❌ Ошибка создания позиции</b>\n\n"
+            f"Деньги возвращены на баланс.\n"
+            f"Попробуйте ещё раз.",
+            parse_mode="HTML"
         )
-        
-        pos_id = existing['id']
-        logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol} (custom), total=${new_amount}")
-    else:
-        # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
-        position = {
-            'symbol': symbol,
-            'direction': direction,
-            'amount': amount,
-            'entry': entry,
-            'current': entry,
-            'sl': sl,
-            'tp': tp1,
-            'tp1': tp1,
-            'tp2': tp2,
-            'tp3': tp3,
-            'tp1_hit': False,
-            'tp2_hit': False,
-            'pnl': -commission,
-            'commission': commission,
-            'bybit_qty': bybit_qty,
-            'realized_pnl': 0,  # Реализованный P&L для этой позиции
-            'original_amount': amount
-        }
-
-        pos_id = db_add_position(user_id, position)
-        position['id'] = pos_id
-
-        # Обновляем кэш - загружаем все позиции из БД
-        positions_cache.set(user_id, db_get_positions(user_id))
-        
-        logger.info(f"[TRADE] User {user_id} opened {direction} {symbol} ${amount} x{LEVERAGE} (custom), TP1/2/3={tp1:.4f}/{tp2:.4f}/{tp3:.4f}")
+        return
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_text = "LONG" if direction == "LONG" else "SHORT"

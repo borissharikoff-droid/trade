@@ -386,6 +386,84 @@ def health():
     return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
 
 
+@app.route('/api/user/<int:user_id>')
+def api_user_info(user_id):
+    """Get detailed info about a specific user for diagnostics"""
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected'})
+    
+    try:
+        # User info
+        user = _run_sql("SELECT * FROM users WHERE user_id = ?", (user_id,), fetch="one")
+        
+        # Open positions
+        positions = _run_sql("SELECT * FROM positions WHERE user_id = ? ORDER BY opened_at DESC", (user_id,), fetch="all")
+        
+        # Trade history
+        history = _run_sql("SELECT * FROM history WHERE user_id = ? ORDER BY closed_at DESC LIMIT 50", (user_id,), fetch="all")
+        
+        # Stats
+        stats = _run_sql("""
+            SELECT 
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                SUM(pnl) as total_pnl,
+                SUM(amount) as total_volume
+            FROM history WHERE user_id = ?
+        """, (user_id,), fetch="one")
+        
+        # Recent logs for this user
+        user_logs = _run_sql("""
+            SELECT timestamp, category, level, message, symbol, direction, data
+            FROM trading_logs
+            WHERE user_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 100
+        """, (user_id,), fetch="all")
+        
+        return jsonify({
+            'user': user,
+            'balance': float(user.get('balance', 0)) if user else 0,
+            'total_deposit': float(user.get('total_deposit', 0)) if user else 0,
+            'total_profit': float(user.get('total_profit', 0)) if user else 0,
+            'open_positions': positions or [],
+            'open_positions_count': len(positions) if positions else 0,
+            'history': history or [],
+            'history_count': len(history) if history else 0,
+            'stats': stats,
+            'user_logs': user_logs or [],
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting user info: {e}")
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/audit')
+def api_audit():
+    """Get audit/balance change logs"""
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected'})
+    
+    try:
+        # Get balance-related logs
+        logs = _run_sql("""
+            SELECT timestamp, category, level, user_id, message, data
+            FROM trading_logs
+            WHERE category IN ('BALANCE', 'TRADE_OPEN', 'TRADE_CLOSE', 'DEPOSIT', 'WITHDRAWAL')
+            ORDER BY timestamp DESC
+            LIMIT 200
+        """, fetch="all")
+        
+        return jsonify({
+            'logs': logs or [],
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
 def run_dashboard(port: int = 5000, host: str = '0.0.0.0'):
     """Run Flask server (called in thread)"""
     # Disable Flask's default logging for cleaner output

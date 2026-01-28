@@ -508,6 +508,56 @@
                 <div class="no-data">Loading logs...</div>
             </div>
         </div>
+        
+        <!-- User Lookup Section -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">User Diagnostics</h2>
+                <div style="display: flex; gap: 8px;">
+                    <input type="text" id="userIdInput" placeholder="Enter User ID" 
+                        style="padding: 8px 12px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 0.875rem;">
+                    <button class="btn" onclick="lookupUser()">Lookup</button>
+                </div>
+            </div>
+            <div id="userInfoContainer" style="display: none;">
+                <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
+                    <div class="card">
+                        <div class="card-label">Balance</div>
+                        <div class="card-value small" id="userBalance">-</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Total Deposit</div>
+                        <div class="card-value small" id="userDeposit">-</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Total Profit</div>
+                        <div class="card-value small" id="userProfit">-</div>
+                    </div>
+                    <div class="card">
+                        <div class="card-label">Missing $</div>
+                        <div class="card-value small negative" id="userMissing">-</div>
+                    </div>
+                </div>
+                <div style="margin-top: 12px;">
+                    <h3 style="font-size: 0.875rem; margin-bottom: 8px; color: #8b949e;">Open Positions (<span id="userPosCount">0</span>)</h3>
+                    <div class="logs-container" id="userPositions" style="max-height: 150px;">
+                        <div class="no-data">No positions</div>
+                    </div>
+                </div>
+                <div style="margin-top: 12px;">
+                    <h3 style="font-size: 0.875rem; margin-bottom: 8px; color: #8b949e;">Trade History (<span id="userHistCount">0</span>)</h3>
+                    <div class="logs-container" id="userHistory" style="max-height: 200px;">
+                        <div class="no-data">No history</div>
+                    </div>
+                </div>
+                <div style="margin-top: 12px;">
+                    <h3 style="font-size: 0.875rem; margin-bottom: 8px; color: #8b949e;">User Activity Logs</h3>
+                    <div class="logs-container" id="userLogs" style="max-height: 200px;">
+                        <div class="no-data">No logs</div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
     
     <!-- Hidden Share Card -->
@@ -827,6 +877,118 @@
             // Hide card again
             shareCard.style.left = '-9999px';
         }
+        
+        async function lookupUser() {
+            const userId = document.getElementById('userIdInput').value.trim().replace(/\s/g, '');
+            if (!userId) {
+                alert('Enter a User ID');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/user/${userId}`);
+                const data = await response.json();
+                
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                    return;
+                }
+                
+                document.getElementById('userInfoContainer').style.display = 'block';
+                
+                // Balance info
+                const balance = parseFloat(data.balance || 0);
+                const deposit = parseFloat(data.total_deposit || 0);
+                const profit = parseFloat(data.total_profit || 0);
+                
+                document.getElementById('userBalance').textContent = '$' + balance.toFixed(2);
+                document.getElementById('userDeposit').textContent = '$' + deposit.toFixed(2);
+                
+                const profitEl = document.getElementById('userProfit');
+                profitEl.textContent = formatPnl(profit);
+                profitEl.className = 'card-value small ' + (profit >= 0 ? 'positive' : 'negative');
+                
+                // Calculate missing money
+                // Expected: deposit + profit = balance + open positions amount
+                const openPosAmount = (data.open_positions || []).reduce((sum, p) => sum + (p.amount || 0), 0);
+                const expected = deposit + profit;
+                const actual = balance + openPosAmount;
+                const missing = expected - actual;
+                
+                const missingEl = document.getElementById('userMissing');
+                missingEl.textContent = '$' + missing.toFixed(2);
+                missingEl.className = 'card-value small ' + (Math.abs(missing) > 0.1 ? 'negative' : 'positive');
+                
+                // Positions
+                document.getElementById('userPosCount').textContent = data.open_positions_count || 0;
+                const posContainer = document.getElementById('userPositions');
+                if (data.open_positions && data.open_positions.length > 0) {
+                    let html = '';
+                    for (const pos of data.open_positions) {
+                        const pnl = parseFloat(pos.pnl || 0);
+                        const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                        html += `<div class="log-entry">
+                            <span style="min-width: 80px; color: #58a6ff;">${pos.symbol?.split('/')[0] || '-'}</span>
+                            <span style="min-width: 60px;" class="badge ${pos.direction === 'LONG' ? 'badge-long' : 'badge-short'}">${pos.direction}</span>
+                            <span style="min-width: 80px;">$${(pos.amount || 0).toFixed(2)}</span>
+                            <span style="min-width: 100px;" class="${pnlClass}">${formatPnl(pnl)}</span>
+                            <span style="color: #8b949e;">${formatTime(pos.opened_at)}</span>
+                        </div>`;
+                    }
+                    posContainer.innerHTML = html;
+                } else {
+                    posContainer.innerHTML = '<div class="no-data">No open positions</div>';
+                }
+                
+                // History
+                document.getElementById('userHistCount').textContent = data.history_count || 0;
+                const histContainer = document.getElementById('userHistory');
+                if (data.history && data.history.length > 0) {
+                    let html = '';
+                    for (const trade of data.history) {
+                        const pnl = parseFloat(trade.pnl || 0);
+                        const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                        html += `<div class="log-entry">
+                            <span style="min-width: 80px; color: #58a6ff;">${trade.symbol?.split('/')[0] || '-'}</span>
+                            <span style="min-width: 60px;" class="badge ${trade.direction === 'LONG' ? 'badge-long' : 'badge-short'}">${trade.direction}</span>
+                            <span style="min-width: 80px;">$${(trade.amount || 0).toFixed(2)}</span>
+                            <span style="min-width: 100px;" class="${pnlClass}">${formatPnl(pnl)}</span>
+                            <span style="min-width: 80px; color: #d29922;">${trade.reason || '-'}</span>
+                            <span style="color: #8b949e;">${formatTime(trade.closed_at)}</span>
+                        </div>`;
+                    }
+                    histContainer.innerHTML = html;
+                } else {
+                    histContainer.innerHTML = '<div class="no-data">No trade history</div>';
+                }
+                
+                // User logs
+                const logsContainer = document.getElementById('userLogs');
+                if (data.user_logs && data.user_logs.length > 0) {
+                    let html = '';
+                    for (const log of data.user_logs) {
+                        html += `<div class="log-entry">
+                            <span class="log-time">${log.timestamp || '-'}</span>
+                            <span class="log-level ${log.level}">${log.level}</span>
+                            <span style="min-width: 80px; color: #58a6ff;">${log.symbol || '-'}</span>
+                            <span class="log-message">${log.message || '-'}</span>
+                        </div>`;
+                    }
+                    logsContainer.innerHTML = html;
+                } else {
+                    logsContainer.innerHTML = '<div class="no-data">No logs for this user</div>';
+                }
+                
+            } catch (error) {
+                console.error('Error looking up user:', error);
+                alert('Error: ' + error.message);
+            }
+        }
+        
+        // Allow Enter key to trigger lookup
+        document.getElementById('userIdInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') lookupUser();
+        });
         
         // Initial fetch
         refreshAll();
