@@ -2179,9 +2179,12 @@ def save_user(user_id: int):
     """Сохранить пользователя в БД (thread-safe)"""
     user = users_cache.get(user_id)
     if user:
+        balance = user['balance']
+        total_deposit = user['total_deposit']
+        
         db_update_user(user_id,
-            balance=user['balance'],
-            total_deposit=user['total_deposit'],
+            balance=balance,
+            total_deposit=total_deposit,
             total_profit=user['total_profit'],
             trading=user['trading'],
             auto_trade=user.get('auto_trade', False),
@@ -2190,6 +2193,8 @@ def save_user(user_id: int):
             auto_trade_today=user.get('auto_trade_today', 0),
             auto_trade_last_reset=user.get('auto_trade_last_reset')
         )
+        
+        logger.debug(f"[SAVE_USER] User {user_id} saved: balance=${balance:.2f}, deposit=${total_deposit:.2f}")
 
 def get_positions(user_id: int) -> List[Dict]:
     """Получить позиции (с кэшированием, thread-safe)
@@ -2941,13 +2946,17 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
             # Защита от race conditions при изменении баланса
             async with get_user_lock(user_id):
                 user = get_user(user_id)
-                # Первый депозит = когда total_deposit был 0 до этого депозита
-                old_total_deposit = user['total_deposit'] - amount
+                old_balance = user['balance']
+                old_total_deposit = user['total_deposit']
+                
+                # Первый депозит = когда total_deposit был 0 ДО этого депозита
                 is_first_deposit = old_total_deposit == 0.0
                 
                 user['balance'] = sanitize_balance(user['balance'] + amount)
                 user['total_deposit'] += amount
                 save_user(user_id)
+                
+                logger.info(f"[DEPOSIT] User {user_id}: ${old_balance:.2f} + ${amount:.2f} = ${user['balance']:.2f} (total_deposit: ${user['total_deposit']:.2f})")
             
             logger.info(f"[CRYPTO] User {user_id} deposited ${amount}")
             
@@ -3049,15 +3058,17 @@ async def check_pending_crypto_payments(context: ContextTypes.DEFAULT_TYPE) -> N
                             # Защита от race conditions при изменении баланса
                             async with get_user_lock(user_id):
                                 user = get_user(user_id)
-                                # Первый депозит = когда total_deposit был 0 до этого депозита
-                                old_total_deposit = user['total_deposit'] - amount
+                                old_balance = user['balance']
+                                old_total_deposit = user['total_deposit']
+                                
+                                # Первый депозит = когда total_deposit был 0 ДО этого депозита
                                 is_first_deposit = old_total_deposit == 0.0
                                 
                                 user['balance'] = sanitize_balance(user['balance'] + amount)
                                 user['total_deposit'] += amount
                                 save_user(user_id)
                             
-                            logger.info(f"[CRYPTO_AUTO] User {user_id} deposited ${amount}")
+                            logger.info(f"[CRYPTO_AUTO] User {user_id}: ${old_balance:.2f} + ${amount:.2f} = ${user['balance']:.2f}")
                             
                             # Многоуровневые реферальные бонусы при первом депозите
                             if is_first_deposit:
@@ -3683,23 +3694,12 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
 
             # Handle orphan positions (no bybit_qty)
+            # ВАЖНО: Не закрываем orphan позиции автоматически!
+            # Они нормально работают без Bybit (симуляция на основе цен Binance)
+            # Закрытие orphan было причиной потери баланса для обычных пользователей
             if expected_qty == 0:
-                returned = pos['amount']
-                
-                async with get_user_lock(user_id):
-                    user = get_user(user_id)
-                    user['balance'] = sanitize_balance(user['balance'] + returned)
-                    save_user(user_id)
-                
-                db_close_position(pos['id'], pos.get('entry', 0), 0, 'ORPHAN_SYNC')
-                closed_pos_ids.append(pos['id'])
-                synced += 1
-                
-                # Non-blocking notification
-                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                asyncio.create_task(_send_sync_notification(
-                    context, user_id, ticker, 0, user['balance'], is_orphan=True, returned=returned
-                ))
+                # Пропускаем - позиция будет обновляться и закрываться по TP/SL в update_positions
+                logger.debug(f"[SYNC] Skipping orphan position {pos['id']} - managed locally")
                 continue
             
             # Position is closed if: size=0, size << expected, or direction mismatch
@@ -8229,6 +8229,51 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
         logger.error(f"[ADMIN] Reset error: {e}")
 
+# ==================== ДИАГНОСТИКА БАЛАНСА ====================
+async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Диагностика баланса - показывает данные из кэша и БД"""
+    user_id = update.effective_user.id
+    
+    # Данные из кэша
+    cached_user = users_cache.get(user_id)
+    cached_balance = cached_user.get('balance', 'N/A') if cached_user else 'Нет в кэше'
+    cached_deposit = cached_user.get('total_deposit', 'N/A') if cached_user else 'N/A'
+    
+    # Данные напрямую из БД
+    db_row = run_sql("SELECT balance, total_deposit, total_profit FROM users WHERE user_id = ?", (user_id,), fetch="one")
+    db_balance = db_row['balance'] if db_row else 'Не найден'
+    db_deposit = db_row['total_deposit'] if db_row else 'N/A'
+    db_profit = db_row['total_profit'] if db_row else 'N/A'
+    
+    # Позиции
+    cached_positions = positions_cache.get(user_id, [])
+    db_positions = db_get_positions(user_id)
+    
+    positions_value = sum(p.get('amount', 0) for p in db_positions)
+    
+    text = f"""<b>🔍 Диагностика баланса</b>
+
+<b>Кэш:</b>
+├ Баланс: ${cached_balance if isinstance(cached_balance, (int, float)) else cached_balance}
+├ Депозит: ${cached_deposit if isinstance(cached_deposit, (int, float)) else cached_deposit}
+
+<b>База данных:</b>
+├ Баланс: ${db_balance if isinstance(db_balance, (int, float)) else db_balance}
+├ Депозит: ${db_deposit if isinstance(db_deposit, (int, float)) else db_deposit}
+├ Профит: ${db_profit if isinstance(db_profit, (int, float)) else db_profit}
+
+<b>Позиции:</b>
+├ В кэше: {len(cached_positions)}
+├ В БД: {len(db_positions)}
+├ Заморожено в позициях: ${positions_value:.2f}
+
+<i>Если баланс в кэше и БД отличается - нажмите /start для синхронизации</i>"""
+    
+    await update.message.reply_text(text, parse_mode="HTML")
+    
+    # Логируем для отладки
+    logger.info(f"[DIAG] User {user_id}: cache_balance={cached_balance}, db_balance={db_balance}, positions={len(db_positions)}, frozen=${positions_value:.2f}")
+
 # ==================== РЕФЕРАЛЬНАЯ КОМАНДА ====================
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Реферальная ссылка"""
@@ -8453,6 +8498,7 @@ def main() -> None:
     app.add_handler(CommandHandler("resetall", reset_everything))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("ref", referral_cmd))
+    app.add_handler(CommandHandler("balance", balance_cmd))  # Диагностика баланса
     
     # Оплата Stars
     app.add_handler(PreCheckoutQueryHandler(precheckout))

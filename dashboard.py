@@ -303,6 +303,80 @@ def get_db_logs(limit: int = 50) -> list:
         return []
 
 
+def get_all_users_stats() -> list:
+    """Get all users with their trading statistics"""
+    if not _run_sql:
+        return []
+    try:
+        # Get all users with basic info
+        users = _run_sql("""
+            SELECT 
+                u.user_id,
+                u.balance,
+                u.total_deposit,
+                u.total_profit,
+                u.trading,
+                u.auto_trade,
+                u.auto_trade_today,
+                u.auto_trade_max_daily
+            FROM users u
+            ORDER BY u.balance DESC
+        """, fetch="all")
+        
+        if not users:
+            return []
+        
+        result = []
+        for user in users:
+            user_id = user['user_id']
+            
+            # Get user's trading stats from history
+            stats = _run_sql("""
+                SELECT 
+                    COUNT(*) as total_trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losses,
+                    COALESCE(SUM(pnl), 0) as total_pnl
+                FROM history
+                WHERE user_id = ?
+            """, (user_id,), fetch="one")
+            
+            # Get open positions count
+            positions = _run_sql("""
+                SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as total_amount
+                FROM positions
+                WHERE user_id = ?
+            """, (user_id,), fetch="one")
+            
+            total_trades = int(stats['total_trades'] or 0) if stats else 0
+            wins = int(stats['wins'] or 0) if stats else 0
+            total_pnl = float(stats['total_pnl'] or 0) if stats else 0
+            winrate = round(wins / total_trades * 100, 1) if total_trades > 0 else 0
+            
+            result.append({
+                'user_id': user_id,
+                'balance': round(float(user['balance'] or 0), 2),
+                'total_deposit': round(float(user['total_deposit'] or 0), 2),
+                'total_profit': round(float(user['total_profit'] or 0), 2),
+                'trading': bool(user['trading']),
+                'auto_trade': bool(user['auto_trade']),
+                'auto_trade_today': int(user['auto_trade_today'] or 0),
+                'auto_trade_max_daily': int(user['auto_trade_max_daily'] or 10),
+                'total_trades': total_trades,
+                'wins': wins,
+                'losses': int(stats['losses'] or 0) if stats else 0,
+                'winrate': winrate,
+                'total_pnl': round(total_pnl, 2),
+                'open_positions': int(positions['count'] or 0) if positions else 0,
+                'positions_amount': round(float(positions['total_amount'] or 0), 2) if positions else 0
+            })
+        
+        return result
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting users stats: {e}")
+        return []
+
+
 # API Routes
 @app.route('/api/stats')
 def api_stats():
@@ -370,6 +444,30 @@ def api_logs():
     return jsonify({
         'memory_logs': memory_logs,
         'db_logs': db_logs,
+        'timestamp': datetime.now().isoformat()
+    })
+
+
+@app.route('/api/users')
+def api_users():
+    """Users statistics endpoint"""
+    users = get_all_users_stats()
+    
+    # Calculate totals
+    total_balance = sum(u['balance'] for u in users)
+    total_deposits = sum(u['total_deposit'] for u in users)
+    active_traders = sum(1 for u in users if u['trading'])
+    auto_traders = sum(1 for u in users if u['auto_trade'])
+    
+    return jsonify({
+        'count': len(users),
+        'users': users,
+        'totals': {
+            'total_balance': round(total_balance, 2),
+            'total_deposits': round(total_deposits, 2),
+            'active_traders': active_traders,
+            'auto_traders': auto_traders
+        },
         'timestamp': datetime.now().isoformat()
     })
 

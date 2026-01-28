@@ -368,10 +368,141 @@
         .streak-win { background: rgba(35, 134, 54, 0.2); color: #238636; }
         .streak-loss { background: rgba(218, 54, 51, 0.2); color: #da3633; }
         
+        /* Main navigation tabs */
+        .main-tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            border-bottom: 1px solid #21262d;
+            padding-bottom: 12px;
+        }
+        
+        .main-tab {
+            padding: 10px 20px;
+            border: 1px solid #30363d;
+            border-radius: 6px 6px 0 0;
+            background: transparent;
+            color: #8b949e;
+            font-size: 0.9rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .main-tab:hover {
+            background: #21262d;
+            color: #c9d1d9;
+        }
+        
+        .main-tab.active {
+            background: #238636;
+            color: #fff;
+            border-color: #238636;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        /* Users table */
+        .users-table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            overflow: hidden;
+            font-size: 0.8rem;
+        }
+        
+        .users-table th,
+        .users-table td {
+            padding: 12px 14px;
+            text-align: left;
+            border-bottom: 1px solid #21262d;
+        }
+        
+        .users-table th {
+            background: #0d1117;
+            color: #8b949e;
+            font-weight: 500;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+            position: sticky;
+            top: 0;
+            cursor: pointer;
+        }
+        
+        .users-table th:hover {
+            background: #161b22;
+        }
+        
+        .users-table th.sorted-asc::after { content: ' ↑'; }
+        .users-table th.sorted-desc::after { content: ' ↓'; }
+        
+        .users-table tr:last-child td { border-bottom: none; }
+        
+        .users-table tr:hover {
+            background: #1c2128;
+        }
+        
+        .users-summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        
+        .summary-card {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            padding: 14px;
+            text-align: center;
+        }
+        
+        .summary-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            color: #8b949e;
+            margin-bottom: 4px;
+        }
+        
+        .summary-value {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.65rem;
+            font-weight: 500;
+        }
+        
+        .status-on { background: rgba(35, 134, 54, 0.2); color: #238636; }
+        .status-off { background: rgba(139, 148, 158, 0.2); color: #8b949e; }
+        
+        .users-table-container {
+            max-height: 600px;
+            overflow-y: auto;
+            border-radius: 6px;
+        }
+        
         @media (max-width: 768px) {
             .reasons-grid { grid-template-columns: 1fr; }
             .grid { grid-template-columns: repeat(2, 1fr); }
             .header-actions { width: 100%; justify-content: flex-end; }
+            .main-tabs { flex-wrap: wrap; }
+            .users-table { font-size: 0.7rem; }
+            .users-table th, .users-table td { padding: 8px 6px; }
         }
     </style>
 </head>
@@ -400,6 +531,15 @@
                 </button>
             </div>
         </header>
+        
+        <!-- Main Navigation Tabs -->
+        <div class="main-tabs">
+            <button class="main-tab active" onclick="switchTab('dashboard')">📊 Dashboard</button>
+            <button class="main-tab" onclick="switchTab('users')">👥 Users</button>
+        </div>
+        
+        <!-- Dashboard Tab -->
+        <div id="tab-dashboard" class="tab-content active">
         
         <!-- Main Stats Grid -->
         <div class="grid" id="statsCard">
@@ -509,7 +649,7 @@
             </div>
         </div>
         
-        <!-- User Lookup Section -->
+        <!-- User Diagnostics Section -->
         <div class="section">
             <div class="section-header">
                 <h2 class="section-title">User Diagnostics</h2>
@@ -600,6 +740,9 @@
         let currentExtended = {};
         let allLogs = [];
         let currentLogFilter = 'all';
+        let allUsers = [];
+        let usersSortField = 'balance';
+        let usersSortDir = 'desc';
         
         function formatPnl(value) {
             const num = parseFloat(value) || 0;
@@ -809,6 +952,115 @@
             } catch (error) {
                 console.error('Error fetching logs:', error);
             }
+        }
+        
+        function switchTab(tabName) {
+            // Hide all tabs
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
+            
+            // Show selected tab
+            document.getElementById('tab-' + tabName).classList.add('active');
+            event.target.classList.add('active');
+            
+            // Load data for users tab if needed
+            if (tabName === 'users' && allUsers.length === 0) {
+                fetchUsers();
+            }
+        }
+        
+        async function fetchUsers() {
+            try {
+                const response = await fetch('/api/users');
+                const data = await response.json();
+                allUsers = data.users || [];
+                
+                // Update summary
+                document.getElementById('totalUsers').textContent = data.count || 0;
+                document.getElementById('usersBalance').textContent = '$' + (data.totals?.total_balance || 0).toLocaleString();
+                document.getElementById('usersDeposits').textContent = '$' + (data.totals?.total_deposits || 0).toLocaleString();
+                document.getElementById('activeTraders').textContent = data.totals?.active_traders || 0;
+                document.getElementById('autoTraders').textContent = data.totals?.auto_traders || 0;
+                
+                renderUsers();
+            } catch (error) {
+                console.error('Error fetching users:', error);
+            }
+        }
+        
+        function sortUsers(field) {
+            // Update sort headers
+            document.querySelectorAll('.users-table th').forEach(th => {
+                th.classList.remove('sorted-asc', 'sorted-desc');
+            });
+            
+            if (usersSortField === field) {
+                usersSortDir = usersSortDir === 'asc' ? 'desc' : 'asc';
+            } else {
+                usersSortField = field;
+                usersSortDir = 'desc';
+            }
+            
+            // Add class to current header
+            const headers = document.querySelectorAll('.users-table th');
+            const fieldIndex = ['user_id', 'balance', 'total_deposit', 'total_trades', 'wins', 'winrate', 'total_pnl', 'open_positions', 'trading', 'auto_trade'].indexOf(field);
+            if (fieldIndex >= 0 && headers[fieldIndex]) {
+                headers[fieldIndex].classList.add('sorted-' + usersSortDir);
+            }
+            
+            renderUsers();
+        }
+        
+        function renderUsers() {
+            const tbody = document.getElementById('usersBody');
+            
+            if (!allUsers || allUsers.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="10" class="no-data">No users found</td></tr>';
+                return;
+            }
+            
+            // Sort users
+            const sorted = [...allUsers].sort((a, b) => {
+                let aVal = a[usersSortField];
+                let bVal = b[usersSortField];
+                
+                // Handle booleans
+                if (typeof aVal === 'boolean') aVal = aVal ? 1 : 0;
+                if (typeof bVal === 'boolean') bVal = bVal ? 1 : 0;
+                
+                if (usersSortDir === 'asc') {
+                    return aVal > bVal ? 1 : -1;
+                } else {
+                    return aVal < bVal ? 1 : -1;
+                }
+            });
+            
+            let html = '';
+            for (const user of sorted) {
+                const pnlClass = user.total_pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                const tradingBadge = user.trading 
+                    ? '<span class="status-badge status-on">ON</span>' 
+                    : '<span class="status-badge status-off">OFF</span>';
+                const autoBadge = user.auto_trade 
+                    ? '<span class="status-badge status-on">ON</span>' 
+                    : '<span class="status-badge status-off">OFF</span>';
+                
+                html += `
+                    <tr>
+                        <td><code>${user.user_id}</code></td>
+                        <td>$${user.balance.toLocaleString()}</td>
+                        <td>$${user.total_deposit.toLocaleString()}</td>
+                        <td>${user.total_trades}</td>
+                        <td>${user.wins}/${user.total_trades}</td>
+                        <td>${user.winrate}%</td>
+                        <td class="${pnlClass}">${formatPnl(user.total_pnl)}</td>
+                        <td>${user.open_positions}</td>
+                        <td>${tradingBadge}</td>
+                        <td>${autoBadge}</td>
+                    </tr>
+                `;
+            }
+            tbody.innerHTML = html;
         }
         
         function refreshAll() {
