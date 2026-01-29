@@ -21,8 +21,38 @@
         }
         
         .container {
-            max-width: 1400px;
+            max-width: 1800px;
             margin: 0 auto;
+        }
+        
+        .main-layout {
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            gap: 20px;
+        }
+        
+        .main-content {
+            min-width: 0;
+        }
+        
+        .news-sidebar {
+            position: sticky;
+            top: 12px;
+            height: calc(100vh - 24px);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        @media (max-width: 1200px) {
+            .main-layout {
+                grid-template-columns: 1fr;
+            }
+            .news-sidebar {
+                position: relative;
+                height: auto;
+                max-height: 600px;
+            }
         }
         
         header {
@@ -569,6 +599,215 @@
             border-left-color: #58a6ff;
         }
         
+        /* News Feed Styles */
+        .news-panel {
+            background: #161b22;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            overflow: hidden;
+        }
+        
+        .news-header {
+            padding: 14px 16px;
+            border-bottom: 1px solid #21262d;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        
+        .news-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #f0f6fc;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .news-sentiment {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 0.75rem;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+        
+        .news-sentiment.bullish {
+            background: rgba(35, 134, 54, 0.2);
+            color: #238636;
+        }
+        
+        .news-sentiment.bearish {
+            background: rgba(218, 54, 51, 0.2);
+            color: #da3633;
+        }
+        
+        .news-sentiment.neutral {
+            background: rgba(88, 166, 255, 0.15);
+            color: #58a6ff;
+        }
+        
+        .news-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+        
+        .news-item {
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid #21262d;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+        
+        .news-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: #30363d;
+        }
+        
+        .news-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .news-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+        
+        .news-source {
+            font-size: 0.7rem;
+            color: #8b949e;
+            font-weight: 500;
+        }
+        
+        .news-time {
+            font-size: 0.65rem;
+            color: #6e7681;
+            white-space: nowrap;
+        }
+        
+        .news-item-title {
+            font-size: 0.8rem;
+            color: #c9d1d9;
+            line-height: 1.4;
+            margin-bottom: 8px;
+        }
+        
+        .news-item-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        
+        .news-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+        }
+        
+        .news-tag {
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        
+        .news-tag.coin {
+            background: rgba(88, 166, 255, 0.15);
+            color: #58a6ff;
+        }
+        
+        .news-tag.bullish {
+            background: rgba(35, 134, 54, 0.2);
+            color: #238636;
+        }
+        
+        .news-tag.bearish {
+            background: rgba(218, 54, 51, 0.2);
+            color: #da3633;
+        }
+        
+        .news-tag.neutral {
+            background: rgba(139, 148, 158, 0.2);
+            color: #8b949e;
+        }
+        
+        .news-impact {
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        
+        .news-impact.critical {
+            background: rgba(218, 54, 51, 0.3);
+            color: #f85149;
+        }
+        
+        .news-impact.high {
+            background: rgba(210, 153, 34, 0.3);
+            color: #d29922;
+        }
+        
+        .news-impact.medium {
+            background: rgba(88, 166, 255, 0.2);
+            color: #58a6ff;
+        }
+        
+        .news-impact.low {
+            background: rgba(139, 148, 158, 0.2);
+            color: #8b949e;
+        }
+        
+        .news-keywords {
+            font-size: 0.65rem;
+            color: #6e7681;
+            margin-top: 6px;
+        }
+        
+        .news-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #8b949e;
+        }
+        
+        .news-loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 20px;
+            color: #8b949e;
+            font-size: 0.85rem;
+        }
+        
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #30363d;
+            border-top-color: #58a6ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
         @media (max-width: 768px) {
             body { padding: 8px; }
             .reasons-grid { grid-template-columns: 1fr; }
@@ -654,6 +893,9 @@
             <button class="main-tab active" onclick="switchTab('dashboard')">📊 Dashboard</button>
             <button class="main-tab" onclick="switchTab('users')">👥 Users</button>
         </div>
+        
+        <div class="main-layout">
+        <div class="main-content">
         
         <!-- Dashboard Tab -->
         <div id="tab-dashboard" class="tab-content active">
@@ -938,6 +1180,30 @@
             </table>
         </div>
     </div>
+    
+    </div><!-- /.main-content -->
+    
+    <!-- News Sidebar -->
+    <div class="news-sidebar">
+        <div class="news-panel">
+            <div class="news-header">
+                <span class="news-title">📰 Live News Feed</span>
+                <span class="news-sentiment neutral" id="newsSentiment">
+                    <span id="sentimentIcon">⚖️</span>
+                    <span id="sentimentText">NEUTRAL</span>
+                    <span id="sentimentScore">(0)</span>
+                </span>
+            </div>
+            <div class="news-list" id="newsList">
+                <div class="news-loading">
+                    <div class="spinner"></div>
+                    <span>Загрузка новостей...</span>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    </div><!-- /.main-layout -->
     
     <!-- Hidden Share Card -->
     <div id="shareCard">
@@ -1578,8 +1844,117 @@
             if (e.key === 'Enter') lookupUser();
         });
         
+        // News functions
+        async function fetchNews() {
+            try {
+                const response = await fetch('/api/news');
+                const data = await response.json();
+                
+                renderNews(data.news || []);
+                updateSentiment(data.sentiment || {});
+                
+                console.log('[Dashboard] News loaded:', data.count, 'items');
+            } catch (error) {
+                console.error('Error fetching news:', error);
+                document.getElementById('newsList').innerHTML = 
+                    '<div class="news-empty">❌ Ошибка загрузки новостей</div>';
+            }
+        }
+        
+        function renderNews(news) {
+            const container = document.getElementById('newsList');
+            
+            if (!news || news.length === 0) {
+                container.innerHTML = '<div class="news-empty">📭 Нет новостей для отображения</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const item of news) {
+                const sentimentClass = getSentimentClass(item.sentiment_value);
+                const impactClass = item.impact.toLowerCase();
+                const timeAgo = formatTimeAgo(item.timestamp);
+                
+                html += `
+                    <div class="news-item" onclick="window.open('${item.url || '#'}', '_blank')">
+                        <div class="news-item-header">
+                            <span class="news-source">${item.source}</span>
+                            <span class="news-time">${timeAgo}</span>
+                        </div>
+                        <div class="news-item-title">${escapeHtml(item.title)}</div>
+                        <div class="news-item-footer">
+                            <div class="news-tags">
+                                ${item.coins.map(c => `<span class="news-tag coin">${c}</span>`).join('')}
+                                <span class="news-tag ${sentimentClass}">${item.sentiment}</span>
+                            </div>
+                            <span class="news-impact ${impactClass}">${item.impact}</span>
+                        </div>
+                        ${item.keywords.length > 0 ? `<div class="news-keywords">${item.keywords.slice(0, 3).join(' ')}</div>` : ''}
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function updateSentiment(sentiment) {
+            const badge = document.getElementById('newsSentiment');
+            const icon = document.getElementById('sentimentIcon');
+            const text = document.getElementById('sentimentText');
+            const score = document.getElementById('sentimentScore');
+            
+            const trend = sentiment.trend || 'NEUTRAL';
+            const scoreVal = sentiment.score || 0;
+            
+            // Update classes
+            badge.className = 'news-sentiment ' + trend.toLowerCase();
+            
+            // Update content
+            if (trend === 'BULLISH') {
+                icon.textContent = '📈';
+            } else if (trend === 'BEARISH') {
+                icon.textContent = '📉';
+            } else {
+                icon.textContent = '⚖️';
+            }
+            
+            text.textContent = trend;
+            score.textContent = `(${scoreVal > 0 ? '+' : ''}${scoreVal})`;
+        }
+        
+        function getSentimentClass(value) {
+            if (value >= 1) return 'bullish';
+            if (value <= -1) return 'bearish';
+            return 'neutral';
+        }
+        
+        function formatTimeAgo(isoString) {
+            if (!isoString) return '';
+            
+            try {
+                const date = new Date(isoString);
+                const now = new Date();
+                const diffMs = now - date;
+                const diffMins = Math.floor(diffMs / 60000);
+                const diffHours = Math.floor(diffMs / 3600000);
+                
+                if (diffMins < 1) return 'сейчас';
+                if (diffMins < 60) return `${diffMins}м`;
+                if (diffHours < 24) return `${diffHours}ч`;
+                return `${Math.floor(diffHours / 24)}д`;
+            } catch {
+                return '';
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
         // Initial fetch
         refreshAll();
+        fetchNews();
         
         // Auto-refresh
         setInterval(fetchStats, 3000);
@@ -1587,6 +1962,7 @@
         setInterval(fetchTrades, 5000);
         setInterval(fetchLogs, 10000);
         setInterval(fetchWinrateBreakdown, 15000);
+        setInterval(fetchNews, 30000);  // Refresh news every 30 seconds
     </script>
 </body>
 </html>

@@ -24,6 +24,9 @@ _use_postgres = False
 # Signal stats getter (will be set from bot.py)
 _get_signal_stats = None
 
+# News analyzer instance (will be set from bot.py)
+_news_analyzer = None
+
 # Moscow timezone (UTC+3)
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
@@ -58,12 +61,13 @@ class DashboardLogHandler(logging.Handler):
             pass
 
 
-def init_dashboard(run_sql_func, use_postgres: bool = False, get_signal_stats_func=None):
+def init_dashboard(run_sql_func, use_postgres: bool = False, get_signal_stats_func=None, news_analyzer=None):
     """Initialize dashboard with database function from bot.py"""
-    global _run_sql, _use_postgres, _get_signal_stats
+    global _run_sql, _use_postgres, _get_signal_stats, _news_analyzer
     _run_sql = run_sql_func
     _use_postgres = use_postgres
     _get_signal_stats = get_signal_stats_func
+    _news_analyzer = news_analyzer
     
     # Add log handler to capture bot logs
     root_logger = logging.getLogger()
@@ -73,6 +77,8 @@ def init_dashboard(run_sql_func, use_postgres: bool = False, get_signal_stats_fu
     root_logger.addHandler(handler)
     
     logger.info("[DASHBOARD] Initialized with database connection")
+    if news_analyzer:
+        logger.info("[DASHBOARD] News analyzer connected")
 
 
 def get_open_positions_count() -> int:
@@ -832,6 +838,63 @@ def api_audit():
         })
     except Exception as e:
         return jsonify({'error': str(e)})
+
+
+@app.route('/api/news')
+def api_news():
+    """Get recent news being analyzed by the bot"""
+    if not _news_analyzer:
+        return jsonify({
+            'news': [],
+            'sentiment': {'score': 0, 'trend': 'NEUTRAL'},
+            'error': 'News analyzer not connected',
+            'timestamp': to_moscow_time()
+        })
+    
+    try:
+        # Get recent news events from analyzer cache
+        recent_events = list(_news_analyzer.recent_events)[-30:]  # Last 30 events
+        recent_events.reverse()  # Newest first
+        
+        news_list = []
+        for event in recent_events:
+            news_list.append({
+                'id': event.id,
+                'source': event.source,
+                'title': event.title[:150] + '...' if len(event.title) > 150 else event.title,
+                'sentiment': event.sentiment.name,
+                'sentiment_value': event.sentiment.value,
+                'impact': event.impact.name,
+                'impact_value': event.impact.value,
+                'category': event.category.value,
+                'coins': event.affected_coins[:5],  # Top 5 coins
+                'keywords': event.keywords_found[:5],  # Top 5 keywords
+                'confidence': round(event.confidence * 100),
+                'timestamp': event.timestamp.isoformat() if event.timestamp else None,
+                'url': event.url
+            })
+        
+        # Get market sentiment
+        sentiment = _news_analyzer.get_market_sentiment()
+        
+        return jsonify({
+            'news': news_list,
+            'count': len(news_list),
+            'sentiment': {
+                'score': round(sentiment.get('score', 0), 1),
+                'trend': sentiment.get('trend', 'NEUTRAL'),
+                'last_update': sentiment.get('last_update').isoformat() if sentiment.get('last_update') else None
+            },
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting news: {e}")
+        return jsonify({
+            'news': [],
+            'sentiment': {'score': 0, 'trend': 'NEUTRAL'},
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
 
 
 def run_dashboard(port: int = 5000, host: str = '0.0.0.0'):

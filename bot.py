@@ -193,6 +193,8 @@ def init_db():
             commission REAL,
             pnl REAL DEFAULT 0,
             bybit_qty REAL DEFAULT 0,
+            realized_pnl REAL DEFAULT 0,
+            is_auto INTEGER DEFAULT 0,
             opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )''')
@@ -250,6 +252,8 @@ def init_db():
             commission REAL,
             pnl REAL DEFAULT 0,
             bybit_qty REAL DEFAULT 0,
+            realized_pnl REAL DEFAULT 0,
+            is_auto INTEGER DEFAULT 0,
             opened_at TEXT DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )''')
@@ -8713,10 +8717,19 @@ def main() -> None:
         app.job_queue.run_repeating(send_ref_notifications_job, interval=60, first=60)
         
         # === NEWS ANALYZER JOB ===
-        # Новости используются только для внутреннего анализа и влияния на сделки
-        # Алерты отключены - данные применяются в smart_analyzer через enhance_setup_with_news
+        # Новости используются для внутреннего анализа и влияния на сделки
+        # + отображаются на дашборде в реальном времени
         if NEWS_FEATURES:
-            logger.info("[INIT] News analyzer enabled (internal use only, no alerts)")
+            async def news_fetch_job(context):
+                """Periodically fetch news for dashboard and analysis"""
+                try:
+                    await news_analyzer.get_aggregated_signals()
+                    logger.debug("[NEWS] Dashboard news updated")
+                except Exception as e:
+                    logger.warning(f"[NEWS] Fetch error: {e}")
+            
+            app.job_queue.run_repeating(news_fetch_job, interval=120, first=15)  # Every 2 min, start after 15s
+            logger.info("[INIT] News analyzer enabled (dashboard + internal analysis)")
         
         # === TRADE LOGGER MAINTENANCE JOB ===
         async def logger_maintenance_job(context):
@@ -8863,7 +8876,9 @@ def main() -> None:
     
     # Start dashboard in background thread
     try:
-        init_dashboard(run_sql, USE_POSTGRES, get_signal_stats)
+        # Pass news_analyzer if available
+        na = news_analyzer if NEWS_FEATURES else None
+        init_dashboard(run_sql, USE_POSTGRES, get_signal_stats, news_analyzer=na)
         dashboard_thread = start_dashboard_thread()
         logger.info(f"[CONFIG] Dashboard: Running on port {os.getenv('DASHBOARD_PORT', 5000)}")
     except Exception as e:
