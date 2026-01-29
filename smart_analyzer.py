@@ -35,7 +35,7 @@ try:
     from news_analyzer import (
         news_analyzer, enhance_setup_with_news, get_news_signals,
         get_market_sentiment, should_trade_now, detect_manipulations,
-        get_news_trading_opportunities
+        get_news_trading_opportunities, COINGLASS_THRESHOLDS
     )
     NEWS_ANALYSIS_ENABLED = True
     logger.info("[SMART] News analyzer enabled")
@@ -334,23 +334,23 @@ class SmartAnalyzer:
                 'min_rr': 1.0,
                 'min_confidence': 0.45
             },
-            # Рейндж - УМЕРЕННЫЕ настройки (раньше были слишком строгие)
+            # Рейндж - АГРЕССИВНЫЕ настройки (для большего количества сделок)
             MarketRegime.RANGING: {
-                'min_quality': SetupQuality.B,   # B-сетапы (снижено с A)
-                'min_rr': 1.2,                    # R/R 1:1.2 (снижено с 1.5)
-                'min_confidence': 0.50            # 50% уверенности (снижено с 60%)
+                'min_quality': SetupQuality.C,   # C-сетапы ОК (снижено с B)
+                'min_rr': 1.0,                    # R/R 1:1 (снижено с 1.2)
+                'min_confidence': 0.40            # 40% уверенности (снижено с 50%)
             },
-            # Высокая волатильность - КОНСЕРВАТИВНЫЕ настройки
+            # Высокая волатильность - АГРЕССИВНЫЕ настройки (мемы и хайп!)
             MarketRegime.HIGH_VOLATILITY: {
-                'min_quality': SetupQuality.A,   # A-сетапы (снижено с A+)
-                'min_rr': 1.3,                    # R/R 1:1.3 (снижено с 1.8)
-                'min_confidence': 0.55            # 55% уверенности (снижено с 70%)
+                'min_quality': SetupQuality.C,   # C-сетапы ОК (снижено с A)
+                'min_rr': 1.0,                    # R/R 1:1 (снижено с 1.3)
+                'min_confidence': 0.40            # 40% уверенности (снижено с 55%)
             },
-            # Неизвестный режим - БАЗОВЫЕ настройки
+            # Неизвестный режим - АГРЕССИВНЫЕ настройки
             MarketRegime.UNKNOWN: {
-                'min_quality': SetupQuality.B,
+                'min_quality': SetupQuality.C,   # C-сетапы ОК (снижено с B)
                 'min_rr': 1.0,
-                'min_confidence': 0.45
+                'min_confidence': 0.40
             }
         }
         
@@ -2421,8 +2421,8 @@ class SmartAnalyzer:
         klines_4h = await self.get_klines(symbol, '4h', 50)
         klines_15m = await self.get_klines(symbol, '15m', 50)
         
-        if not klines_1h or len(klines_1h) < 30:  # Снижено с 50 до 30 свечей
-            logger.warning(f"[SMART] Insufficient data for {symbol} (need 30, got {len(klines_1h) if klines_1h else 0})")
+        if not klines_1h or len(klines_1h) < 15:  # Снижено с 30 до 15 свечей для новых монет
+            logger.warning(f"[SMART] Insufficient data for {symbol} (need 15, got {len(klines_1h) if klines_1h else 0})")
             return None
         
         # Парсим данные
@@ -3037,8 +3037,13 @@ class SmartAnalyzer:
             'LRC', 'CELR', 'BOBA', 'SKL', 'CTSI'
         ],
         'memes': [
+            # Классические мемы
             'PEPE', 'DOGE', 'SHIB', 'FLOKI', 'BONK', 'WIF', 'MEME', 'TURBO', 'NEIRO', 'POPCAT',
-            'BABYDOGE', 'ELON', 'SATS', 'ORDI', 'RATS', '1000PEPE', 'COQ', 'MYRO', 'TOSHI'
+            'BABYDOGE', 'ELON', 'SATS', 'ORDI', 'RATS', '1000PEPE', 'COQ', 'MYRO', 'TOSHI',
+            # Новые хайповые мемы 2025-2026
+            'FARTCOIN', 'PNUT', 'VINE', 'TRUMP', 'PENGU', 'SWARMS', 'ELIZA', 'ANIME',
+            'AI16Z', 'BRETT', 'MOG', 'GOAT', 'PORK', 'LADYS', 'WOJAK', 'PEPE2', 'BOBO',
+            'MOCHI', 'PONKE', 'SLERF', 'BOME', 'CAT', 'DOG', 'PEOPLE', 'LUNC'
         ],
         'defi': [
             'UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'PENDLE', 'GMX', 'DYDX', 'SNX', 'COMP',
@@ -3057,8 +3062,13 @@ class SmartAnalyzer:
             'SSV', 'ANKR', 'GLM', 'NKN', 'COTI', 'CTSI', 'OGN', 'SYN'
         ],
         'new': [
+            # Новые листинги 2025-2026 (активно добавлять новые!)
             'JUP', 'ENA', 'W', 'ETHFI', 'AEVO', 'PORTAL', 'DYM', 'ALT', 'PYTH',
-            'TIA', 'STRK', 'MANTA', 'PIXEL', 'ACE', 'XAI', 'NFP', 'AI', 'SLERF', 'BOME'
+            'TIA', 'STRK', 'MANTA', 'PIXEL', 'ACE', 'XAI', 'NFP', 'AI', 'SLERF', 'BOME',
+            # Свежие хайповые листинги
+            'HYPE', 'MOVE', 'ME', 'USUAL', 'VANA', 'PENGU', 'BIO', 'COOKIE', 'AIXBT',
+            'CGV', 'SONIC', 'PLUME', 'KAITO', 'ONDO', 'EIGEN', 'ZRO', 'LISTA', 'NOT',
+            'DOGS', 'CATI', 'HMSTR', 'BANANA', 'RENDER', 'JTO', 'TNSR', 'KMNO', 'PARCL'
         ],
         'exchange': [
             'BNB', 'OKB', 'CRO', 'KCS', 'GT', 'HT', 'MX', 'FTT', 'LEO'
@@ -3121,10 +3131,10 @@ class SmartAnalyzer:
                     price_change = abs(float(ticker.get('price24hPcnt', '0'))) * 100
                     last_price = float(ticker.get('lastPrice', '0'))
                     
-                    # ОПТИМИЗИРОВАННЫЕ фильтры: 0.2-15% волатильность, $10M+ оборот
-                    if price_change < 0.2 or price_change > 15:
+                    # АГРЕССИВНЫЕ фильтры: 0.1-20% волатильность, $5M+ оборот (больше хайпа!)
+                    if price_change < 0.1 or price_change > 20:
                         continue
-                    if turnover < 10_000_000:  # Снижено с $20M до $10M
+                    if turnover < 5_000_000:  # Снижено с $10M до $5M для ловли новых монет
                         continue
                     
                     base = symbol.replace('USDT', '')
@@ -3189,15 +3199,15 @@ class SmartAnalyzer:
                     result.append(f"{major}/USDT")
                     used_bases.add(major)
             
-            # 2. По 2-3 монеты из каждой категории (кроме major)
+            # 2. По 2-5 монет из каждой категории (кроме major) - БОЛЬШЕ МЕМОВ И ХАЙПА!
             coins_per_category = {
-                'layer1': 3,   # 3 Layer1
-                'layer2': 2,   # 2 Layer2
-                'memes': 3,    # 3 мема (высокая волатильность)
+                'layer1': 2,   # 2 Layer1 (меньше скучных монет)
+                'layer2': 1,   # 1 Layer2
+                'memes': 5,    # 5 мемов! (больше хайпа и волатильности)
                 'defi': 2,     # 2 DeFi
-                'ai': 2,       # 2 AI
+                'ai': 3,       # 3 AI (хайповая тема)
                 'gaming': 2,   # 2 Gaming
-                'new': 2       # 2 новых листинга
+                'new': 5       # 5 новых листингов! (ловим хайп на старте)
             }
             
             for cat_name, count in coins_per_category.items():
@@ -3347,6 +3357,61 @@ async def find_best_setup(balance: float = 0, use_whale_data: bool = True, use_n
                 if symbol not in news_signals or opp['confidence'] > news_signals[symbol]['confidence']:
                     news_signals[symbol] = opp
     
+    # === COINGLASS DATA (Funding, Liquidations, L/S Ratio) ===
+    coinglass_signals = {}
+    if use_news_data and NEWS_ANALYSIS_ENABLED:
+        try:
+            coinglass_data = await news_analyzer.get_coinglass_signals()
+            
+            # Обрабатываем экстремальные funding rates
+            if coinglass_data.get('funding', {}).get('extreme_long'):
+                for item in coinglass_data['funding']['extreme_long']:
+                    symbol = f"{item['symbol']}/USDT"
+                    coinglass_signals[symbol] = {
+                        'direction': 'SHORT',
+                        'reason': f"🔴 Extreme funding {item['rate']:.3%}",
+                        'confidence': 0.65
+                    }
+                    logger.info(f"[COINGLASS] {symbol}: Extreme long funding -> SHORT signal")
+            
+            if coinglass_data.get('funding', {}).get('extreme_short'):
+                for item in coinglass_data['funding']['extreme_short']:
+                    symbol = f"{item['symbol']}/USDT"
+                    coinglass_signals[symbol] = {
+                        'direction': 'LONG',
+                        'reason': f"🟢 Negative funding {item['rate']:.3%}",
+                        'confidence': 0.65
+                    }
+                    logger.info(f"[COINGLASS] {symbol}: Extreme short funding -> LONG signal")
+            
+            # Liquidation signal
+            liq_signal = coinglass_data.get('liquidations', {}).get('signal')
+            if liq_signal:
+                liq_total = coinglass_data['liquidations'].get('total_24h', 0)
+                logger.info(f"[COINGLASS] Liquidation signal: {liq_signal} (${liq_total/1e6:.1f}M total)")
+                # Применяем ко всем мажорам
+                for major in ['BTC/USDT', 'ETH/USDT']:
+                    if major not in coinglass_signals:
+                        coinglass_signals[major] = {
+                            'direction': liq_signal,
+                            'reason': f"💥 Liquidations ${liq_total/1e6:.1f}M",
+                            'confidence': 0.60
+                        }
+            
+            # Long/Short ratio signals
+            for ls_symbol, ls_data in coinglass_data.get('long_short', {}).items():
+                if isinstance(ls_data, dict) and ls_data.get('signal'):
+                    symbol = f"{ls_symbol}/USDT"
+                    coinglass_signals[symbol] = {
+                        'direction': ls_data['signal'],
+                        'reason': f"📊 L/S Ratio {ls_data.get('long_ratio', 50):.1f}%",
+                        'confidence': 0.60
+                    }
+                    logger.info(f"[COINGLASS] {symbol}: L/S Ratio signal -> {ls_data['signal']}")
+                    
+        except Exception as e:
+            logger.warning(f"[COINGLASS] Error getting signals: {e}")
+    
     best_setup: Optional[TradeSetup] = None
     
     for symbol in coins:
@@ -3382,6 +3447,21 @@ async def find_best_setup(balance: float = 0, use_whale_data: bool = True, use_n
                         setup.confidence = max(0.3, setup.confidence - 0.1)
                         setup.warnings.insert(0, f"⚠️ Новости против: {news['direction']}")
                         logger.info(f"[SMART] {symbol}: News disagreement -10% confidence")
+                
+                # === БУСТ ОТ COINGLASS (Funding, Liquidations, L/S Ratio) ===
+                if symbol in coinglass_signals:
+                    cg = coinglass_signals[symbol]
+                    if cg['direction'] == setup.direction:
+                        # Coinglass подтверждает направление
+                        boost = cg.get('confidence', 0.6) * 0.15
+                        setup.confidence = min(0.95, setup.confidence + boost)
+                        setup.reasoning.insert(0, f"📊 Coinglass: {cg['reason']}")
+                        logger.info(f"[SMART] {symbol}: Coinglass confirmation +{boost:.0%} confidence")
+                    elif cg['direction'] and cg['direction'] != setup.direction:
+                        # Coinglass против - снижаем confidence
+                        setup.confidence = max(0.3, setup.confidence - 0.12)
+                        setup.warnings.insert(0, f"⚠️ Coinglass против: {cg['reason']}")
+                        logger.info(f"[SMART] {symbol}: Coinglass disagreement -12% confidence")
                 
                 # Берём первый качественный сетап
                 if best_setup is None:

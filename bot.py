@@ -1412,9 +1412,9 @@ def get_max_positions_for_user(balance: float) -> int:
     - Дать крупным аккаунтам больше возможностей
     """
     if balance < 100:
-        return 3
+        return 5  # Увеличено с 3 до 5 для большего количества сделок
     elif balance < 500:
-        return 5
+        return 6  # Увеличено с 5 до 6
     elif balance < 1000:
         return 8
     elif balance < 5000:
@@ -1426,45 +1426,51 @@ def get_max_positions_for_user(balance: float) -> int:
 # === УМНОЕ РАСПРЕДЕЛЕНИЕ КАПИТАЛА v2.0 ===
 # Категории монет для определения максимального размера позиции
 COIN_CATEGORY_MAP = {
-    # Топ-монеты (высокая ликвидность, низкий риск) - до 20% баланса
+    # Топ-монеты (высокая ликвидность, низкий риск)
     'major': ['BTC', 'ETH'],
     
-    # Layer 1 (хорошая ликвидность) - до 15% баланса
+    # Layer 1 (хорошая ликвидность)
     'layer1': ['SOL', 'BNB', 'XRP', 'AVAX', 'NEAR', 'APT', 'SUI', 'SEI', 'TON', 'INJ', 
                'ATOM', 'DOT', 'ADA', 'TRX', 'LTC'],
     
-    # Layer 2 (средняя ликвидность) - до 12% баланса
+    # Layer 2 (средняя ликвидность)
     'layer2': ['ARB', 'OP', 'STRK', 'ZK', 'MATIC', 'POL', 'MANTA', 'METIS', 'IMX'],
     
-    # DeFi - до 10% баланса
+    # DeFi
     'defi': ['UNI', 'AAVE', 'MKR', 'CRV', 'LDO', 'PENDLE', 'GMX', 'DYDX', 'SNX', 
              'COMP', 'SUSHI', '1INCH', 'LINK'],
     
-    # AI/Data - до 10% баланса
-    'ai': ['FET', 'RNDR', 'TAO', 'WLD', 'ARKM', 'AGIX', 'OCEAN', 'GRT', 'FIL', 'AR'],
+    # AI/Data (хайповая тема!)
+    'ai': ['FET', 'RNDR', 'TAO', 'WLD', 'ARKM', 'AGIX', 'OCEAN', 'GRT', 'FIL', 'AR',
+           'AI16Z', 'AIXBT', 'VIRTUAL'],
     
-    # Gaming/NFT - до 8% баланса
+    # Gaming/NFT
     'gaming': ['GALA', 'AXS', 'SAND', 'MANA', 'PIXEL', 'SUPER', 'MAGIC', 'BLUR', 'IMX'],
     
-    # Мемы (высокая волатильность) - до 6% баланса
+    # Мемы - РАСШИРЕННЫЙ СПИСОК для хайпа!
     'memes': ['DOGE', 'PEPE', 'SHIB', 'FLOKI', 'BONK', 'WIF', 'MEME', 'TURBO', 
-              'NEIRO', 'POPCAT', 'MOG', 'BRETT', 'BOME', 'MYRO', 'SLERF'],
+              'NEIRO', 'POPCAT', 'MOG', 'BRETT', 'BOME', 'MYRO', 'SLERF',
+              'FARTCOIN', 'PNUT', 'VINE', 'TRUMP', 'PENGU', 'SWARMS', 'ELIZA', 'ANIME',
+              'GOAT', 'PORK', 'LADYS', 'WOJAK', 'PONKE', 'CAT', 'DOG', 'PEOPLE', 'LUNC'],
     
-    # Новые листинги (высокий риск) - до 5% баланса
-    'new': ['JUP', 'ENA', 'W', 'ETHFI', 'AEVO', 'PORTAL', 'DYM', 'ALT', 'PYTH']
+    # Новые листинги - РАСШИРЕННЫЙ СПИСОК (ловим хайп!)
+    'new': ['JUP', 'ENA', 'W', 'ETHFI', 'AEVO', 'PORTAL', 'DYM', 'ALT', 'PYTH',
+            'HYPE', 'MOVE', 'ME', 'USUAL', 'VANA', 'BIO', 'COOKIE', 'SONIC', 
+            'ONDO', 'EIGEN', 'ZRO', 'LISTA', 'NOT', 'DOGS', 'CATI', 'HMSTR', 
+            'BANANA', 'JTO', 'TNSR']
 }
 
-# Максимальные проценты от баланса для каждой категории
+# Максимальные проценты от баланса для каждой категории - АГРЕССИВНЫЕ НАСТРОЙКИ
 CATEGORY_MAX_PERCENT = {
-    'major': 0.20,    # 20% для BTC/ETH
-    'layer1': 0.15,   # 15% для Layer 1
-    'layer2': 0.12,   # 12% для Layer 2
+    'major': 0.15,    # 15% для BTC/ETH (снижено, они скучные)
+    'layer1': 0.12,   # 12% для Layer 1
+    'layer2': 0.10,   # 10% для Layer 2
     'defi': 0.10,     # 10% для DeFi
-    'ai': 0.10,       # 10% для AI
-    'gaming': 0.08,   # 8% для Gaming
-    'memes': 0.06,    # 6% для мемов
-    'new': 0.05,      # 5% для новых листингов
-    'unknown': 0.08   # 8% для неизвестных
+    'ai': 0.12,       # 12% для AI (хайповая тема)
+    'gaming': 0.10,   # 10% для Gaming
+    'memes': 0.12,    # 12% для мемов! (увеличено для хайпа)
+    'new': 0.12,      # 12% для новых листингов! (ловим хайп)
+    'unknown': 0.10   # 10% для неизвестных
 }
 
 def get_coin_category(symbol: str) -> str:
@@ -4421,7 +4427,7 @@ Winrate: <b>{winrate}%</b>
 # ==================== СИГНАЛЫ ====================
 # Кэш последних сигналов для предотвращения дубликатов
 last_signals: Dict[str, Dict] = {}  # {symbol: {'direction': str, 'price': float, 'time': datetime}}
-SIGNAL_COOLDOWN = 60  # 1 минута между одинаковыми сигналами
+SIGNAL_COOLDOWN = 30  # 30 секунд между одинаковыми сигналами (уменьшено для большего количества сделок)
 PRICE_CHANGE_THRESHOLD = 0.002  # 0.2% изменение цены для нового сигнала
 LEVERAGE = 20  # Плечо x20
 
@@ -4612,11 +4618,13 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         # Confidence = качество сетапа
         confidence_percent = int(setup.confidence * 100)
         
-        # Качество как текст (только A+ и A принимаются)
+        # Качество как текст (теперь принимаем и B/C сетапы для большего количества сделок)
         quality_emoji = {
             SetupQuality.A_PLUS: "🌟 A+",
             SetupQuality.A: "⭐ A",
-        }.get(setup.quality, "⭐")
+            SetupQuality.B: "✨ B",
+            SetupQuality.C: "💫 C",
+        }.get(setup.quality, "💫")
         
         # Режим рынка как текст
         regime_text = {
@@ -8563,7 +8571,7 @@ def main() -> None:
         app.job_queue.run_repeating(update_positions, interval=5, first=5)
         
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
-            app.job_queue.run_repeating(send_smart_signal, interval=120, first=10)  # 2 минуты
+            app.job_queue.run_repeating(send_smart_signal, interval=60, first=10)  # 1 минута - чаще сигналы!
         
         # Cleanup caches - оборачиваем в async функцию
         async def cleanup_caches_job(context):

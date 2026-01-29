@@ -116,6 +116,122 @@ TWITTER_ACCOUNTS = {
         'keywords': ['btc', 'pattern', 'chart', 'target']
     },
     
+    # === АЛЬФА-ГРУППЫ И СИГНАЛЬНЫЕ КАНАЛЫ (ДОБАВЛЕНО!) ===
+    'MustStopMurad': {
+        'name': 'Murad',
+        'type': 'alpha',
+        'impact': 'HIGH',
+        'keywords': ['memecoin', 'meta', 'play', 'rotation', 'sol']
+    },
+    'blaborekek': {
+        'name': 'Blknoiz06',
+        'type': 'alpha',
+        'impact': 'HIGH',
+        'keywords': ['alpha', 'gem', 'early', 'narrative', 'meta']
+    },
+    'DefiIgnas': {
+        'name': 'Ignas',
+        'type': 'alpha',
+        'impact': 'HIGH',
+        'keywords': ['defi', 'yield', 'airdrop', 'strategy', 'alpha']
+    },
+    'Route2FI': {
+        'name': 'Route2FI',
+        'type': 'alpha',
+        'impact': 'MEDIUM',
+        'keywords': ['alpha', 'airdrop', 'strategy', 'yield']
+    },
+    'TheDeFinvestor': {
+        'name': 'The DeFi Investor',
+        'type': 'alpha',
+        'impact': 'MEDIUM',
+        'keywords': ['defi', 'yield', 'strategy', 'protocol']
+    },
+    'MilesDeutscher': {
+        'name': 'Miles Deutscher',
+        'type': 'alpha',
+        'impact': 'HIGH',
+        'keywords': ['narrative', 'rotation', 'alpha', 'gem', 'meta']
+    },
+    'AltcoinSherpa': {
+        'name': 'Altcoin Sherpa',
+        'type': 'trader',
+        'impact': 'HIGH',
+        'keywords': ['alt', 'chart', 'entry', 'setup', 'target']
+    },
+    'Pentosh1': {
+        'name': 'Pentoshi',
+        'type': 'trader',
+        'impact': 'HIGH',
+        'keywords': ['btc', 'long', 'short', 'macro', 'cycle']
+    },
+    'CryptoTony__': {
+        'name': 'Crypto Tony',
+        'type': 'trader',
+        'impact': 'MEDIUM',
+        'keywords': ['btc', 'eth', 'chart', 'analysis', 'setup']
+    },
+    'CryptoGodJohn': {
+        'name': 'CryptoGodJohn',
+        'type': 'alpha',
+        'impact': 'HIGH',
+        'keywords': ['memecoin', 'sol', 'degen', 'play', 'alpha']
+    },
+    'CryptoDonAlt': {
+        'name': 'DonAlt',
+        'type': 'trader',
+        'impact': 'HIGH',
+        'keywords': ['btc', 'macro', 'chart', 'cycle', 'bear', 'bull']
+    },
+    'crypto_birb': {
+        'name': 'CryptoBirb',
+        'type': 'trader',
+        'impact': 'MEDIUM',
+        'keywords': ['btc', 'eth', 'chart', 'pattern', 'target']
+    },
+    'SmartContracter': {
+        'name': 'SmartContracter',
+        'type': 'trader',
+        'impact': 'HIGH',
+        'keywords': ['btc', 'eth', 'setup', 'tp', 'sl', 'entry']
+    },
+    'CryptoCapo_': {
+        'name': 'Capo',
+        'type': 'trader',
+        'impact': 'HIGH',
+        'keywords': ['btc', 'macro', 'bear', 'bull', 'cycle']
+    },
+    'coaborekglass': {
+        'name': 'Coinglass',
+        'type': 'data',
+        'impact': 'HIGH',
+        'keywords': ['liquidation', 'funding', 'oi', 'long', 'short', 'ratio']
+    },
+    'LookOnChain': {
+        'name': 'Lookonchain',
+        'type': 'onchain',
+        'impact': 'HIGH',
+        'keywords': ['whale', 'transfer', 'deposit', 'withdraw', 'move']
+    },
+    'spoaborektonchain': {
+        'name': 'Spot On Chain',
+        'type': 'onchain',
+        'impact': 'HIGH',
+        'keywords': ['whale', 'wallet', 'transfer', 'accumulate', 'sell']
+    },
+    'EmberCN': {
+        'name': 'Ember',
+        'type': 'onchain',
+        'impact': 'HIGH',
+        'keywords': ['whale', 'smart money', 'flow', 'move']
+    },
+    'ai_9684xtpa': {
+        'name': 'Ai_9684xtpa',
+        'type': 'onchain',
+        'impact': 'HIGH',
+        'keywords': ['whale', 'deposit', 'withdraw', 'accumulate']
+    },
+    
     # === КРИПТО ИНСАЙДЕРЫ ===
     'caborek': {
         'name': 'Caborek',
@@ -237,6 +353,27 @@ NEWS_SOURCES = {
     'cryptopanic': 'https://cryptopanic.com/api/v1/posts/?auth_token={api_key}&currencies=BTC,ETH,SOL&filter=hot',
     'coingecko_news': 'https://api.coingecko.com/api/v3/status_updates',
     'fear_greed': 'https://api.alternative.me/fng/?limit=1'
+}
+
+# === COINGLASS API (бесплатные эндпоинты) ===
+COINGLASS_ENDPOINTS = {
+    'funding_rates': 'https://open-api.coinglass.com/public/v2/funding',
+    'liquidation_24h': 'https://open-api.coinglass.com/public/v2/liquidation_chart',
+    'long_short_ratio': 'https://open-api.coinglass.com/public/v2/long_short_ratio',
+    'open_interest': 'https://open-api.coinglass.com/public/v2/open_interest',
+}
+
+# DexScreener для отслеживания хайпа на DEX
+DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex'
+
+# Пороговые значения для сигналов
+COINGLASS_THRESHOLDS = {
+    'extreme_funding_long': 0.05,    # >0.05% = перегрев лонгов
+    'extreme_funding_short': -0.03,  # <-0.03% = перегрев шортов
+    'liquidation_spike': 50_000_000,  # >$50M ликвидаций = возможный разворот
+    'long_short_extreme_long': 70,    # >70% лонгов = опасно
+    'long_short_extreme_short': 30,   # <30% лонгов = возможен шорт-сквиз
+    'oi_change_significant': 5,       # >5% изменение OI = важно
 }
 
 
@@ -814,6 +951,262 @@ class NewsAnalyzer:
         
         return events
     
+    # ==================== COINGLASS INTEGRATION ====================
+    
+    async def fetch_coinglass_funding(self) -> Dict[str, Any]:
+        """
+        Получить funding rates с Coinglass
+        Экстремальные значения = сигнал на разворот
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    'https://open-api.coinglass.com/public/v2/funding',
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={'Accept': 'application/json'}
+                ) as resp:
+                    if resp.status != 200:
+                        return {}
+                    data = await resp.json()
+                    
+                    result = {'extreme_long': [], 'extreme_short': [], 'neutral': []}
+                    
+                    for item in data.get('data', []):
+                        symbol = item.get('symbol', '')
+                        rate = float(item.get('uMarginList', [{}])[0].get('rate', 0) or 0)
+                        
+                        if rate > COINGLASS_THRESHOLDS['extreme_funding_long']:
+                            result['extreme_long'].append({
+                                'symbol': symbol,
+                                'rate': rate,
+                                'signal': 'SHORT'  # Много лонгов = возможен шорт
+                            })
+                            logger.info(f"[COINGLASS] 🔴 {symbol} EXTREME LONG funding: {rate:.4%}")
+                        elif rate < COINGLASS_THRESHOLDS['extreme_funding_short']:
+                            result['extreme_short'].append({
+                                'symbol': symbol,
+                                'rate': rate,
+                                'signal': 'LONG'  # Много шортов = возможен шорт-сквиз
+                            })
+                            logger.info(f"[COINGLASS] 🟢 {symbol} EXTREME SHORT funding: {rate:.4%}")
+                        else:
+                            result['neutral'].append({'symbol': symbol, 'rate': rate})
+                    
+                    return result
+                    
+        except Exception as e:
+            logger.debug(f"[COINGLASS] Funding error: {e}")
+            return {}
+    
+    async def fetch_coinglass_liquidations(self) -> Dict[str, Any]:
+        """
+        Получить данные о ликвидациях с Coinglass
+        Большие ликвидации = возможный разворот
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    'https://open-api.coinglass.com/public/v2/liquidation_chart?symbol=BTC',
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={'Accept': 'application/json'}
+                ) as resp:
+                    if resp.status != 200:
+                        return {}
+                    data = await resp.json()
+                    
+                    result = {
+                        'total_24h': 0,
+                        'long_liquidations': 0,
+                        'short_liquidations': 0,
+                        'signal': None
+                    }
+                    
+                    chart_data = data.get('data', [])
+                    if chart_data:
+                        # Суммируем ликвидации за последние 24 часа
+                        for item in chart_data[-24:]:  # Последние 24 часа
+                            result['long_liquidations'] += float(item.get('longLiquidationUsd', 0) or 0)
+                            result['short_liquidations'] += float(item.get('shortLiquidationUsd', 0) or 0)
+                        
+                        result['total_24h'] = result['long_liquidations'] + result['short_liquidations']
+                        
+                        # Анализ
+                        if result['total_24h'] > COINGLASS_THRESHOLDS['liquidation_spike']:
+                            if result['long_liquidations'] > result['short_liquidations'] * 1.5:
+                                result['signal'] = 'LONG'  # Лонги ликвидированы = возможен отскок
+                                logger.info(f"[COINGLASS] 💥 LONG LIQUIDATIONS ${result['long_liquidations']/1e6:.1f}M - possible bounce")
+                            elif result['short_liquidations'] > result['long_liquidations'] * 1.5:
+                                result['signal'] = 'SHORT'  # Шорты ликвидированы = возможен откат
+                                logger.info(f"[COINGLASS] 💥 SHORT LIQUIDATIONS ${result['short_liquidations']/1e6:.1f}M - possible pullback")
+                    
+                    return result
+                    
+        except Exception as e:
+            logger.debug(f"[COINGLASS] Liquidations error: {e}")
+            return {}
+    
+    async def fetch_coinglass_long_short_ratio(self, symbol: str = 'BTC') -> Dict[str, Any]:
+        """
+        Получить соотношение Long/Short с Coinglass
+        Экстремальные значения = контр-сигнал
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f'https://open-api.coinglass.com/public/v2/long_short_ratio?symbol={symbol}&interval=h1',
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={'Accept': 'application/json'}
+                ) as resp:
+                    if resp.status != 200:
+                        return {}
+                    data = await resp.json()
+                    
+                    result = {
+                        'symbol': symbol,
+                        'long_ratio': 50,
+                        'short_ratio': 50,
+                        'signal': None
+                    }
+                    
+                    ls_data = data.get('data', [])
+                    if ls_data:
+                        latest = ls_data[-1]
+                        result['long_ratio'] = float(latest.get('longRatio', 50) or 50)
+                        result['short_ratio'] = 100 - result['long_ratio']
+                        
+                        # Экстремальные значения = контр-сигнал
+                        if result['long_ratio'] > COINGLASS_THRESHOLDS['long_short_extreme_long']:
+                            result['signal'] = 'SHORT'  # Слишком много лонгов
+                            logger.info(f"[COINGLASS] 📊 {symbol} EXTREME LONG RATIO: {result['long_ratio']:.1f}% - contrarian SHORT")
+                        elif result['long_ratio'] < COINGLASS_THRESHOLDS['long_short_extreme_short']:
+                            result['signal'] = 'LONG'  # Слишком много шортов = шорт-сквиз
+                            logger.info(f"[COINGLASS] 📊 {symbol} EXTREME SHORT RATIO: {result['short_ratio']:.1f}% - possible SHORT SQUEEZE")
+                    
+                    return result
+                    
+        except Exception as e:
+            logger.debug(f"[COINGLASS] Long/Short ratio error: {e}")
+            return {}
+    
+    async def fetch_dexscreener_trending(self) -> List[Dict]:
+        """
+        Получить trending токены с DexScreener
+        Хороший индикатор хайпа на DEX
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Top gainers
+                async with session.get(
+                    'https://api.dexscreener.com/token-boosts/top/v1',
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={'Accept': 'application/json'}
+                ) as resp:
+                    if resp.status != 200:
+                        return []
+                    data = await resp.json()
+                    
+                    trending = []
+                    for item in data[:20]:  # Top 20
+                        symbol = item.get('tokenAddress', '')[:8]
+                        name = item.get('description', '')
+                        chain = item.get('chainId', '')
+                        
+                        trending.append({
+                            'symbol': symbol,
+                            'name': name,
+                            'chain': chain,
+                            'url': item.get('url', ''),
+                            'signal': 'WATCH'  # Отслеживать хайп
+                        })
+                    
+                    if trending:
+                        logger.info(f"[DEXSCREENER] Found {len(trending)} trending tokens")
+                    
+                    return trending
+                    
+        except Exception as e:
+            logger.debug(f"[DEXSCREENER] Error: {e}")
+            return []
+    
+    async def get_coinglass_signals(self) -> Dict[str, Any]:
+        """
+        Агрегированный анализ данных с Coinglass
+        Возвращает торговые сигналы на основе:
+        - Funding rates
+        - Liquidations
+        - Long/Short ratio
+        """
+        signals = {
+            'funding': {},
+            'liquidations': {},
+            'long_short': {},
+            'overall_signal': None,
+            'confidence': 0.5
+        }
+        
+        try:
+            # Параллельно получаем все данные
+            funding, liquidations, ls_btc, ls_eth = await asyncio.gather(
+                self.fetch_coinglass_funding(),
+                self.fetch_coinglass_liquidations(),
+                self.fetch_coinglass_long_short_ratio('BTC'),
+                self.fetch_coinglass_long_short_ratio('ETH'),
+                return_exceptions=True
+            )
+            
+            if not isinstance(funding, Exception):
+                signals['funding'] = funding
+            if not isinstance(liquidations, Exception):
+                signals['liquidations'] = liquidations
+            if not isinstance(ls_btc, Exception):
+                signals['long_short']['BTC'] = ls_btc
+            if not isinstance(ls_eth, Exception):
+                signals['long_short']['ETH'] = ls_eth
+            
+            # Анализируем сигналы
+            long_votes = 0
+            short_votes = 0
+            
+            # Funding signals
+            if signals['funding'].get('extreme_short'):
+                long_votes += len(signals['funding']['extreme_short'])
+            if signals['funding'].get('extreme_long'):
+                short_votes += len(signals['funding']['extreme_long'])
+            
+            # Liquidation signal
+            if signals['liquidations'].get('signal') == 'LONG':
+                long_votes += 2
+            elif signals['liquidations'].get('signal') == 'SHORT':
+                short_votes += 2
+            
+            # Long/Short ratio
+            for ls_data in signals['long_short'].values():
+                if isinstance(ls_data, dict):
+                    if ls_data.get('signal') == 'LONG':
+                        long_votes += 1
+                    elif ls_data.get('signal') == 'SHORT':
+                        short_votes += 1
+            
+            # Определяем общий сигнал
+            total_votes = long_votes + short_votes
+            if total_votes > 0:
+                if long_votes > short_votes:
+                    signals['overall_signal'] = 'LONG'
+                    signals['confidence'] = 0.5 + (long_votes / total_votes) * 0.3
+                elif short_votes > long_votes:
+                    signals['overall_signal'] = 'SHORT'
+                    signals['confidence'] = 0.5 + (short_votes / total_votes) * 0.3
+            
+            if signals['overall_signal']:
+                logger.info(f"[COINGLASS] Overall signal: {signals['overall_signal']} (confidence: {signals['confidence']:.0%})")
+            
+        except Exception as e:
+            logger.error(f"[COINGLASS] Aggregation error: {e}")
+        
+        return signals
+    
+    # ==================== END COINGLASS ====================
+    
     async def fetch_binance_announcements(self) -> List[NewsEvent]:
         """
         Получить важные анонсы с Binance (листинги, делистинги)
@@ -1016,7 +1409,9 @@ class NewsAnalyzer:
             self.fetch_twitter_sentiment(),        # RSS новостные ленты (CoinTelegraph, Decrypt, etc.)
             self.fetch_fear_greed_index(),         # Fear & Greed Index
             self.fetch_coingecko_trending(),       # Trending на CoinGecko
-            self.fetch_binance_announcements()     # Анонсы Binance
+            self.fetch_binance_announcements(),    # Анонсы Binance
+            self.get_coinglass_signals(),          # Coinglass (funding, liquidations, L/S ratio)
+            self.fetch_dexscreener_trending()      # DexScreener trending tokens
         ]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1036,6 +1431,58 @@ class NewsAnalyzer:
         # Binance Announcements
         if isinstance(results[4], list):
             all_events.extend(results[4])
+        
+        # === COINGLASS SIGNALS ===
+        if isinstance(results[5], dict):
+            cg = results[5]
+            overall = cg.get('overall_signal')
+            if overall:
+                conf = cg.get('confidence', 0.5)
+                reasons = []
+                
+                # Funding
+                if cg.get('funding', {}).get('extreme_long'):
+                    reasons.append(f"🔴 {len(cg['funding']['extreme_long'])} монет с экстремальным funding")
+                if cg.get('funding', {}).get('extreme_short'):
+                    reasons.append(f"🟢 {len(cg['funding']['extreme_short'])} монет с негативным funding")
+                
+                # Liquidations
+                liq = cg.get('liquidations', {})
+                if liq.get('total_24h', 0) > 50_000_000:
+                    reasons.append(f"💥 Ликвидаций: ${liq['total_24h']/1e6:.1f}M за 24ч")
+                
+                # L/S Ratio
+                for symbol, ls in cg.get('long_short', {}).items():
+                    if isinstance(ls, dict) and ls.get('signal'):
+                        reasons.append(f"📊 {symbol} L/S Ratio: {ls.get('long_ratio', 50):.1f}%")
+                
+                if reasons:
+                    signals.append(TradingSignal(
+                        direction=overall,
+                        confidence=conf,
+                        source='Coinglass Analytics',
+                        reasoning=reasons,
+                        affected_coins=['BTC', 'ETH'],
+                        time_sensitive=True,
+                        expires_at=datetime.now(timezone.utc) + timedelta(hours=4),
+                        impact=NewsImpact.HIGH
+                    ))
+                    logger.info(f"[COINGLASS] Signal: {overall} ({conf:.0%}) - {reasons[0]}")
+        
+        # === DEXSCREENER TRENDING ===
+        if isinstance(results[6], list) and results[6]:
+            trending_coins = [t['symbol'][:10] for t in results[6][:5]]
+            signals.append(TradingSignal(
+                direction='WATCH',
+                confidence=0.4,
+                source='DexScreener Trending',
+                reasoning=[f"🔥 DEX Trending: {', '.join(trending_coins)}"],
+                affected_coins=trending_coins,
+                time_sensitive=True,
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=2),
+                impact=NewsImpact.MEDIUM
+            ))
+            logger.info(f"[DEXSCREENER] Trending: {trending_coins}")
         
         # Fear & Greed влияет на общий сентимент
         if isinstance(results[2], dict):
