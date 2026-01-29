@@ -303,6 +303,9 @@ class SmartAnalyzer:
         self.cache_ttl = 30  # секунд
         self.state = TradingState()
         
+        # Кэш для momentum данных (заполняется в select_best_coins)
+        self._momentum_cache: Dict[str, Dict] = {}
+        
         # === АДАПТИВНЫЕ ПОРОГИ КАЧЕСТВА v3.0 (ОПТИМИЗИРОВАНО для большего количества сделок) ===
         # Базовые настройки (используются как fallback)
         self.MIN_QUALITY = SetupQuality.C  # Снижено с B до C
@@ -2758,6 +2761,45 @@ class SmartAnalyzer:
                     bearish_signals += weight
                     reasoning.append(f"[W{weight}] {oi_change['reasoning']} (усиливает SHORT)")
         
+        # === 14. MOMENTUM BONUS (TOP MOVERS) ===
+        # Если монета в топ гейнерах/лузерах - добавляем бонус
+        momentum_info = self._momentum_cache.get(symbol)
+        if momentum_info:
+            momentum_type = momentum_info.get('type')
+            momentum_change = momentum_info.get('change', 0)
+            
+            # Вес зависит от силы движения
+            momentum_weight = min(4, int(abs(momentum_change) / 2))  # 2% = 1, 4% = 2, 6% = 3, 8%+ = 4
+            
+            if momentum_type == 'gainer':
+                # Топ гейнер - усиливаем LONG сигналы (momentum продолжение)
+                bullish_signals += momentum_weight
+                reasoning.insert(0, f"🚀 TOP GAINER +{momentum_change:.1f}%")
+                logger.info(f"[MOMENTUM] {symbol} is TOP GAINER (+{momentum_change:.1f}%), LONG bonus +{momentum_weight}")
+                
+            elif momentum_type == 'loser':
+                # Топ лузер - два варианта:
+                # 1. Если уже перепродан (RSI < 35) - возможен отскок (LONG)
+                # 2. Если ещё падает - продолжение (SHORT)
+                if rsi < 35:
+                    bullish_signals += momentum_weight
+                    reasoning.insert(0, f"📉 TOP LOSER {momentum_change:.1f}% + RSI перепродан → отскок")
+                    logger.info(f"[MOMENTUM] {symbol} is TOP LOSER but oversold RSI={rsi:.0f}, LONG bounce +{momentum_weight}")
+                else:
+                    bearish_signals += momentum_weight
+                    reasoning.insert(0, f"📉 TOP LOSER {momentum_change:.1f}%")
+                    logger.info(f"[MOMENTUM] {symbol} is TOP LOSER ({momentum_change:.1f}%), SHORT momentum +{momentum_weight}")
+                    
+            elif momentum_type == 'hot':
+                # Hot монета - усиливаем текущее направление
+                if momentum_change > 0:
+                    bullish_signals += momentum_weight
+                    reasoning.insert(0, f"🔥 HOT +{momentum_change:.1f}%")
+                else:
+                    bearish_signals += momentum_weight
+                    reasoning.insert(0, f"🔥 HOT {momentum_change:.1f}%")
+                logger.info(f"[MOMENTUM] {symbol} is HOT ({momentum_change:+.1f}%), bonus +{momentum_weight}")
+        
         # Логируем взвешенные сигналы
         logger.info(f"[SMART] Weighted Signals: Bullish={bullish_signals}, Bearish={bearish_signals}")
         
@@ -3068,6 +3110,124 @@ class SmartAnalyzer:
     
     # ==================== COIN SELECTION ====================
     
+    async def get_top_movers(self, top_n: int = 10) -> Dict[str, List[Dict]]:
+        """
+        Получить топ монеты по движению с Bybit
+        
+        Returns:
+            {
+                'gainers': [{'symbol': 'BTC/USDT', 'change': 5.2, 'turnover': 1000000000, 'price': 95000}, ...],
+                'losers': [{'symbol': 'ETH/USDT', 'change': -4.1, ...}, ...],
+                'volume': [{'symbol': 'SOL/USDT', 'turnover': 500000000, ...}, ...],
+                'hot': [...]  # Комбинация: высокий объём + высокое движение
+            }
+        """
+        result = {
+            'gainers': [],
+            'losers': [],
+            'volume': [],
+            'hot': []
+        }
+        
+        try:
+            session = await self._get_session()
+            url = "https://api.bybit.com/v5/market/tickers?category=linear"
+            
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"[TOP_MOVERS] Bybit API error: {resp.status}")
+                    return result
+                data = await resp.json()
+            
+            if data.get('retCode') != 0:
+                logger.warning(f"[TOP_MOVERS] Bybit retCode: {data.get('retCode')}")
+                return result
+            
+            tickers = data.get('result', {}).get('list', [])
+            
+            all_coins = []
+            
+            for ticker in tickers:
+                symbol = ticker.get('symbol', '')
+                
+                if not symbol.endswith('USDT'):
+                    continue
+                
+                # Пропускаем стейблы
+                skip = ['USDC', 'BUSD', 'TUSD', 'DAI', 'FDUSD', 'USDP', 'GUSD']
+                if any(s in symbol for s in skip):
+                    continue
+                
+                try:
+                    turnover = float(ticker.get('turnover24h', '0'))
+                    price_change = float(ticker.get('price24hPcnt', '0')) * 100  # В процентах
+                    last_price = float(ticker.get('lastPrice', '0'))
+                    volume = float(ticker.get('volume24h', '0'))
+                    
+                    # Минимум $5M оборота для ликвидности
+                    if turnover < 5_000_000:
+                        continue
+                    
+                    base = symbol.replace('USDT', '')
+                    our_symbol = f"{base}/USDT"
+                    
+                    coin_info = {
+                        'symbol': our_symbol,
+                        'base': base,
+                        'change': price_change,
+                        'turnover': turnover,
+                        'volume': volume,
+                        'price': last_price,
+                        'abs_change': abs(price_change),
+                        # Hot score = движение * ликвидность
+                        'hot_score': abs(price_change) * (turnover / 100_000_000)
+                    }
+                    
+                    all_coins.append(coin_info)
+                    
+                except (ValueError, TypeError):
+                    continue
+            
+            # Сортируем по разным критериям
+            
+            # Топ гейнеры (по росту)
+            gainers = sorted([c for c in all_coins if c['change'] > 1.0], 
+                           key=lambda x: x['change'], reverse=True)
+            result['gainers'] = gainers[:top_n]
+            
+            # Топ лузеры (по падению)
+            losers = sorted([c for c in all_coins if c['change'] < -1.0], 
+                          key=lambda x: x['change'])
+            result['losers'] = losers[:top_n]
+            
+            # Топ по объёму
+            by_volume = sorted(all_coins, key=lambda x: x['turnover'], reverse=True)
+            result['volume'] = by_volume[:top_n]
+            
+            # Hot - комбинация движения и объёма (самые активные)
+            by_hot = sorted([c for c in all_coins if c['abs_change'] > 2.0], 
+                          key=lambda x: x['hot_score'], reverse=True)
+            result['hot'] = by_hot[:top_n]
+            
+            logger.info(f"[TOP_MOVERS] Gainers: {len(result['gainers'])}, Losers: {len(result['losers'])}, Hot: {len(result['hot'])}")
+            
+            if result['gainers']:
+                top3_gainers = [f"{c['base']}(+{c['change']:.1f}%)" for c in result['gainers'][:3]]
+                logger.info(f"[TOP_MOVERS] 🚀 Top Gainers: {', '.join(top3_gainers)}")
+            
+            if result['losers']:
+                top3_losers = [f"{c['base']}({c['change']:.1f}%)" for c in result['losers'][:3]]
+                logger.info(f"[TOP_MOVERS] 📉 Top Losers: {', '.join(top3_losers)}")
+            
+            if result['hot']:
+                top3_hot = [f"{c['base']}({c['change']:+.1f}%)" for c in result['hot'][:3]]
+                logger.info(f"[TOP_MOVERS] 🔥 Hot: {', '.join(top3_hot)}")
+            
+        except Exception as e:
+            logger.error(f"[TOP_MOVERS] Error: {e}")
+        
+        return result
+    
     # Категории монет для диверсификации v2.0 - РАСШИРЕННЫЙ СПИСОК
     COIN_CATEGORIES = {
         'major': ['BTC', 'ETH', 'BNB', 'XRP'],  # Топ-4 по капитализации
@@ -3121,30 +3281,78 @@ class SmartAnalyzer:
     
     async def select_best_coins(self, top_n: int = 5) -> List[str]:
         """
-        Выбор лучших монет для торговли v3.0 - КАТЕГОРИЙНЫЙ ПОДХОД
+        Выбор лучших монет для торговли v4.0 - TOP MOVERS FIRST
         
-        СТРАТЕГИЯ:
-        1. Многоуровневая ликвидность + категорийный отбор
-        2. По 2-3 монеты из каждой категории для диверсификации
-        3. Приоритизация по волатильности и объёму
+        НОВАЯ СТРАТЕГИЯ:
+        1. ПРИОРИТЕТ: Топ гейнеры и лузеры с Bybit (там momentum!)
+        2. Затем: Hot монеты (высокий объём + движение)
+        3. Fallback: Категорийный отбор
         
-        КРИТЕРИИ:
-        - Минимум $20M оборот
-        - Волатильность 0.3-12%
-        - Диверсификация по категориям
+        ЭТО ДАЁТ:
+        - Больше сделок (фокус на активных монетах)
+        - Лучший momentum (торгуем то что движется)
+        - Выше вероятность продолжения движения
         """
         
+        # === ШАГА 1: Получаем топ movers ===
+        top_movers = await self.get_top_movers(top_n=15)
+        
+        priority_coins = []
+        seen = set()
+        
+        # Добавляем топ гейнеры (momentum LONG)
+        for coin in top_movers.get('gainers', [])[:7]:
+            if coin['symbol'] not in seen:
+                priority_coins.append(coin['symbol'])
+                seen.add(coin['symbol'])
+                # Сохраняем momentum info для анализа
+                self._momentum_cache[coin['symbol']] = {
+                    'type': 'gainer',
+                    'change': coin['change'],
+                    'turnover': coin['turnover']
+                }
+        
+        # Добавляем топ лузеры (потенциальный отскок или momentum SHORT)
+        for coin in top_movers.get('losers', [])[:7]:
+            if coin['symbol'] not in seen:
+                priority_coins.append(coin['symbol'])
+                seen.add(coin['symbol'])
+                self._momentum_cache[coin['symbol']] = {
+                    'type': 'loser',
+                    'change': coin['change'],
+                    'turnover': coin['turnover']
+                }
+        
+        # Добавляем hot монеты
+        for coin in top_movers.get('hot', [])[:5]:
+            if coin['symbol'] not in seen:
+                priority_coins.append(coin['symbol'])
+                seen.add(coin['symbol'])
+                self._momentum_cache[coin['symbol']] = {
+                    'type': 'hot',
+                    'change': coin['change'],
+                    'turnover': coin['turnover']
+                }
+        
+        logger.info(f"[SELECT] Priority coins from top movers: {len(priority_coins)}")
+        
+        # Если достаточно приоритетных монет - возвращаем их
+        if len(priority_coins) >= top_n:
+            logger.info(f"[SELECT] Using {top_n} top movers: {priority_coins[:top_n]}")
+            return priority_coins[:top_n]
+        
+        # === ШАГ 2: Дополняем из общего списка ===
         try:
             session = await self._get_session()
             url = "https://api.bybit.com/v5/market/tickers?category=linear"
             
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 if resp.status != 200:
-                    return self._default_coins()
+                    return priority_coins if priority_coins else self._default_coins()
                 data = await resp.json()
             
             if data.get('retCode') != 0:
-                return self._default_coins()
+                return priority_coins if priority_coins else self._default_coins()
             
             tickers = data.get('result', {}).get('list', [])
             
@@ -3233,13 +3441,22 @@ class SmartAnalyzer:
             for cat in category_coins:
                 category_coins[cat].sort(key=lambda x: x['score'], reverse=True)
             
-            # === КАТЕГОРИЙНЫЙ ОТБОР ===
+            # === КОМБИНИРОВАННЫЙ ОТБОР: TOP MOVERS + КАТЕГОРИИ ===
             result = []
             used_bases = set()
             
-            # 1. Всегда включаем BTC и ETH (если доступны)
+            # 1. ПРИОРИТЕТ: Добавляем монеты из top movers (уже отобраны выше)
+            for symbol in priority_coins:
+                base = symbol.replace('/USDT', '')
+                if base not in used_bases:
+                    result.append(symbol)
+                    used_bases.add(base)
+            
+            logger.info(f"[COINS] Added {len(result)} priority coins from top movers")
+            
+            # 2. Добавляем BTC и ETH если ещё не включены
             for major in ['BTC', 'ETH']:
-                if major in coin_data_map:
+                if major in coin_data_map and major not in used_bases:
                     result.append(f"{major}/USDT")
                     used_bases.add(major)
             
