@@ -8769,7 +8769,7 @@ def main() -> None:
     
     # Start dashboard in background thread
     try:
-        init_dashboard(run_sql, USE_POSTGRES)
+        init_dashboard(run_sql, USE_POSTGRES, get_signal_stats)
         dashboard_thread = start_dashboard_thread()
         logger.info(f"[CONFIG] Dashboard: Running on port {os.getenv('DASHBOARD_PORT', 5000)}")
     except Exception as e:

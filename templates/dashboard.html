@@ -17,7 +17,7 @@
             background: #0d1117;
             color: #c9d1d9;
             min-height: 100vh;
-            padding: 20px;
+            padding: 12px;
         }
         
         .container {
@@ -29,15 +29,15 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 15px;
+            margin-bottom: 16px;
+            padding-bottom: 12px;
             border-bottom: 1px solid #21262d;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 8px;
         }
         
         h1 {
-            font-size: 1.5rem;
+            font-size: 1.3rem;
             font-weight: 600;
             color: #f0f6fc;
         }
@@ -45,7 +45,8 @@
         .header-actions {
             display: flex;
             align-items: center;
-            gap: 12px;
+            gap: 8px;
+            flex-wrap: wrap;
         }
         
         .btn {
@@ -496,20 +497,111 @@
             border-radius: 6px;
         }
         
+        /* Export dropdown */
+        .export-dropdown {
+            position: relative;
+            display: inline-block;
+        }
+        
+        .export-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: 100%;
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            min-width: 180px;
+            z-index: 1000;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        
+        .export-menu.show {
+            display: block;
+        }
+        
+        .export-menu-title {
+            padding: 10px 12px;
+            font-size: 0.75rem;
+            color: #8b949e;
+            border-bottom: 1px solid #21262d;
+            text-transform: uppercase;
+        }
+        
+        .export-menu-item {
+            display: block;
+            padding: 10px 12px;
+            color: #c9d1d9;
+            text-decoration: none;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .export-menu-item:hover {
+            background: #21262d;
+        }
+        
+        /* Moscow time badge */
+        .tz-badge {
+            background: rgba(88, 166, 255, 0.15);
+            color: #58a6ff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            margin-left: 4px;
+        }
+        
+        /* Stats highlight cards */
+        .card-highlight {
+            border-left: 3px solid #238636;
+        }
+        
+        .card-highlight.warning {
+            border-left-color: #d29922;
+        }
+        
+        .card-highlight.info {
+            border-left-color: #58a6ff;
+        }
+        
         @media (max-width: 768px) {
+            body { padding: 8px; }
             .reasons-grid { grid-template-columns: 1fr; }
             .grid { grid-template-columns: repeat(2, 1fr); }
-            .header-actions { width: 100%; justify-content: flex-end; }
-            .main-tabs { flex-wrap: wrap; }
-            .users-table { font-size: 0.7rem; }
-            .users-table th, .users-table td { padding: 8px 6px; }
+            .header-actions { width: 100%; justify-content: space-between; }
+            .main-tabs { flex-wrap: wrap; gap: 4px; }
+            .main-tab { padding: 8px 12px; font-size: 0.8rem; }
+            .users-table { font-size: 0.65rem; }
+            .users-table th, .users-table td { padding: 6px 4px; }
+            .card { padding: 12px; }
+            .card-value { font-size: 1.2rem; }
+            .card-label { font-size: 0.6rem; }
+            h1 { font-size: 1.1rem; }
+            .btn { padding: 6px 10px; font-size: 0.75rem; }
+            .section-title { font-size: 0.9rem; }
+            .trades-table { font-size: 0.7rem; }
+            .trades-table th, .trades-table td { padding: 8px 6px; }
+            .log-entry { flex-wrap: wrap; gap: 4px; }
+            .log-time { min-width: 100px; font-size: 0.65rem; }
+            .log-message { font-size: 0.7rem; }
+        }
+        
+        @media (max-width: 480px) {
+            .grid { grid-template-columns: 1fr 1fr; gap: 8px; }
+            .card { padding: 10px; }
+            .card-value { font-size: 1rem; }
+            .header-actions { gap: 4px; }
+            .btn { padding: 5px 8px; font-size: 0.7rem; gap: 3px; }
+            .main-tabs { padding-bottom: 8px; margin-bottom: 16px; }
+            .main-tab { padding: 6px 10px; font-size: 0.75rem; flex: 1; text-align: center; }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>Trading Bot</h1>
+            <h1>Trading Bot <span class="tz-badge">MSK</span></h1>
             <div class="header-actions">
                 <div class="status">
                     <span class="status-dot"></span>
@@ -523,6 +615,27 @@
                     </svg>
                     Refresh
                 </button>
+                <div class="export-dropdown">
+                    <button class="btn" onclick="toggleExportMenu()">
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                            <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+                        </svg>
+                        Export
+                    </button>
+                    <div class="export-menu" id="exportMenu">
+                        <div class="export-menu-title">Период экспорта</div>
+                        <div class="export-menu-item" onclick="exportLogs(1, 'hours')">1 час</div>
+                        <div class="export-menu-item" onclick="exportLogs(6, 'hours')">6 часов</div>
+                        <div class="export-menu-item" onclick="exportLogs(12, 'hours')">12 часов</div>
+                        <div class="export-menu-item" onclick="exportLogs(24, 'hours')">24 часа</div>
+                        <div class="export-menu-item" onclick="exportLogs(3, 'days')">3 дня</div>
+                        <div class="export-menu-item" onclick="exportLogs(7, 'days')">7 дней</div>
+                        <div class="export-menu-item" onclick="exportLogs(30, 'days')">30 дней</div>
+                        <div class="export-menu-item" onclick="exportLogs(1, 'months')">1 месяц</div>
+                        <div class="export-menu-item" onclick="exportLogs(3, 'months')">3 месяца</div>
+                    </div>
+                </div>
                 <button class="btn btn-primary" onclick="shareStats()">
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
                         <path d="M13.5 1a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM11 2.5a2.5 2.5 0 1 1 .603 1.628l-6.718 3.12a2.499 2.499 0 0 1 0 1.504l6.718 3.12a2.5 2.5 0 1 1-.488.876l-6.718-3.12a2.5 2.5 0 1 1 0-3.256l6.718-3.12A2.5 2.5 0 0 1 11 2.5zm-8.5 4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm11 5.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
@@ -567,6 +680,15 @@
                 <div class="card-label">Total Closed</div>
                 <div class="card-value" id="totalClosed">-</div>
             </div>
+            <div class="card card-highlight info">
+                <div class="card-label">📊 Проанализировано</div>
+                <div class="card-value neutral" id="analyzed">-</div>
+            </div>
+            <div class="card card-highlight warning">
+                <div class="card-label">❌ Не запущено</div>
+                <div class="card-value" id="rejected">-</div>
+                <div class="card-sub" id="rejectedPct">-</div>
+            </div>
             <div class="card">
                 <div class="card-label">Today's PnL</div>
                 <div class="card-value" id="todayPnl">-</div>
@@ -596,6 +718,38 @@
             <div class="card">
                 <div class="card-label">Total Volume</div>
                 <div class="card-value small" id="totalVolume">-</div>
+            </div>
+        </div>
+        
+        <!-- Winrate Breakdown -->
+        <div class="section">
+            <h2 class="section-title">🎯 Успешность по порогам</h2>
+            <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
+                <div class="card">
+                    <div class="card-label">>60% WR</div>
+                    <div class="card-value small" id="wr60">-</div>
+                    <div class="card-sub" id="wr60trades">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">>70% WR</div>
+                    <div class="card-value small" id="wr70">-</div>
+                    <div class="card-sub" id="wr70trades">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">>80% WR</div>
+                    <div class="card-value small positive" id="wr80">-</div>
+                    <div class="card-sub" id="wr80trades">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">>90% WR</div>
+                    <div class="card-value small positive" id="wr90">-</div>
+                    <div class="card-sub" id="wr90trades">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">>95% WR</div>
+                    <div class="card-value small positive" id="wr95">-</div>
+                    <div class="card-sub" id="wr95trades">-</div>
+                </div>
             </div>
         </div>
         
@@ -750,9 +904,17 @@
             return sign + '$' + num.toFixed(2);
         }
         
+        // Convert to Moscow time (UTC+3)
+        function toMoscowTime(date) {
+            // Moscow is UTC+3
+            const moscowOffset = 3 * 60; // minutes
+            const utc = date.getTime() + (date.getTimezoneOffset() * 60000);
+            return new Date(utc + (moscowOffset * 60000));
+        }
+        
         function formatTime(isoString) {
             if (!isoString) return '-';
-            const date = new Date(isoString);
+            const date = toMoscowTime(new Date(isoString));
             return date.toLocaleString('ru-RU', { 
                 hour: '2-digit', 
                 minute: '2-digit',
@@ -764,7 +926,8 @@
         }
         
         function formatTime24(date) {
-            return date.toLocaleString('ru-RU', {
+            const moscow = toMoscowTime(date);
+            return moscow.toLocaleString('ru-RU', {
                 hour: '2-digit',
                 minute: '2-digit',
                 second: '2-digit',
@@ -772,8 +935,32 @@
                 month: '2-digit',
                 year: 'numeric',
                 hour12: false
-            });
+            }) + ' MSK';
         }
+        
+        // Export dropdown functions
+        function toggleExportMenu() {
+            const menu = document.getElementById('exportMenu');
+            menu.classList.toggle('show');
+        }
+        
+        function exportLogs(value, unit) {
+            let url = '/api/export_logs?';
+            if (unit === 'hours') url += `hours=${value}`;
+            else if (unit === 'days') url += `days=${value}`;
+            else if (unit === 'months') url += `months=${value}`;
+            
+            window.location.href = url;
+            document.getElementById('exportMenu').classList.remove('show');
+        }
+        
+        // Close dropdown when clicking outside
+        document.addEventListener('click', function(e) {
+            const dropdown = document.querySelector('.export-dropdown');
+            if (dropdown && !dropdown.contains(e.target)) {
+                document.getElementById('exportMenu').classList.remove('show');
+            }
+        });
         
         function renderReasons(reasons, containerId) {
             const container = document.getElementById(containerId);
@@ -866,6 +1053,15 @@
                 document.getElementById('losing').textContent = data.losing;
                 document.getElementById('totalClosed').textContent = data.total_closed;
                 
+                // Analyzed and rejected stats
+                const analyzed = data.analyzed || 0;
+                const rejected = data.rejected || 0;
+                document.getElementById('analyzed').textContent = analyzed.toLocaleString();
+                document.getElementById('rejected').textContent = rejected.toLocaleString();
+                
+                const rejectedPct = analyzed > 0 ? ((rejected / analyzed) * 100).toFixed(1) : 0;
+                document.getElementById('rejectedPct').textContent = `${rejectedPct}% отклонено`;
+                
                 const pnl = parseFloat(data.total_pnl || 0);
                 const pnlEl = document.getElementById('totalPnl');
                 pnlEl.textContent = formatPnl(pnl);
@@ -882,6 +1078,34 @@
                     
             } catch (error) {
                 console.error('Error fetching stats:', error);
+            }
+        }
+        
+        async function fetchWinrateBreakdown() {
+            try {
+                const response = await fetch('/api/winrate_breakdown');
+                const data = await response.json();
+                
+                if (data.thresholds) {
+                    const t = data.thresholds;
+                    
+                    document.getElementById('wr60').textContent = t['60'].users + ' юзеров';
+                    document.getElementById('wr60trades').textContent = t['60'].trades + ' сделок';
+                    
+                    document.getElementById('wr70').textContent = t['70'].users + ' юзеров';
+                    document.getElementById('wr70trades').textContent = t['70'].trades + ' сделок';
+                    
+                    document.getElementById('wr80').textContent = t['80'].users + ' юзеров';
+                    document.getElementById('wr80trades').textContent = t['80'].trades + ' сделок';
+                    
+                    document.getElementById('wr90').textContent = t['90'].users + ' юзеров';
+                    document.getElementById('wr90trades').textContent = t['90'].trades + ' сделок';
+                    
+                    document.getElementById('wr95').textContent = t['95'].users + ' юзеров';
+                    document.getElementById('wr95trades').textContent = t['95'].trades + ' сделок';
+                }
+            } catch (error) {
+                console.error('Error fetching winrate breakdown:', error);
             }
         }
         
@@ -1068,6 +1292,7 @@
             fetchExtended();
             fetchTrades();
             fetchLogs();
+            fetchWinrateBreakdown();
         }
         
         async function shareStats() {
@@ -1250,6 +1475,7 @@
         setInterval(fetchExtended, 5000);
         setInterval(fetchTrades, 5000);
         setInterval(fetchLogs, 10000);
+        setInterval(fetchWinrateBreakdown, 15000);
     </script>
 </body>
 </html>

@@ -5,10 +5,11 @@ Minimalist web interface for monitoring trading statistics
 
 import os
 import logging
-from datetime import datetime, timedelta
-from flask import Flask, jsonify, render_template, request
+from datetime import datetime, timedelta, timezone
+from flask import Flask, jsonify, render_template, request, Response
 from threading import Thread
 from collections import deque
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -20,16 +21,35 @@ app.config['JSON_SORT_KEYS'] = False
 _run_sql = None
 _use_postgres = False
 
+# Signal stats getter (will be set from bot.py)
+_get_signal_stats = None
+
+# Moscow timezone (UTC+3)
+MOSCOW_TZ = timezone(timedelta(hours=3))
+
 # In-memory log buffer (last 500 logs)
 _log_buffer = deque(maxlen=500)
+
+
+def to_moscow_time(dt=None):
+    """Convert datetime to Moscow time string"""
+    if dt is None:
+        dt = datetime.now(MOSCOW_TZ)
+    elif dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc).astimezone(MOSCOW_TZ)
+    else:
+        dt = dt.astimezone(MOSCOW_TZ)
+    return dt.strftime('%Y-%m-%d %H:%M:%S MSK')
 
 
 class DashboardLogHandler(logging.Handler):
     """Custom log handler to capture logs for dashboard"""
     def emit(self, record):
         try:
+            # Use Moscow time
+            moscow_now = datetime.now(MOSCOW_TZ)
             log_entry = {
-                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'timestamp': moscow_now.strftime('%Y-%m-%d %H:%M:%S'),
                 'level': record.levelname,
                 'message': self.format(record)
             }
@@ -38,11 +58,12 @@ class DashboardLogHandler(logging.Handler):
             pass
 
 
-def init_dashboard(run_sql_func, use_postgres: bool = False):
+def init_dashboard(run_sql_func, use_postgres: bool = False, get_signal_stats_func=None):
     """Initialize dashboard with database function from bot.py"""
-    global _run_sql, _use_postgres
+    global _run_sql, _use_postgres, _get_signal_stats
     _run_sql = run_sql_func
     _use_postgres = use_postgres
+    _get_signal_stats = get_signal_stats_func
     
     # Add log handler to capture bot logs
     root_logger = logging.getLogger()
@@ -384,6 +405,11 @@ def api_stats():
     open_count = get_open_positions_count()
     history_stats = get_history_stats()
     
+    # Get signal stats if available
+    signal_stats = {}
+    if _get_signal_stats:
+        signal_stats = _get_signal_stats()
+    
     return jsonify({
         'open_deals': open_count,
         'total_closed': history_stats['total'],
@@ -393,7 +419,10 @@ def api_stats():
         'total_pnl': round(history_stats['total_pnl'], 2),
         'win_reasons': history_stats['win_reasons'],
         'loss_reasons': history_stats['loss_reasons'],
-        'timestamp': datetime.now().isoformat()
+        'analyzed': signal_stats.get('analyzed', 0),
+        'rejected': signal_stats.get('rejected', 0),
+        'accepted': signal_stats.get('accepted', 0),
+        'timestamp': to_moscow_time()
     })
 
 
@@ -404,7 +433,7 @@ def api_positions():
     return jsonify({
         'count': len(positions),
         'positions': positions,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': to_moscow_time()
     })
 
 
@@ -415,7 +444,7 @@ def api_trades():
     return jsonify({
         'count': len(trades),
         'trades': trades,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': to_moscow_time()
     })
 
 
@@ -425,7 +454,7 @@ def api_extended():
     stats = get_extended_stats()
     return jsonify({
         **stats,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': to_moscow_time()
     })
 
 
@@ -444,8 +473,166 @@ def api_logs():
     return jsonify({
         'memory_logs': memory_logs,
         'db_logs': db_logs,
-        'timestamp': datetime.now().isoformat()
+        'timestamp': to_moscow_time()
     })
+
+
+@app.route('/api/signal_stats')
+def api_signal_stats():
+    """Signal generation statistics endpoint"""
+    if _get_signal_stats:
+        stats = _get_signal_stats()
+    else:
+        stats = {
+            'analyzed': 0,
+            'accepted': 0,
+            'rejected': 0,
+            'reasons': {}
+        }
+    
+    return jsonify({
+        **stats,
+        'timestamp': to_moscow_time()
+    })
+
+
+@app.route('/api/winrate_breakdown')
+def api_winrate_breakdown():
+    """Get breakdown of users/trades by winrate thresholds"""
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected'})
+    
+    try:
+        # Get users with winrate stats
+        users_wr = _run_sql("""
+            SELECT 
+                h.user_id,
+                COUNT(*) as total_trades,
+                SUM(CASE WHEN h.pnl > 0 THEN 1 ELSE 0 END) as wins
+            FROM history h
+            GROUP BY h.user_id
+            HAVING COUNT(*) >= 5
+        """, fetch="all")
+        
+        thresholds = {
+            '60': {'users': 0, 'trades': 0},
+            '70': {'users': 0, 'trades': 0},
+            '80': {'users': 0, 'trades': 0},
+            '90': {'users': 0, 'trades': 0},
+            '95': {'users': 0, 'trades': 0}
+        }
+        
+        for user in (users_wr or []):
+            total = user['total_trades']
+            wins = user['wins']
+            wr = (wins / total * 100) if total > 0 else 0
+            
+            if wr >= 60:
+                thresholds['60']['users'] += 1
+                thresholds['60']['trades'] += total
+            if wr >= 70:
+                thresholds['70']['users'] += 1
+                thresholds['70']['trades'] += total
+            if wr >= 80:
+                thresholds['80']['users'] += 1
+                thresholds['80']['trades'] += total
+            if wr >= 90:
+                thresholds['90']['users'] += 1
+                thresholds['90']['trades'] += total
+            if wr >= 95:
+                thresholds['95']['users'] += 1
+                thresholds['95']['trades'] += total
+        
+        return jsonify({
+            'thresholds': thresholds,
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting winrate breakdown: {e}")
+        return jsonify({'error': str(e)})
+
+
+@app.route('/api/export_logs')
+def api_export_logs():
+    """Export logs for a specified period"""
+    # Period: hours, days, or months
+    hours = request.args.get('hours', type=int)
+    days = request.args.get('days', type=int)
+    months = request.args.get('months', type=int)
+    
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected'})
+    
+    # Calculate the cutoff time
+    now = datetime.now()
+    if hours:
+        cutoff = now - timedelta(hours=hours)
+        period_str = f"{hours}h"
+    elif days:
+        cutoff = now - timedelta(days=days)
+        period_str = f"{days}d"
+    elif months:
+        cutoff = now - timedelta(days=months * 30)
+        period_str = f"{months}m"
+    else:
+        cutoff = now - timedelta(hours=24)  # Default 24h
+        period_str = "24h"
+    
+    try:
+        # Get logs from database
+        if _use_postgres:
+            db_logs = _run_sql("""
+                SELECT timestamp, category, level, user_id, message, symbol, direction, data
+                FROM trading_logs
+                WHERE timestamp > %s
+                ORDER BY timestamp DESC
+            """.replace('%s', '?'), (cutoff.isoformat(),), fetch="all")
+        else:
+            db_logs = _run_sql("""
+                SELECT timestamp, category, level, user_id, message, symbol, direction, data
+                FROM trading_logs
+                WHERE timestamp > ?
+                ORDER BY timestamp DESC
+            """, (cutoff.isoformat(),), fetch="all")
+        
+        # Get in-memory logs
+        memory_logs = list(_log_buffer)
+        memory_logs.reverse()
+        
+        # Filter memory logs by time
+        filtered_memory = []
+        for log in memory_logs:
+            try:
+                log_time = datetime.strptime(log['timestamp'], '%Y-%m-%d %H:%M:%S')
+                if log_time > cutoff:
+                    filtered_memory.append(log)
+            except:
+                pass
+        
+        # Combine and format for export
+        export_data = {
+            'period': period_str,
+            'exported_at': to_moscow_time(),
+            'cutoff': cutoff.isoformat(),
+            'db_logs_count': len(db_logs or []),
+            'memory_logs_count': len(filtered_memory),
+            'db_logs': db_logs or [],
+            'memory_logs': filtered_memory
+        }
+        
+        # Return as downloadable JSON
+        response = Response(
+            json.dumps(export_data, indent=2, ensure_ascii=False, default=str),
+            mimetype='application/json',
+            headers={
+                'Content-Disposition': f'attachment; filename=logs_export_{period_str}_{now.strftime("%Y%m%d_%H%M%S")}.json'
+            }
+        )
+        return response
+        
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error exporting logs: {e}")
+        return jsonify({'error': str(e)})
 
 
 @app.route('/api/users')
@@ -468,7 +655,7 @@ def api_users():
             'active_traders': active_traders,
             'auto_traders': auto_traders
         },
-        'timestamp': datetime.now().isoformat()
+        'timestamp': to_moscow_time()
     })
 
 
@@ -481,7 +668,7 @@ def dashboard():
 @app.route('/health')
 def health():
     """Health check endpoint"""
-    return jsonify({'status': 'ok', 'timestamp': datetime.now().isoformat()})
+    return jsonify({'status': 'ok', 'timestamp': to_moscow_time()})
 
 
 @app.route('/api/user/<int:user_id>')
@@ -531,7 +718,7 @@ def api_user_info(user_id):
             'history_count': len(history) if history else 0,
             'stats': stats,
             'user_logs': user_logs or [],
-            'timestamp': datetime.now().isoformat()
+            'timestamp': to_moscow_time()
         })
     except Exception as e:
         logger.error(f"[DASHBOARD] Error getting user info: {e}")
@@ -556,7 +743,7 @@ def api_audit():
         
         return jsonify({
             'logs': logs or [],
-            'timestamp': datetime.now().isoformat()
+            'timestamp': to_moscow_time()
         })
     except Exception as e:
         return jsonify({'error': str(e)})
