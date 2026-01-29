@@ -314,6 +314,20 @@ def init_db():
     except Exception as e:
         logger.warning(f"[DB] Migration warning (realized_pnl): {e}")
     
+    # Миграция: добавляем is_auto для позиций (авто-сделки)
+    try:
+        if USE_POSTGRES:
+            c.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS is_auto INTEGER DEFAULT 0")
+        else:
+            c.execute("PRAGMA table_info(positions)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'is_auto' not in columns:
+                c.execute("ALTER TABLE positions ADD COLUMN is_auto INTEGER DEFAULT 0")
+        conn.commit()
+        logger.info("[DB] Migration: is_auto column ensured")
+    except Exception as e:
+        logger.warning(f"[DB] Migration warning (is_auto): {e}")
+    
     # Миграция: добавляем поля для авто-трейда пользователя
     try:
         if USE_POSTGRES:
@@ -507,19 +521,21 @@ def db_get_positions(user_id: int) -> List[Dict]:
 
 def db_add_position(user_id: int, pos: Dict) -> int:
     """Добавить позицию"""
+    is_auto = 1 if pos.get('is_auto', False) else 0
+    
     if USE_POSTGRES:
         query = """INSERT INTO positions
-            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
     else:
         query = """INSERT INTO positions
-            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
     pos_id = run_sql(query,
         (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
-         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0), pos.get('realized_pnl', 0)), fetch="id")
-    logger.info(f"[DB] Position {pos_id} added for user {user_id}")
+         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0), pos.get('realized_pnl', 0), is_auto), fetch="id")
+    logger.info(f"[DB] Position {pos_id} added for user {user_id} (is_auto={is_auto})")
     return pos_id
 
 # Whitelist of allowed position columns for updates (security)
@@ -4788,20 +4804,11 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     logger.warning(f"[AUTO_TRADE] User {auto_user_id}: Bybit failed, skipping")
                     continue
                 
-                # === ОТКРЫТИЕ ПОЗИЦИИ ===
+                # === ОТКРЫТИЕ ПОЗИЦИИ (С ПОЛНОЙ ЗАЩИТОЙ ОТ ПОТЕРИ ДЕНЕГ) ===
                 commission = auto_bet * (COMMISSION_PERCENT / 100)
                 
-                # Обновляем баланс
-                async with get_user_lock(auto_user_id):
-                    auto_user = get_user(auto_user_id)
-                    auto_user['balance'] -= auto_bet
-                    auto_user['balance'] = sanitize_balance(auto_user['balance'])
-                    new_balance = auto_user['balance']
-                    save_user(auto_user_id)
-                
-                await add_commission(commission, user_id=auto_user_id)
-                
-                # Создаём позицию С ЗАЩИТОЙ ОТ ПОТЕРИ ДЕНЕГ
+                # СНАЧАЛА создаём позицию, ПОТОМ списываем баланс
+                # Это защищает от потери денег при ошибках
                 try:
                     position = {
                         'symbol': symbol,
@@ -4819,24 +4826,37 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                         'commission': float(commission),
                         'pnl': float(-commission),
                         'bybit_qty': bybit_qty if auto_user_id == AUTO_TRADE_USER_ID else 0,
-                        'original_amount': float(auto_bet)
+                        'original_amount': float(auto_bet),
+                        'is_auto': True  # Помечаем как авто-сделку
                     }
                     
                     pos_id = db_add_position(auto_user_id, position)
                     position['id'] = pos_id
                     
-                    # Обновляем кэш
-                    positions_cache.set(auto_user_id, db_get_positions(auto_user_id))
-                except Exception as pos_error:
-                    # КРИТИЧЕСКАЯ ОШИБКА: позиция не создалась, возвращаем деньги
-                    logger.critical(f"[AUTO_TRADE] ❌ CRITICAL: Position creation failed for user {auto_user_id}, restoring ${auto_bet}! Error: {pos_error}")
+                    # Позиция создана успешно, теперь списываем баланс
                     async with get_user_lock(auto_user_id):
                         auto_user = get_user(auto_user_id)
-                        auto_user['balance'] += auto_bet  # Возвращаем деньги
+                        auto_user['balance'] -= auto_bet
                         auto_user['balance'] = sanitize_balance(auto_user['balance'])
+                        new_balance = auto_user['balance']
                         save_user(auto_user_id)
-                    trade_logger.log_error(f"Auto-trade position creation failed, restored ${auto_bet} to user {auto_user_id}", error=pos_error, user_id=auto_user_id)
-                    continue  # Пропускаем этого юзера
+                    
+                    # Обновляем кэш позиций
+                    positions_cache.set(auto_user_id, db_get_positions(auto_user_id))
+                    
+                    # Комиссия - в try/except чтобы не терять деньги
+                    try:
+                        await add_commission(commission, user_id=auto_user_id)
+                    except Exception as comm_error:
+                        logger.error(f"[AUTO_TRADE] Commission error for user {auto_user_id}: {comm_error}")
+                        # Не критично - позиция уже создана, баланс списан
+                    
+                except Exception as pos_error:
+                    # КРИТИЧЕСКАЯ ОШИБКА: позиция не создалась
+                    # НЕ списываем баланс, просто пропускаем
+                    logger.critical(f"[AUTO_TRADE] ❌ CRITICAL: Position creation failed for user {auto_user_id}: {pos_error}")
+                    trade_logger.log_error(f"Auto-trade position creation failed for user {auto_user_id}", error=pos_error, user_id=auto_user_id)
+                    continue  # Пропускаем этого юзера - баланс не тронут!
                 
                 # Отправляем уведомление
                 auto_msg = f"""<b>🤖 АВТО-ТРЕЙД</b>
@@ -6720,14 +6740,27 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     await hedger.set_trading_stop(pos['symbol'].replace("/", ""), pos['direction'], tp=tp2, sl=pos['sl'])
                 
                 try:
-                    await context.bot.send_message(user_id, f"""<b>✅ TP1 достигнут</b>
+                    is_auto = pos.get('is_auto', False)
+                    if is_auto:
+                        tp1_msg = f"""<b>🤖 АВТО-СДЕЛКА | TP1</b>
+
+{ticker} | {pos['direction']} | <b>+${partial_pnl:.2f}</b>
+
+Закрыто 50%, SL → безубыток
+Следующая цель: TP2
+
+💰 Баланс: ${user['balance']:.2f}"""
+                    else:
+                        tp1_msg = f"""<b>✅ TP1 достигнут</b>
 
 {ticker} | <b>+${partial_pnl:.2f}</b>
 Закрыто 50%, SL → безубыток
 Следующая цель: TP2
 
-💰 Баланс: ${user['balance']:.2f}""", parse_mode="HTML")
-                    logger.info(f"[TP1] User {user_id} {ticker}: +${partial_pnl:.2f}, remaining {remaining_amount:.0f}")
+💰 Баланс: ${user['balance']:.2f}"""
+                    
+                    await context.bot.send_message(user_id, tp1_msg, parse_mode="HTML")
+                    logger.info(f"[TP1] User {user_id} {ticker}: +${partial_pnl:.2f}, remaining {remaining_amount:.0f} (auto={is_auto})")
                 except Exception as e:
                     logger.error(f"[TP1] Notify error: {e}")
                 continue
@@ -6793,14 +6826,27 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     await hedger.set_trading_stop(pos['symbol'].replace("/", ""), pos['direction'], tp=tp3, sl=pos['sl'])
                 
                 try:
-                    await context.bot.send_message(user_id, f"""<b>✅ TP2 достигнут</b>
+                    is_auto = pos.get('is_auto', False)
+                    if is_auto:
+                        tp2_msg = f"""<b>🤖 АВТО-СДЕЛКА | TP2</b>
+
+{ticker} | {pos['direction']} | <b>+${partial_pnl:.2f}</b>
+
+Закрыто 80%, moonbag 20%
+Цель: TP3
+
+💰 Баланс: ${user['balance']:.2f}"""
+                    else:
+                        tp2_msg = f"""<b>✅ TP2 достигнут</b>
 
 {ticker} | <b>+${partial_pnl:.2f}</b>
 Закрыто 80%, moonbag 20%
 Цель: TP3
 
-💰 Баланс: ${user['balance']:.2f}""", parse_mode="HTML")
-                    logger.info(f"[TP2] User {user_id} {ticker}: +${partial_pnl:.2f}, runner {remaining_amount:.0f}")
+💰 Баланс: ${user['balance']:.2f}"""
+                    
+                    await context.bot.send_message(user_id, tp2_msg, parse_mode="HTML")
+                    logger.info(f"[TP2] User {user_id} {ticker}: +${partial_pnl:.2f}, runner {remaining_amount:.0f} (auto={is_auto})")
                 except Exception as e:
                     logger.error(f"[TP2] Notify error: {e}")
                 continue
@@ -6867,37 +6913,77 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     positions_cache.set(user_id, [p for p in current_positions if p.get('id') != pos_id_to_remove])
                 
                 pnl_abs = abs(real_pnl)
+                is_auto = pos.get('is_auto', False)
+                pnl_sign = "+" if real_pnl >= 0 else "-"
                 
-                if hit_tp3:
-                    text = f"""<b>🎯 TP3 Runner</b>
+                # Специальные сообщения для авто-сделок
+                if is_auto:
+                    if hit_tp3:
+                        text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>{pnl_sign}${pnl_abs:.2f}</b> | TP3 🎯
+
+{ticker} | {pos['direction']}
+{format_price(pos['entry'])} → {format_price(exit_price)}
+Все цели достигнуты!
+
+💰 Баланс: ${user['balance']:.2f}"""
+                    elif real_pnl >= 0:
+                        text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>+${real_pnl:.2f}</b> | Безубыток 📊
+
+{ticker} | {pos['direction']}
+Защитный стоп сработал.
+
+💰 Баланс: ${user['balance']:.2f}"""
+                    else:
+                        text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>-${pnl_abs:.2f}</b> | Stop Loss 📉
+
+{ticker} | {pos['direction']}
+Стоп отработал.
+
+💰 Баланс: ${user['balance']:.2f}"""
+                    
+                    keyboard = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🏠 Домой", callback_data="menu")]
+                    ])
+                else:
+                    # Обычные сделки
+                    if hit_tp3:
+                        text = f"""<b>🎯 TP3 Runner</b>
 
 {ticker} | <b>+${pnl_abs:.2f}</b>
 {format_price(pos['entry'])} → {format_price(exit_price)}
 Все цели достигнуты!
 
 💰 Баланс: ${user['balance']:.2f}"""
-                elif real_pnl >= 0:
-                    text = f"""<b>📊 Безубыток</b>
+                    elif real_pnl >= 0:
+                        text = f"""<b>📊 Безубыток</b>
 
 {ticker} | ${real_pnl:.2f}
 Защитный стоп сработал.
 
 💰 Баланс: ${user['balance']:.2f}"""
-                else:
-                    text = f"""<b>📉 Stop Loss</b>
+                    else:
+                        text = f"""<b>📉 Stop Loss</b>
 
 {ticker} | <b>-${pnl_abs:.2f}</b>
 Стоп отработал.
 
 💰 Баланс: ${user['balance']:.2f}"""
+                    
+                    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
                 
                 try:
                     await context.bot.send_message(
                         user_id, text,
                         parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📊 Сделки", callback_data="trades")]])
+                        reply_markup=keyboard
                     )
-                    logger.info(f"[AUTO-CLOSE] User {user_id} {reason} {ticker}: Real PnL=${real_pnl:.2f}, Balance: ${user['balance']:.2f}")
+                    logger.info(f"[AUTO-CLOSE] User {user_id} {reason} {ticker}: Real PnL=${real_pnl:.2f}, Balance: ${user['balance']:.2f} (auto={is_auto})")
                 except Exception as e:
                     logger.error(f"[AUTO-CLOSE] Failed to notify user {user_id}: {e}")
     except Exception as e:

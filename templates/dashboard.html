@@ -854,6 +854,54 @@
         </div>
     </div>
     
+    <!-- Users Tab -->
+    <div id="tab-users" class="tab-content">
+        <div class="users-summary">
+            <div class="summary-card">
+                <div class="summary-label">Всего юзеров</div>
+                <div class="summary-value" id="totalUsers">-</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Общий баланс</div>
+                <div class="summary-value" id="usersBalance">-</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Депозиты</div>
+                <div class="summary-value" id="usersDeposits">-</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Активных</div>
+                <div class="summary-value" id="activeTraders">-</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-label">Авто-трейд</div>
+                <div class="summary-value" id="autoTraders">-</div>
+            </div>
+        </div>
+        
+        <div class="users-table-container">
+            <table class="users-table">
+                <thead>
+                    <tr>
+                        <th onclick="sortUsers('user_id')">ID</th>
+                        <th onclick="sortUsers('balance')">Баланс</th>
+                        <th onclick="sortUsers('total_deposit')">Депозит</th>
+                        <th onclick="sortUsers('total_trades')">Сделок</th>
+                        <th onclick="sortUsers('wins')">W/L</th>
+                        <th onclick="sortUsers('winrate')">WR%</th>
+                        <th onclick="sortUsers('total_pnl')">PnL</th>
+                        <th onclick="sortUsers('open_positions')">Позиции</th>
+                        <th onclick="sortUsers('trading')">Торгует</th>
+                        <th onclick="sortUsers('auto_trade')">Авто</th>
+                    </tr>
+                </thead>
+                <tbody id="usersBody">
+                    <tr><td colspan="10" class="no-data">Загрузка...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
     <!-- Hidden Share Card -->
     <div id="shareCard">
         <div class="share-header">
@@ -1047,15 +1095,22 @@
                 const data = await response.json();
                 currentStats = data;
                 
-                document.getElementById('openDeals').textContent = data.open_deals;
-                document.getElementById('winRate').textContent = data.win_rate + '%';
-                document.getElementById('profitable').textContent = data.profitable;
-                document.getElementById('losing').textContent = data.losing;
-                document.getElementById('totalClosed').textContent = data.total_closed;
+                // Безопасное получение значений с fallback на 0
+                const openDeals = data.open_deals ?? 0;
+                const profitable = data.profitable ?? 0;
+                const losing = data.losing ?? 0;
+                const totalClosed = data.total_closed ?? 0;
+                const winRate = data.win_rate ?? 0;
+                
+                document.getElementById('openDeals').textContent = openDeals;
+                document.getElementById('winRate').textContent = winRate + '%';
+                document.getElementById('profitable').textContent = profitable;
+                document.getElementById('losing').textContent = losing;
+                document.getElementById('totalClosed').textContent = totalClosed;
                 
                 // Analyzed and rejected stats
-                const analyzed = data.analyzed || 0;
-                const rejected = data.rejected || 0;
+                const analyzed = data.analyzed ?? 0;
+                const rejected = data.rejected ?? 0;
                 document.getElementById('analyzed').textContent = analyzed.toLocaleString();
                 document.getElementById('rejected').textContent = rejected.toLocaleString();
                 
@@ -1068,13 +1123,15 @@
                 pnlEl.className = 'card-value ' + (pnl >= 0 ? 'positive' : 'negative');
                 
                 const winRateEl = document.getElementById('winRate');
-                const wr = parseFloat(data.win_rate || 0);
-                winRateEl.className = 'card-value ' + (wr >= 50 ? 'positive' : wr > 0 ? 'negative' : '');
+                winRateEl.className = 'card-value ' + (winRate >= 50 ? 'positive' : winRate > 0 ? 'negative' : '');
                 
-                renderReasons(data.win_reasons, 'winReasons');
-                renderReasons(data.loss_reasons, 'lossReasons');
+                renderReasons(data.win_reasons || {}, 'winReasons');
+                renderReasons(data.loss_reasons || {}, 'lossReasons');
                 
                 document.getElementById('lastUpdate').textContent = formatTime24(new Date());
+                
+                // Debug log
+                console.log('[Dashboard] Stats loaded:', {openDeals, profitable, losing, totalClosed, winRate, analyzed, rejected});
                     
             } catch (error) {
                 console.error('Error fetching stats:', error);
@@ -1086,23 +1143,33 @@
                 const response = await fetch('/api/winrate_breakdown');
                 const data = await response.json();
                 
+                console.log('[Dashboard] Winrate breakdown:', data);
+                
                 if (data.thresholds) {
                     const t = data.thresholds;
                     
-                    document.getElementById('wr60').textContent = t['60'].users + ' юзеров';
-                    document.getElementById('wr60trades').textContent = t['60'].trades + ' сделок';
+                    const wr60 = t['60'] || {users: 0, trades: 0};
+                    const wr70 = t['70'] || {users: 0, trades: 0};
+                    const wr80 = t['80'] || {users: 0, trades: 0};
+                    const wr90 = t['90'] || {users: 0, trades: 0};
+                    const wr95 = t['95'] || {users: 0, trades: 0};
                     
-                    document.getElementById('wr70').textContent = t['70'].users + ' юзеров';
-                    document.getElementById('wr70trades').textContent = t['70'].trades + ' сделок';
+                    document.getElementById('wr60').textContent = (wr60.users || 0) + ' юзеров';
+                    document.getElementById('wr60trades').textContent = (wr60.trades || 0) + ' сделок';
                     
-                    document.getElementById('wr80').textContent = t['80'].users + ' юзеров';
-                    document.getElementById('wr80trades').textContent = t['80'].trades + ' сделок';
+                    document.getElementById('wr70').textContent = (wr70.users || 0) + ' юзеров';
+                    document.getElementById('wr70trades').textContent = (wr70.trades || 0) + ' сделок';
                     
-                    document.getElementById('wr90').textContent = t['90'].users + ' юзеров';
-                    document.getElementById('wr90trades').textContent = t['90'].trades + ' сделок';
+                    document.getElementById('wr80').textContent = (wr80.users || 0) + ' юзеров';
+                    document.getElementById('wr80trades').textContent = (wr80.trades || 0) + ' сделок';
                     
-                    document.getElementById('wr95').textContent = t['95'].users + ' юзеров';
-                    document.getElementById('wr95trades').textContent = t['95'].trades + ' сделок';
+                    document.getElementById('wr90').textContent = (wr90.users || 0) + ' юзеров';
+                    document.getElementById('wr90trades').textContent = (wr90.trades || 0) + ' сделок';
+                    
+                    document.getElementById('wr95').textContent = (wr95.users || 0) + ' юзеров';
+                    document.getElementById('wr95trades').textContent = (wr95.trades || 0) + ' сделок';
+                } else if (data.error) {
+                    console.error('[Dashboard] Winrate breakdown error:', data.error);
                 }
             } catch (error) {
                 console.error('Error fetching winrate breakdown:', error);

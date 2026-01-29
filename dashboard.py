@@ -106,16 +106,19 @@ def get_open_positions_details() -> list:
 
 def get_history_stats() -> dict:
     """Get aggregated statistics from history"""
+    default_result = {
+        'total': 0,
+        'profitable': 0,
+        'losing': 0,
+        'win_rate': 0,
+        'total_pnl': 0,
+        'win_reasons': {},
+        'loss_reasons': {}
+    }
+    
     if not _run_sql:
-        return {
-            'total': 0,
-            'profitable': 0,
-            'losing': 0,
-            'win_rate': 0,
-            'total_pnl': 0,
-            'win_reasons': {},
-            'loss_reasons': {}
-        }
+        logger.warning("[DASHBOARD] get_history_stats: _run_sql is None")
+        return default_result
     
     try:
         # Get overall stats
@@ -128,11 +131,19 @@ def get_history_stats() -> dict:
             FROM history
         """, fetch="one")
         
-        total = int(stats['total'] or 0) if stats else 0
-        profitable = int(stats['profitable'] or 0) if stats else 0
-        losing = int(stats['losing'] or 0) if stats else 0
-        total_pnl = float(stats['total_pnl'] or 0) if stats else 0
+        logger.debug(f"[DASHBOARD] History stats raw: {stats}")
+        
+        if not stats:
+            logger.warning("[DASHBOARD] get_history_stats: No stats returned")
+            return default_result
+        
+        total = int(stats.get('total') or 0)
+        profitable = int(stats.get('profitable') or 0)
+        losing = int(stats.get('losing') or 0)
+        total_pnl = float(stats.get('total_pnl') or 0)
         win_rate = round(profitable / total * 100, 2) if total > 0 else 0
+        
+        logger.debug(f"[DASHBOARD] History: total={total}, profitable={profitable}, losing={losing}")
         
         # Get win reasons breakdown
         win_reasons_rows = _run_sql("""
@@ -142,7 +153,7 @@ def get_history_stats() -> dict:
             GROUP BY reason
             ORDER BY count DESC
         """, fetch="all")
-        win_reasons = {row['reason']: row['count'] for row in (win_reasons_rows or [])}
+        win_reasons = {row['reason']: int(row['count']) for row in (win_reasons_rows or []) if row.get('reason')}
         
         # Get loss reasons breakdown
         loss_reasons_rows = _run_sql("""
@@ -152,7 +163,7 @@ def get_history_stats() -> dict:
             GROUP BY reason
             ORDER BY count DESC
         """, fetch="all")
-        loss_reasons = {row['reason']: row['count'] for row in (loss_reasons_rows or [])}
+        loss_reasons = {row['reason']: int(row['count']) for row in (loss_reasons_rows or []) if row.get('reason')}
         
         return {
             'total': total,
@@ -222,15 +233,25 @@ def get_extended_stats() -> dict:
             FROM history
         """, fetch="one")
         
-        # Today's stats
-        today_stats = _run_sql("""
-            SELECT 
-                COUNT(*) as today_trades,
-                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as today_wins,
-                SUM(pnl) as today_pnl
-            FROM history
-            WHERE DATE(closed_at) = DATE('now')
-        """, fetch="one")
+        # Today's stats (PostgreSQL и SQLite совместимый синтаксис)
+        if _use_postgres:
+            today_stats = _run_sql("""
+                SELECT 
+                    COUNT(*) as today_trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as today_wins,
+                    SUM(pnl) as today_pnl
+                FROM history
+                WHERE DATE(closed_at) = CURRENT_DATE
+            """, fetch="one")
+        else:
+            today_stats = _run_sql("""
+                SELECT 
+                    COUNT(*) as today_trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as today_wins,
+                    SUM(pnl) as today_pnl
+                FROM history
+                WHERE DATE(closed_at) = DATE('now')
+            """, fetch="one")
         
         # Streak calculation
         streak_rows = _run_sql("""
@@ -500,10 +521,16 @@ def api_signal_stats():
 def api_winrate_breakdown():
     """Get breakdown of users/trades by winrate thresholds"""
     if not _run_sql:
-        return jsonify({'error': 'Database not connected'})
+        return jsonify({'error': 'Database not connected', 'thresholds': {
+            '60': {'users': 0, 'trades': 0},
+            '70': {'users': 0, 'trades': 0},
+            '80': {'users': 0, 'trades': 0},
+            '90': {'users': 0, 'trades': 0},
+            '95': {'users': 0, 'trades': 0}
+        }})
     
     try:
-        # Get users with winrate stats
+        # Get users with winrate stats (минимум 1 сделка)
         users_wr = _run_sql("""
             SELECT 
                 h.user_id,
@@ -511,7 +538,7 @@ def api_winrate_breakdown():
                 SUM(CASE WHEN h.pnl > 0 THEN 1 ELSE 0 END) as wins
             FROM history h
             GROUP BY h.user_id
-            HAVING COUNT(*) >= 5
+            HAVING COUNT(*) >= 1
         """, fetch="all")
         
         thresholds = {
@@ -522,9 +549,11 @@ def api_winrate_breakdown():
             '95': {'users': 0, 'trades': 0}
         }
         
+        logger.debug(f"[DASHBOARD] Winrate breakdown: found {len(users_wr or [])} users with trades")
+        
         for user in (users_wr or []):
-            total = user['total_trades']
-            wins = user['wins']
+            total = int(user['total_trades'] or 0)
+            wins = int(user['wins'] or 0)
             wr = (wins / total * 100) if total > 0 else 0
             
             if wr >= 60:
@@ -548,8 +577,14 @@ def api_winrate_breakdown():
             'timestamp': to_moscow_time()
         })
     except Exception as e:
-        logger.error(f"[DASHBOARD] Error getting winrate breakdown: {e}")
-        return jsonify({'error': str(e)})
+        logger.error(f"[DASHBOARD] Error getting winrate breakdown: {e}", exc_info=True)
+        return jsonify({'error': str(e), 'thresholds': {
+            '60': {'users': 0, 'trades': 0},
+            '70': {'users': 0, 'trades': 0},
+            '80': {'users': 0, 'trades': 0},
+            '90': {'users': 0, 'trades': 0},
+            '95': {'users': 0, 'trades': 0}
+        }})
 
 
 @app.route('/api/export_logs')
@@ -669,6 +704,55 @@ def dashboard():
 def health():
     """Health check endpoint"""
     return jsonify({'status': 'ok', 'timestamp': to_moscow_time()})
+
+
+@app.route('/api/debug')
+def api_debug():
+    """Debug endpoint to check database state"""
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected'})
+    
+    try:
+        # Count history records
+        history_count = _run_sql("SELECT COUNT(*) as cnt FROM history", fetch="one")
+        
+        # Count positions
+        positions_count = _run_sql("SELECT COUNT(*) as cnt FROM positions", fetch="one")
+        
+        # Count users
+        users_count = _run_sql("SELECT COUNT(*) as cnt FROM users", fetch="one")
+        
+        # Sample history
+        sample_history = _run_sql("""
+            SELECT id, user_id, symbol, pnl, reason, closed_at 
+            FROM history 
+            ORDER BY closed_at DESC 
+            LIMIT 5
+        """, fetch="all")
+        
+        # Stats check
+        stats_check = _run_sql("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as profitable,
+                SUM(CASE WHEN pnl <= 0 THEN 1 ELSE 0 END) as losing,
+                SUM(pnl) as total_pnl
+            FROM history
+        """, fetch="one")
+        
+        return jsonify({
+            'history_count': history_count.get('cnt', 0) if history_count else 0,
+            'positions_count': positions_count.get('cnt', 0) if positions_count else 0,
+            'users_count': users_count.get('cnt', 0) if users_count else 0,
+            'sample_history': sample_history or [],
+            'stats_check': stats_check,
+            'use_postgres': _use_postgres,
+            'signal_stats_available': _get_signal_stats is not None,
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Debug endpoint error: {e}", exc_info=True)
+        return jsonify({'error': str(e)})
 
 
 @app.route('/api/user/<int:user_id>')

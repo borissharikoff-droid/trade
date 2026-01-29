@@ -169,6 +169,29 @@ class ThreadSafeCache:
             self._data.clear()
             self._locks.clear()
     
+    def __getitem__(self, key: int) -> Any:
+        """Get item with subscript notation (cache[key])"""
+        lock = self._get_lock(key)
+        with lock:
+            if key in self._data:
+                return self._data[key]
+            raise KeyError(key)
+    
+    def __setitem__(self, key: int, value: Any):
+        """Set item with subscript notation (cache[key] = value)"""
+        lock = self._get_lock(key)
+        with lock:
+            self._data[key] = value
+    
+    def __delitem__(self, key: int):
+        """Delete item with subscript notation (del cache[key])"""
+        lock = self._get_lock(key)
+        with lock:
+            if key in self._data:
+                del self._data[key]
+            else:
+                raise KeyError(key)
+    
     def __contains__(self, key: int) -> bool:
         """Check if key exists"""
         return key in self._data
