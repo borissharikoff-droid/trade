@@ -366,6 +366,28 @@ COINGLASS_ENDPOINTS = {
 # DexScreener для отслеживания хайпа на DEX
 DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex'
 
+# Nitter instances для парсинга Twitter (бесплатные RSS прокси)
+NITTER_INSTANCES = [
+    'https://nitter.privacydev.net',
+    'https://nitter.poast.org',
+    'https://nitter.cz',
+    'https://nitter.1d4.us',
+    'https://nitter.kavin.rocks',
+    'https://nitter.unixfox.eu',
+    'https://nitter.fdn.fr',
+]
+
+# Приоритетные аккаунты для мониторинга (самые важные)
+PRIORITY_TWITTER_ACCOUNTS = [
+    'realDonaldTrump', 'POTUS', 'SECGov', 'federalreserve',  # Политика/регуляторы
+    'elonmusk', 'michaeljsaylor',  # Крипто-инфлюенсеры
+    'binance', 'caborek',  # Биржи
+    'zachxbt', 'WuBlockchain',  # Инсайдеры
+    'Pentosh1', 'CryptoDonAlt', 'GCRClassic', 'AltcoinSherpa',  # Топ трейдеры
+    'LookOnChain', 'EmberCN', 'ai_9684xtpa',  # On-chain аналитика
+    'DefiIgnas', 'MilesDeutscher', 'MustStopMurad',  # Альфа
+]
+
 # Пороговые значения для сигналов
 COINGLASS_THRESHOLDS = {
     'extreme_funding_long': 0.05,    # >0.05% = перегрев лонгов
@@ -893,6 +915,169 @@ class NewsAnalyzer:
         logger.info(f"[NEWS] Fetched {len(events)} news from RSS sources")
         return events
     
+    async def fetch_twitter_posts(self, accounts: List[str] = None) -> List[NewsEvent]:
+        """
+        Получить твиты от ключевых аккаунтов через Nitter RSS
+        Nitter - бесплатный прокси для Twitter с RSS поддержкой
+        """
+        events = []
+        accounts_to_fetch = accounts or PRIORITY_TWITTER_ACCOUNTS[:12]  # Топ 12 аккаунтов
+        
+        # Находим работающий Nitter инстанс
+        working_instance = None
+        
+        async with aiohttp.ClientSession() as session:
+            # Сначала найдём рабочий инстанс
+            for instance in NITTER_INSTANCES:
+                try:
+                    async with session.get(
+                        f"{instance}/search",
+                        timeout=aiohttp.ClientTimeout(total=5),
+                        headers={'User-Agent': 'Mozilla/5.0'}
+                    ) as resp:
+                        if resp.status in [200, 301, 302]:
+                            working_instance = instance
+                            logger.debug(f"[TWITTER] Found working Nitter: {instance}")
+                            break
+                except Exception:
+                    continue
+            
+            if not working_instance:
+                logger.warning("[TWITTER] No working Nitter instance found")
+                return events
+            
+            # Парсим твиты от каждого аккаунта
+            for username in accounts_to_fetch:
+                try:
+                    rss_url = f"{working_instance}/{username}/rss"
+                    
+                    async with session.get(
+                        rss_url,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        headers={
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                            'Accept': 'application/rss+xml, application/xml, text/xml'
+                        }
+                    ) as resp:
+                        if resp.status != 200:
+                            continue
+                        
+                        content = await resp.text()
+                    
+                    # Парсим RSS
+                    items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL | re.IGNORECASE)
+                    
+                    # Информация об аккаунте
+                    account_info = TWITTER_ACCOUNTS.get(username, {
+                        'name': username,
+                        'type': 'unknown',
+                        'impact': 'MEDIUM',
+                        'keywords': []
+                    })
+                    
+                    for item in items[:5]:  # Последние 5 твитов от каждого
+                        # Парсим title (текст твита)
+                        title_match = re.search(r'<title[^>]*>(.*?)</title>', item, re.DOTALL)
+                        if not title_match:
+                            continue
+                        
+                        title = title_match.group(1)
+                        title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', title)
+                        title = re.sub(r'<[^>]+>', '', title)
+                        title = title.strip()
+                        
+                        # Пропускаем RT: и слишком короткие
+                        if not title or len(title) < 15 or title.startswith('RT:'):
+                            continue
+                        
+                        # Проверяем релевантность по ключевым словам аккаунта
+                        account_keywords = account_info.get('keywords', [])
+                        is_relevant = False
+                        
+                        title_lower = title.lower()
+                        # Всегда релевантно если от важных источников
+                        if account_info.get('type') in ['regulator', 'central_bank', 'government', 'politician']:
+                            is_relevant = True
+                        # Или если содержит ключевые слова
+                        elif any(kw.lower() in title_lower for kw in account_keywords):
+                            is_relevant = True
+                        # Или общие крипто-ключевые слова
+                        elif any(kw in title_lower for kw in ['btc', 'bitcoin', 'eth', 'crypto', 'sol', 'pump', 'dump', 'long', 'short']):
+                            is_relevant = True
+                        
+                        if not is_relevant:
+                            continue
+                        
+                        news_hash = self._get_news_hash(title, f"twitter_{username}")
+                        if news_hash in self.seen_news:
+                            continue
+                        
+                        self.seen_news.append(news_hash)
+                        
+                        # Парсим ссылку
+                        link_match = re.search(r'<link[^>]*>([^<]+)</link>', item)
+                        url = link_match.group(1).strip() if link_match else f"https://twitter.com/{username}"
+                        # Заменяем nitter URL на twitter
+                        url = re.sub(r'https?://[^/]+/', 'https://twitter.com/', url)
+                        
+                        # Парсим дату
+                        timestamp = datetime.now(timezone.utc)
+                        date_match = re.search(r'<pubDate>(.*?)</pubDate>', item)
+                        if date_match:
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                timestamp = parsedate_to_datetime(date_match.group(1))
+                            except:
+                                pass
+                        
+                        # Анализ сентимента
+                        sentiment, confidence, keywords = self.analyze_sentiment(title)
+                        category = self.detect_category(title, account_info.get('type', 'trader'))
+                        coins = self.extract_coins(title)
+                        
+                        # Определяем impact на основе типа аккаунта
+                        impact_str = account_info.get('impact', 'MEDIUM')
+                        try:
+                            base_impact = NewsImpact[impact_str]
+                        except KeyError:
+                            base_impact = NewsImpact.MEDIUM
+                        
+                        # Boost confidence для важных источников
+                        if account_info.get('type') in ['regulator', 'central_bank', 'government']:
+                            confidence = min(0.95, confidence + 0.2)
+                        elif account_info.get('type') in ['politician', 'exchange']:
+                            confidence = min(0.9, confidence + 0.1)
+                        
+                        event = NewsEvent(
+                            id=news_hash,
+                            source=f"🐦 @{username}",
+                            author=account_info.get('name', username),
+                            title=title[:200],
+                            content=title,
+                            url=url,
+                            timestamp=timestamp,
+                            sentiment=sentiment,
+                            impact=base_impact,
+                            category=category,
+                            affected_coins=coins,
+                            keywords_found=keywords,
+                            confidence=confidence
+                        )
+                        
+                        events.append(event)
+                    
+                except Exception as e:
+                    logger.debug(f"[TWITTER] Error fetching @{username}: {e}")
+                    continue
+                
+                await asyncio.sleep(0.5)  # Rate limiting между аккаунтами
+        
+        # Сортируем по времени
+        events.sort(key=lambda x: x.timestamp, reverse=True)
+        
+        logger.info(f"[TWITTER] Fetched {len(events)} tweets from {len(accounts_to_fetch)} accounts")
+        return events
+    
     async def fetch_coingecko_trending(self) -> List[NewsEvent]:
         """
         Получить trending монеты с CoinGecko - хороший индикатор хайпа
@@ -1411,7 +1596,8 @@ class NewsAnalyzer:
             self.fetch_coingecko_trending(),       # Trending на CoinGecko
             self.fetch_binance_announcements(),    # Анонсы Binance
             self.get_coinglass_signals(),          # Coinglass (funding, liquidations, L/S ratio)
-            self.fetch_dexscreener_trending()      # DexScreener trending tokens
+            self.fetch_dexscreener_trending(),     # DexScreener trending tokens
+            self.fetch_twitter_posts()             # Twitter/X посты от ключевых аккаунтов
         ]
         
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1427,6 +1613,11 @@ class NewsAnalyzer:
         # CoinGecko Trending
         if isinstance(results[3], list):
             all_events.extend(results[3])
+        
+        # Twitter Posts (index 7)
+        if isinstance(results[7], list):
+            all_events.extend(results[7])
+            logger.info(f"[TWITTER] Added {len(results[7])} tweets to news feed")
         
         # Binance Announcements
         if isinstance(results[4], list):

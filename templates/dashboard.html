@@ -692,6 +692,10 @@
             font-weight: 500;
         }
         
+        .news-source.twitter {
+            color: #1DA1F2;
+        }
+        
         .news-time {
             font-size: 0.65rem;
             color: #6e7681;
@@ -1187,7 +1191,7 @@
     <div class="news-sidebar">
         <div class="news-panel">
             <div class="news-header">
-                <span class="news-title">📰 Live News Feed</span>
+                <span class="news-title">📰 News & 🐦 Twitter</span>
                 <span class="news-sentiment neutral" id="newsSentiment">
                     <span id="sentimentIcon">⚖️</span>
                     <span id="sentimentText">NEUTRAL</span>
@@ -1874,11 +1878,13 @@
                 const sentimentClass = getSentimentClass(item.sentiment_value);
                 const impactClass = item.impact.toLowerCase();
                 const timeAgo = formatTimeAgo(item.timestamp);
+                const isTwitter = item.source.includes('@') || item.source.includes('🐦');
+                const sourceClass = isTwitter ? 'news-source twitter' : 'news-source';
                 
                 html += `
                     <div class="news-item" onclick="window.open('${item.url || '#'}', '_blank')">
                         <div class="news-item-header">
-                            <span class="news-source">${item.source}</span>
+                            <span class="${sourceClass}">${item.source}</span>
                             <span class="news-time">${timeAgo}</span>
                         </div>
                         <div class="news-item-title">${escapeHtml(item.title)}</div>
