@@ -1167,7 +1167,8 @@ async def process_multilevel_deposit_bonus(user_id: int, bot=None) -> List[Dict]
                         f"<b>📥 Реферальный бонус {level_text}</b>\n\n"
                         f"Ваш реферал сделал первый депозит!\n"
                         f"Бонус: <b>+${bonus_amount:.2f}</b>",
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
                     )
                 except Exception as e:
                     logger.warning(f"[REF_DEPOSIT] Failed to notify {referrer_id}: {e}")
@@ -8296,13 +8297,20 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             except Exception as e:
                 logger.warning(f"[RESET] Could not clear {table}: {e}")
         
-        # Системные таблицы
-        for table in ['system_settings', 'trade_logs', 'rate_limits']:
+        # Системные таблицы (кроме баннеров)
+        for table in ['trade_logs', 'rate_limits']:
             try:
                 run_sql(f"DELETE FROM {table}")
                 tables_cleared.append(table)
             except Exception as e:
                 logger.warning(f"[RESET] Could not clear {table}: {e}")
+        
+        # system_settings - очищаем всё КРОМЕ баннеров
+        try:
+            run_sql("DELETE FROM system_settings WHERE key NOT LIKE 'banner_%'")
+            tables_cleared.append('system_settings (banners preserved)')
+        except Exception as e:
+            logger.warning(f"[RESET] Could not clear system_settings: {e}")
         
         # Основная таблица пользователей - последней
         try:

@@ -443,6 +443,7 @@ def api_stats():
         'analyzed': signal_stats.get('analyzed', 0),
         'rejected': signal_stats.get('rejected', 0),
         'accepted': signal_stats.get('accepted', 0),
+        'bybit_opened': signal_stats.get('bybit_opened', 0),
         'timestamp': to_moscow_time()
     })
 

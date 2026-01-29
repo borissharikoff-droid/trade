@@ -152,6 +152,10 @@
             font-size: 1rem;
             font-weight: 600;
             color: #f0f6fc;
+            padding: 8px 12px;
+            background: rgba(33, 38, 45, 0.5);
+            border-radius: 6px;
+            border-left: 3px solid #58a6ff;
         }
         
         .tabs {
@@ -654,74 +658,107 @@
         <!-- Dashboard Tab -->
         <div id="tab-dashboard" class="tab-content active">
         
-        <!-- Main Stats Grid -->
-        <div class="grid" id="statsCard">
-            <div class="card">
-                <div class="card-label">Open Deals</div>
-                <div class="card-value neutral" id="openDeals">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Win Rate</div>
-                <div class="card-value" id="winRate">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Profitable</div>
-                <div class="card-value positive" id="profitable">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Losing</div>
-                <div class="card-value negative" id="losing">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Total PnL</div>
-                <div class="card-value" id="totalPnl">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Total Closed</div>
-                <div class="card-value" id="totalClosed">-</div>
-            </div>
-            <div class="card card-highlight info">
-                <div class="card-label">📊 Проанализировано</div>
-                <div class="card-value neutral" id="analyzed">-</div>
-            </div>
-            <div class="card card-highlight warning">
-                <div class="card-label">❌ Не запущено</div>
-                <div class="card-value" id="rejected">-</div>
-                <div class="card-sub" id="rejectedPct">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Today's PnL</div>
-                <div class="card-value" id="todayPnl">-</div>
-                <div class="card-sub" id="todayTrades">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Avg Win / Loss</div>
-                <div class="card-value small">
-                    <span class="positive" id="avgWin">-</span> / 
-                    <span class="negative" id="avgLoss">-</span>
+        <!-- 📊 СЕКЦИЯ: Текущее состояние -->
+        <div class="section">
+            <h2 class="section-title">📊 Текущее состояние</h2>
+            <div class="grid">
+                <div class="card card-highlight info">
+                    <div class="card-label">🔓 Открытые сделки</div>
+                    <div class="card-value neutral" id="openDeals">-</div>
                 </div>
-            </div>
-            <div class="card">
-                <div class="card-label">Best Trade</div>
-                <div class="card-value small positive" id="bestTrade">-</div>
-                <div class="card-sub" id="bestTradeInfo">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Worst Trade</div>
-                <div class="card-value small negative" id="worstTrade">-</div>
-                <div class="card-sub" id="worstTradeInfo">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Current Streak</div>
-                <div class="card-value" id="streak">-</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Total Volume</div>
-                <div class="card-value small" id="totalVolume">-</div>
+                <div class="card">
+                    <div class="card-label">💰 Общий PnL</div>
+                    <div class="card-value" id="totalPnl">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">📈 Сегодня PnL</div>
+                    <div class="card-value" id="todayPnl">-</div>
+                    <div class="card-sub" id="todayTrades">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">🔥 Серия</div>
+                    <div class="card-value" id="streak">-</div>
+                </div>
             </div>
         </div>
         
-        <!-- Winrate Breakdown -->
+        <!-- 🤖 СЕКЦИЯ: Анализ сигналов -->
+        <div class="section">
+            <h2 class="section-title">🤖 Анализ сигналов</h2>
+            <div class="grid">
+                <div class="card card-highlight info">
+                    <div class="card-label">🔍 Проанализировано</div>
+                    <div class="card-value neutral" id="analyzed">-</div>
+                </div>
+                <div class="card card-highlight">
+                    <div class="card-label">✅ Запущено сделок</div>
+                    <div class="card-value positive" id="accepted">-</div>
+                    <div class="card-sub" id="acceptedPct">-</div>
+                </div>
+                <div class="card card-highlight warning">
+                    <div class="card-label">❌ Отклонено</div>
+                    <div class="card-value" id="rejected">-</div>
+                    <div class="card-sub" id="rejectedPct">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">📡 На Bybit</div>
+                    <div class="card-value small neutral" id="bybitOpened">-</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 📈 СЕКЦИЯ: Результаты торговли -->
+        <div class="section">
+            <h2 class="section-title">📈 Результаты торговли</h2>
+            <div class="grid">
+                <div class="card">
+                    <div class="card-label">🏆 Win Rate</div>
+                    <div class="card-value" id="winRate">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">✅ Профитные</div>
+                    <div class="card-value positive" id="profitable">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">❌ Убыточные</div>
+                    <div class="card-value negative" id="losing">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">📊 Всего закрыто</div>
+                    <div class="card-value" id="totalClosed">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">💵 Avg Win/Loss</div>
+                    <div class="card-value small">
+                        <span class="positive" id="avgWin">-</span> / 
+                        <span class="negative" id="avgLoss">-</span>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-label">💎 Объём</div>
+                    <div class="card-value small" id="totalVolume">-</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 🏅 СЕКЦИЯ: Лучшие/Худшие -->
+        <div class="section">
+            <h2 class="section-title">🏅 Рекорды</h2>
+            <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
+                <div class="card">
+                    <div class="card-label">🚀 Лучшая сделка</div>
+                    <div class="card-value small positive" id="bestTrade">-</div>
+                    <div class="card-sub" id="bestTradeInfo">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">💀 Худшая сделка</div>
+                    <div class="card-value small negative" id="worstTrade">-</div>
+                    <div class="card-sub" id="worstTradeInfo">-</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 🎯 СЕКЦИЯ: Успешность по порогам -->
         <div class="section">
             <h2 class="section-title">🎯 Успешность по порогам</h2>
             <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
@@ -1108,13 +1145,20 @@
                 document.getElementById('losing').textContent = losing;
                 document.getElementById('totalClosed').textContent = totalClosed;
                 
-                // Analyzed and rejected stats
+                // Signal analysis stats
                 const analyzed = data.analyzed ?? 0;
+                const accepted = data.accepted ?? 0;
                 const rejected = data.rejected ?? 0;
-                document.getElementById('analyzed').textContent = analyzed.toLocaleString();
-                document.getElementById('rejected').textContent = rejected.toLocaleString();
+                const bybitOpened = data.bybit_opened ?? 0;
                 
+                document.getElementById('analyzed').textContent = analyzed.toLocaleString();
+                document.getElementById('accepted').textContent = accepted.toLocaleString();
+                document.getElementById('rejected').textContent = rejected.toLocaleString();
+                document.getElementById('bybitOpened').textContent = bybitOpened.toLocaleString();
+                
+                const acceptedPct = analyzed > 0 ? ((accepted / analyzed) * 100).toFixed(1) : 0;
                 const rejectedPct = analyzed > 0 ? ((rejected / analyzed) * 100).toFixed(1) : 0;
+                document.getElementById('acceptedPct').textContent = `${acceptedPct}% конверсия`;
                 document.getElementById('rejectedPct').textContent = `${rejectedPct}% отклонено`;
                 
                 const pnl = parseFloat(data.total_pnl || 0);
