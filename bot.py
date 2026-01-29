@@ -3371,11 +3371,13 @@ async def process_withdraw_address(update: Update, context: ContextTypes.DEFAULT
                 # CryptoBot не поддерживает прямой вывод на адрес, только через transfer
                 # Поэтому используем transfer на Telegram ID или создаём invoice для получения адреса
                 await status_msg.edit_text(
-                    "<b>❌ Ошибка</b>\n\nВывод на внешний адрес временно недоступен.\n"
-                    "Используй свой Telegram ID для вывода через CryptoBot.",
+                    f"<b>❌ Ошибка</b>\n\nВывод на внешний адрес временно недоступен.\n"
+                    f"Используй свой Telegram ID для вывода через CryptoBot.\n\n"
+                    f"<i>Сумма ${amount:.2f} USDT сохранена. Отправь свой Telegram ID.</i>",
                     parse_mode="HTML"
                 )
-                del context.user_data['pending_withdraw']
+                # НЕ удаляем pending_withdraw, чтобы пользователь мог отправить Telegram ID
+                # del context.user_data['pending_withdraw']
                 return True
     
     except Exception as e:
@@ -8196,16 +8198,40 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                         failed_count += 1
                         logger.error(f"[RESET] Error closing position {pos.get('id')}: {e}")
         
-        # Очищаем все таблицы (важен порядок из-за foreign key constraints)
+        # Очищаем ВСЕ таблицы (важен порядок из-за foreign key constraints)
         # Сначала удаляем зависимые таблицы, потом основные
-        run_sql("DELETE FROM alerts")  # Зависит от users
-        run_sql("DELETE FROM positions")  # Зависит от users
-        run_sql("DELETE FROM history")  # Зависит от users
-        run_sql("DELETE FROM users")  # Основная таблица
+        tables_cleared = []
+        
+        # Зависимые таблицы
+        for table in ['alerts', 'positions', 'history', 'referral_earnings', 'pending_invoices']:
+            try:
+                run_sql(f"DELETE FROM {table}")
+                tables_cleared.append(table)
+            except Exception as e:
+                logger.warning(f"[RESET] Could not clear {table}: {e}")
+        
+        # Системные таблицы
+        for table in ['system_settings', 'trade_logs', 'rate_limits']:
+            try:
+                run_sql(f"DELETE FROM {table}")
+                tables_cleared.append(table)
+            except Exception as e:
+                logger.warning(f"[RESET] Could not clear {table}: {e}")
+        
+        # Основная таблица пользователей - последней
+        try:
+            run_sql("DELETE FROM users")
+            tables_cleared.append('users')
+        except Exception as e:
+            logger.error(f"[RESET] Could not clear users: {e}")
         
         # Очищаем кэши
         positions_cache.clear()
         users_cache.clear()
+        
+        # Сбрасываем глобальные переменные
+        global pending_commission
+        pending_commission = 0.0
         
         # Сбрасываем статистику сигналов (уже импортировано из smart_analyzer)
         reset_signal_stats()
@@ -8221,14 +8247,20 @@ async def reset_everything(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 message_parts.append(f"❌ Ошибок закрытия: {failed_count}\n")
             message_parts.append("\n")
         
-        message_parts.append("🗑 <b>Удалено:</b>\n")
+        message_parts.append("🗑 <b>Очищено:</b>\n")
         message_parts.append("• Все пользователи\n")
         message_parts.append("• Все позиции\n")
         message_parts.append("• Вся история сделок\n")
         message_parts.append("• Все алерты\n")
+        message_parts.append("• Все реферальные записи\n")
+        message_parts.append("• Все pending invoices\n")
+        message_parts.append("• Системные настройки\n")
+        message_parts.append("• Логи сделок\n")
         message_parts.append("• Все кэши\n")
-        message_parts.append("• Статистика сигналов\n\n")
-        message_parts.append("Бот готов к работе с нуля.")
+        message_parts.append("• Статистика сигналов\n")
+        message_parts.append("• Комиссии\n\n")
+        message_parts.append(f"📊 Таблиц очищено: {len(tables_cleared)}\n\n")
+        message_parts.append("🚀 Бот готов к работе с нуля!")
         
         await update.message.reply_text("".join(message_parts), parse_mode="HTML")
         logger.info(f"[ADMIN] Full reset executed by user {user_id} (Bybit: {closed_count} closed, {failed_count} failed)")
