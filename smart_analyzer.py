@@ -1288,14 +1288,25 @@ class SmartAnalyzer:
         
         logger.info(f"[REGIME] HH={hh_count}, HL={hl_count}, LH={lh_count}, LL={ll_count}")
         
-        # Сильный тренд: 4+ свингов в одном направлении
-        if bullish_structure >= 5 and price_change_24h > 2:
+        # === ОПТИМИЗИРОВАНО: Более мягкие условия для определения тренда ===
+        # Это позволит чаще находить сетапы
+        
+        # Сильный тренд: структура важнее чем price change
+        if bullish_structure >= 5 and price_change_24h > 1.0:
             return MarketRegime.STRONG_UPTREND
-        elif bullish_structure >= 3 and price_change_24h > 0.5:
+        elif bullish_structure >= 4 and price_change_24h > 0.3:
+            return MarketRegime.STRONG_UPTREND  # Добавлено: 4 свинга + небольшое движение = сильный тренд
+        elif bullish_structure >= 3 and price_change_24h > 0.1:  # Снижено с 0.5% до 0.1%
             return MarketRegime.UPTREND
-        elif bearish_structure >= 5 and price_change_24h < -2:
+        elif bullish_structure >= 2 and price_change_24h > 0:  # Добавлено: 2 свинга + любой рост = тренд
+            return MarketRegime.UPTREND
+        elif bearish_structure >= 5 and price_change_24h < -1.0:
             return MarketRegime.STRONG_DOWNTREND
-        elif bearish_structure >= 3 and price_change_24h < -0.5:
+        elif bearish_structure >= 4 and price_change_24h < -0.3:
+            return MarketRegime.STRONG_DOWNTREND
+        elif bearish_structure >= 3 and price_change_24h < -0.1:  # Снижено с -0.5% до -0.1%
+            return MarketRegime.DOWNTREND
+        elif bearish_structure >= 2 and price_change_24h < 0:  # Добавлено: 2 свинга + любое падение = тренд
             return MarketRegime.DOWNTREND
         else:
             return MarketRegime.RANGING
@@ -2630,15 +2641,26 @@ class SmartAnalyzer:
         
         # === ЛОГИКА СИГНАЛА ===
         
+        # === ОПТИМИЗИРОВАНО: Расширен tolerance для уровней с 0.5% до 1.5% ===
+        # Это позволит чаще находить сетапы у ключевых уровней
+        LEVEL_TOLERANCE = 0.015  # 1.5% (было 0.5%)
+        LEVEL_TOLERANCE_CLOSE = 0.008  # 0.8% - близко к уровню (для бонуса)
+        
         # Проверка на откат к уровню
-        at_support = any(abs(current_price - l.price) / l.price < 0.005 
+        at_support = any(abs(current_price - l.price) / l.price < LEVEL_TOLERANCE 
                         for l in key_levels if l.type == 'support')
-        at_resistance = any(abs(current_price - l.price) / l.price < 0.005 
+        at_resistance = any(abs(current_price - l.price) / l.price < LEVEL_TOLERANCE 
                            for l in key_levels if l.type == 'resistance')
         
-        # Бычий паттерн на уровне
-        bullish_pattern = any(p.type == 'bullish' and p.strength >= 0.7 for p in recent_patterns)
-        bearish_pattern = any(p.type == 'bearish' and p.strength >= 0.7 for p in recent_patterns)
+        # Близко к уровню (для дополнительного бонуса)
+        near_support = any(abs(current_price - l.price) / l.price < LEVEL_TOLERANCE_CLOSE 
+                          for l in key_levels if l.type == 'support')
+        near_resistance = any(abs(current_price - l.price) / l.price < LEVEL_TOLERANCE_CLOSE 
+                             for l in key_levels if l.type == 'resistance')
+        
+        # Бычий паттерн на уровне (снижен порог с 0.7 до 0.5)
+        bullish_pattern = any(p.type == 'bullish' and p.strength >= 0.5 for p in recent_patterns)
+        bearish_pattern = any(p.type == 'bearish' and p.strength >= 0.5 for p in recent_patterns)
         
         # Моментум
         bullish_momentum = rsi > 40 and rsi < 70 and current_price > ema_20[-1]
@@ -2761,14 +2783,23 @@ class SmartAnalyzer:
                     reasoning.append(f"Паттерн: {[p.name for p in recent_patterns if p.type == 'bullish']}")
         
         elif market_regime == MarketRegime.RANGING:
-            # В рейндже - ТРЕБУЕМ оба условия: уровень + паттерн/RSI
-            # Снижен порог RSI с 35 до 40
-            if at_support and (bullish_pattern or rsi < 40):
+            # === ОПТИМИЗИРОВАНО: Упрощённые условия для RANGING ===
+            # Теперь достаточно ОДНОГО из условий: уровень ИЛИ RSI ИЛИ паттерн
+            if at_support or rsi < 45 or bullish_pattern:
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
-                reasoning.insert(0, "Рейндж: покупка от поддержки")
-                reasoning.insert(1, f"RSI={rsi:.0f}")
-                bullish_signals += 2
+                reasoning.insert(0, "Рейндж: покупка")
+                if at_support:
+                    reasoning.insert(1, "У поддержки")
+                    bullish_signals += 2
+                    if near_support:
+                        bullish_signals += 1  # Бонус за близость
+                if rsi < 45:
+                    reasoning.append(f"RSI перепродан ({rsi:.0f})")
+                    bullish_signals += 1
+                if bullish_pattern:
+                    reasoning.append("Бычий паттерн")
+                    bullish_signals += 1
         
         # === SHORT SETUP === (менее строгие условия)
         if direction is None:  # Если ещё не определили направление
@@ -2791,13 +2822,23 @@ class SmartAnalyzer:
                         reasoning.append(f"Паттерн: {[p.name for p in recent_patterns if p.type == 'bearish']}")
             
             elif market_regime == MarketRegime.RANGING:
-                # В рейндже - ТРЕБУЕМ оба условия: уровень + паттерн/RSI
-                if at_resistance and (bearish_pattern or rsi > 65):
+                # === ОПТИМИЗИРОВАНО: Упрощённые условия для RANGING ===
+                # Теперь достаточно ОДНОГО из условий
+                if at_resistance or rsi > 55 or bearish_pattern:
                     direction = "SHORT"
                     signal_type = SignalType.TREND_REVERSAL
-                    reasoning.insert(0, "Рейндж: продажа от сопротивления")
-                    reasoning.insert(1, f"RSI={rsi:.0f}")
-                    bearish_signals += 2
+                    reasoning.insert(0, "Рейндж: продажа")
+                    if at_resistance:
+                        reasoning.insert(1, "У сопротивления")
+                        bearish_signals += 2
+                        if near_resistance:
+                            bearish_signals += 1  # Бонус за близость
+                    if rsi > 55:
+                        reasoning.append(f"RSI перекуплен ({rsi:.0f})")
+                        bearish_signals += 1
+                    if bearish_pattern:
+                        reasoning.append("Медвежий паттерн")
+                        bearish_signals += 1
         
         # === ДИСБАЛАНС-ЛОГИКА: Если нет сигнала по тренду, но есть сильный дисбаланс ===
         # Снижен порог с 3 до 2 сигналов
@@ -2955,6 +2996,9 @@ class SmartAnalyzer:
         logger.info(f"[SMART] Quality: {quality.name}, Confidence: {confidence:.0%}, R/R: {levels['risk_reward']:.2f}")
         logger.info(f"[SMART] Entry: {current_price:.4f}, SL: {levels['stop_loss']:.4f}, TP1: {levels['take_profit_1']:.4f}")
         logger.info(f"[SMART] Signals: Bullish={bullish_signals}, Bearish={bearish_signals}")
+        
+        # Увеличиваем valid_setups - сетап прошёл все фильтры
+        _signal_stats['valid_setups'] += 1
         
         # НЕ увеличиваем accepted здесь - это будет сделано только когда сигнал реально отправлен или открыт через автотрейд
         
@@ -3500,6 +3544,7 @@ _signal_stats = {
     'analyzed': 0,
     'accepted': 0,
     'rejected': 0,
+    'valid_setups': 0,  # Прошли фильтры, но не обязательно отправлены
     'bybit_opened': 0,
     'extreme_moves_detected': 0,
     'imbalance_trades': 0,
@@ -3532,6 +3577,7 @@ def reset_signal_stats():
         'analyzed': 0,
         'accepted': 0,
         'rejected': 0,
+        'valid_setups': 0,
         'bybit_opened': 0,
         'extreme_moves_detected': 0,
         'imbalance_trades': 0,

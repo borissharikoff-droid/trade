@@ -937,14 +937,18 @@
                     <div class="card-value neutral" id="analyzed">-</div>
                 </div>
                 <div class="card card-highlight">
-                    <div class="card-label">✅ Запущено сделок</div>
-                    <div class="card-value positive" id="accepted">-</div>
-                    <div class="card-sub" id="acceptedPct">-</div>
+                    <div class="card-label">✅ Прошло фильтры</div>
+                    <div class="card-value positive" id="validSetups">-</div>
+                    <div class="card-sub" id="validSetupsPct">-</div>
                 </div>
                 <div class="card card-highlight warning">
                     <div class="card-label">❌ Отклонено</div>
                     <div class="card-value" id="rejected">-</div>
                     <div class="card-sub" id="rejectedPct">-</div>
+                </div>
+                <div class="card">
+                    <div class="card-label">📤 Отправлено юзерам</div>
+                    <div class="card-value small neutral" id="accepted">-</div>
                 </div>
                 <div class="card">
                     <div class="card-label">📡 На Bybit</div>
@@ -1419,16 +1423,18 @@
                 const analyzed = data.analyzed ?? 0;
                 const accepted = data.accepted ?? 0;
                 const rejected = data.rejected ?? 0;
+                const validSetups = data.valid_setups ?? 0;
                 const bybitOpened = data.bybit_opened ?? 0;
                 
                 document.getElementById('analyzed').textContent = analyzed.toLocaleString();
+                document.getElementById('validSetups').textContent = validSetups.toLocaleString();
                 document.getElementById('accepted').textContent = accepted.toLocaleString();
                 document.getElementById('rejected').textContent = rejected.toLocaleString();
                 document.getElementById('bybitOpened').textContent = bybitOpened.toLocaleString();
                 
-                const acceptedPct = analyzed > 0 ? ((accepted / analyzed) * 100).toFixed(1) : 0;
+                const validPct = analyzed > 0 ? ((validSetups / analyzed) * 100).toFixed(1) : 0;
                 const rejectedPct = analyzed > 0 ? ((rejected / analyzed) * 100).toFixed(1) : 0;
-                document.getElementById('acceptedPct').textContent = `${acceptedPct}% конверсия`;
+                document.getElementById('validSetupsPct').textContent = `${validPct}% конверсия`;
                 document.getElementById('rejectedPct').textContent = `${rejectedPct}% отклонено`;
                 
                 const pnl = parseFloat(data.total_pnl || 0);

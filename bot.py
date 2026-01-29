@@ -307,30 +307,60 @@ def init_db():
     # Миграция: добавляем realized_pnl если колонки нет
     try:
         if USE_POSTGRES:
-            c.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS realized_pnl REAL DEFAULT 0")
+            c.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'positions' AND column_name = 'realized_pnl'
+            """)
+            exists = c.fetchone()
+            if not exists:
+                logger.info("[DB] Adding realized_pnl column to positions...")
+                c.execute("ALTER TABLE positions ADD COLUMN realized_pnl REAL DEFAULT 0")
+                conn.commit()
+                logger.info("[DB] Migration: realized_pnl column ADDED")
+            else:
+                logger.info("[DB] Migration: realized_pnl column already exists")
         else:
             c.execute("PRAGMA table_info(positions)")
             columns = [col[1] for col in c.fetchall()]
             if 'realized_pnl' not in columns:
                 c.execute("ALTER TABLE positions ADD COLUMN realized_pnl REAL DEFAULT 0")
-        conn.commit()
-        logger.info("[DB] Migration: realized_pnl column ensured")
+                conn.commit()
     except Exception as e:
-        logger.warning(f"[DB] Migration warning (realized_pnl): {e}")
+        logger.error(f"[DB] Migration ERROR (realized_pnl): {e}")
     
     # Миграция: добавляем is_auto для позиций (авто-сделки)
     try:
         if USE_POSTGRES:
-            c.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS is_auto INTEGER DEFAULT 0")
+            # Проверяем существование колонки напрямую
+            c.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'positions' AND column_name = 'is_auto'
+            """)
+            exists = c.fetchone()
+            if not exists:
+                logger.info("[DB] Adding is_auto column to positions...")
+                c.execute("ALTER TABLE positions ADD COLUMN is_auto INTEGER DEFAULT 0")
+                conn.commit()
+                logger.info("[DB] Migration: is_auto column ADDED successfully")
+            else:
+                logger.info("[DB] Migration: is_auto column already exists")
         else:
             c.execute("PRAGMA table_info(positions)")
             columns = [col[1] for col in c.fetchall()]
             if 'is_auto' not in columns:
                 c.execute("ALTER TABLE positions ADD COLUMN is_auto INTEGER DEFAULT 0")
-        conn.commit()
-        logger.info("[DB] Migration: is_auto column ensured")
+                conn.commit()
+                logger.info("[DB] Migration: is_auto column added")
     except Exception as e:
-        logger.warning(f"[DB] Migration warning (is_auto): {e}")
+        logger.error(f"[DB] Migration ERROR (is_auto): {e}")
+        # Попробуем ещё раз с другим синтаксисом
+        try:
+            if USE_POSTGRES:
+                c.execute("ALTER TABLE positions ADD COLUMN IF NOT EXISTS is_auto INTEGER DEFAULT 0")
+                conn.commit()
+                logger.info("[DB] Migration: is_auto column added (fallback)")
+        except Exception as e2:
+            logger.error(f"[DB] Migration FAILED (is_auto): {e2}")
     
     # Миграция: добавляем поля для авто-трейда пользователя
     try:

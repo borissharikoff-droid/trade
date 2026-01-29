@@ -367,15 +367,23 @@ COINGLASS_ENDPOINTS = {
 DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex'
 
 # Nitter instances для парсинга Twitter (бесплатные RSS прокси)
+# Обновлённый список рабочих инстансов на январь 2026
 NITTER_INSTANCES = [
-    'https://nitter.privacydev.net',
     'https://nitter.poast.org',
-    'https://nitter.cz',
-    'https://nitter.1d4.us',
-    'https://nitter.kavin.rocks',
-    'https://nitter.unixfox.eu',
-    'https://nitter.fdn.fr',
+    'https://nitter.privacydev.net',
+    'https://nitter.woodland.cafe',
+    'https://nitter.esmailelbob.xyz',
+    'https://nitter.tiekoetter.com',
+    'https://nitter.it',
+    'https://nitter.net',
+    'https://nitter.nixnet.services',
+    'https://n.sneed.network',
+    'https://nitter.d420.de',
 ]
+
+# Кэш работающего инстанса
+_working_nitter_instance = None
+_nitter_last_check = None
 
 # Приоритетные аккаунты для мониторинга (самые важные)
 PRIORITY_TWITTER_ACCOUNTS = [
@@ -920,30 +928,58 @@ class NewsAnalyzer:
         Получить твиты от ключевых аккаунтов через Nitter RSS
         Nitter - бесплатный прокси для Twitter с RSS поддержкой
         """
-        events = []
-        accounts_to_fetch = accounts or PRIORITY_TWITTER_ACCOUNTS[:12]  # Топ 12 аккаунтов
+        global _working_nitter_instance, _nitter_last_check
         
-        # Находим работающий Nitter инстанс
+        events = []
+        accounts_to_fetch = accounts or PRIORITY_TWITTER_ACCOUNTS[:10]  # Топ 10 аккаунтов
+        
+        # Используем кэшированный инстанс если он недавно работал
         working_instance = None
+        now = datetime.now()
+        
+        if _working_nitter_instance and _nitter_last_check:
+            if (now - _nitter_last_check).total_seconds() < 300:  # 5 минут кэш
+                working_instance = _working_nitter_instance
+                logger.debug(f"[TWITTER] Using cached Nitter: {working_instance}")
         
         async with aiohttp.ClientSession() as session:
-            # Сначала найдём рабочий инстанс
-            for instance in NITTER_INSTANCES:
-                try:
-                    async with session.get(
-                        f"{instance}/search",
-                        timeout=aiohttp.ClientTimeout(total=5),
-                        headers={'User-Agent': 'Mozilla/5.0'}
-                    ) as resp:
-                        if resp.status in [200, 301, 302]:
-                            working_instance = instance
-                            logger.debug(f"[TWITTER] Found working Nitter: {instance}")
-                            break
-                except Exception:
-                    continue
+            # Ищем рабочий инстанс если нет кэшированного
+            if not working_instance:
+                for instance in NITTER_INSTANCES:
+                    try:
+                        # Проверяем на конкретном аккаунте
+                        test_url = f"{instance}/elonmusk/rss"
+                        async with session.get(
+                            test_url,
+                            timeout=aiohttp.ClientTimeout(total=8),
+                            headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                                'Accept': 'application/rss+xml, application/xml, text/xml, */*'
+                            },
+                            allow_redirects=True
+                        ) as resp:
+                            if resp.status == 200:
+                                content = await resp.text()
+                                if '<item>' in content or '<entry>' in content:
+                                    working_instance = instance
+                                    _working_nitter_instance = instance
+                                    _nitter_last_check = now
+                                    logger.info(f"[TWITTER] ✅ Found working Nitter: {instance}")
+                                    break
+                    except Exception as e:
+                        logger.debug(f"[TWITTER] {instance} failed: {e}")
+                        continue
             
             if not working_instance:
-                logger.warning("[TWITTER] No working Nitter instance found")
+                logger.warning("[TWITTER] ❌ No working Nitter instance found, trying RSSHub fallback")
+                # Fallback: используем RSSHub
+                try:
+                    events = await self._fetch_twitter_via_rsshub(session, accounts_to_fetch[:5])
+                    if events:
+                        logger.info(f"[TWITTER] Got {len(events)} tweets via RSSHub fallback")
+                        return events
+                except Exception as e:
+                    logger.warning(f"[TWITTER] RSSHub fallback failed: {e}")
                 return events
             
             # Парсим твиты от каждого аккаунта
@@ -1076,6 +1112,97 @@ class NewsAnalyzer:
         events.sort(key=lambda x: x.timestamp, reverse=True)
         
         logger.info(f"[TWITTER] Fetched {len(events)} tweets from {len(accounts_to_fetch)} accounts")
+        return events
+    
+    async def _fetch_twitter_via_rsshub(self, session, accounts: List[str]) -> List[NewsEvent]:
+        """Fallback: получить твиты через RSSHub"""
+        events = []
+        rsshub_instances = [
+            'https://rsshub.app',
+            'https://rss.shab.fun',
+            'https://rsshub.rssforever.com',
+        ]
+        
+        working_rsshub = None
+        for instance in rsshub_instances:
+            try:
+                async with session.get(
+                    f"{instance}/twitter/user/elonmusk",
+                    timeout=aiohttp.ClientTimeout(total=8),
+                    headers={'User-Agent': 'Mozilla/5.0'}
+                ) as resp:
+                    if resp.status == 200:
+                        working_rsshub = instance
+                        break
+            except:
+                continue
+        
+        if not working_rsshub:
+            return events
+        
+        for username in accounts:
+            try:
+                url = f"{working_rsshub}/twitter/user/{username}"
+                async with session.get(
+                    url,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                    headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/xml'}
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    content = await resp.text()
+                
+                items = re.findall(r'<item>(.*?)</item>', content, re.DOTALL)
+                account_info = TWITTER_ACCOUNTS.get(username, {'name': username, 'type': 'unknown', 'impact': 'MEDIUM', 'keywords': []})
+                
+                for item in items[:3]:
+                    title_match = re.search(r'<title[^>]*>(.*?)</title>', item, re.DOTALL)
+                    if not title_match:
+                        continue
+                    
+                    title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', title_match.group(1))
+                    title = re.sub(r'<[^>]+>', '', title).strip()
+                    
+                    if not title or len(title) < 15:
+                        continue
+                    
+                    news_hash = self._get_news_hash(title, f"twitter_{username}")
+                    if news_hash in self.seen_news:
+                        continue
+                    self.seen_news.append(news_hash)
+                    
+                    sentiment, confidence, keywords = self.analyze_sentiment(title)
+                    category = self.detect_category(title, account_info.get('type', 'trader'))
+                    coins = self.extract_coins(title)
+                    
+                    try:
+                        impact = NewsImpact[account_info.get('impact', 'MEDIUM')]
+                    except:
+                        impact = NewsImpact.MEDIUM
+                    
+                    event = NewsEvent(
+                        id=news_hash,
+                        source=f"🐦 @{username}",
+                        author=account_info.get('name', username),
+                        title=title[:200],
+                        content=title,
+                        url=f"https://twitter.com/{username}",
+                        timestamp=datetime.now(timezone.utc),
+                        sentiment=sentiment,
+                        impact=impact,
+                        category=category,
+                        affected_coins=coins,
+                        keywords_found=keywords,
+                        confidence=confidence
+                    )
+                    events.append(event)
+                    
+            except Exception as e:
+                logger.debug(f"[RSSHUB] Error fetching @{username}: {e}")
+                continue
+            
+            await asyncio.sleep(0.3)
+        
         return events
     
     async def fetch_coingecko_trending(self) -> List[NewsEvent]:
