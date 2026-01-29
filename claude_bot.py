@@ -17,9 +17,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Конфигурация
-TELEGRAM_TOKEN = os.getenv("CLAUDE_BOT_TOKEN", "8403919140:AAF-xVXgPsxOPVwADU_74J7OVpKzI2y44MI")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Установи через переменную окружения на Railway
+# Конфигурация - ВСЕ КЛЮЧИ ЧЕРЕЗ ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ
+TELEGRAM_TOKEN = os.getenv("CLAUDE_BOT_TOKEN", "")  # Обязательно установить на Railway
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Обязательно установить на Railway
 
 # Разрешённые пользователи (твой Telegram ID)
 ALLOWED_USERS = set()  # Пустой = все могут использовать. Добавь свой ID для ограничения
@@ -141,6 +141,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Очистить контекст разговора"""
     user_id = update.effective_user.id
+    
+    # Проверка доступа
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
     conversations[user_id] = []
     await update.message.reply_text("✅ Контекст очищен")
 
@@ -148,6 +154,12 @@ async def clear_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def show_context(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показать текущий контекст"""
     user_id = update.effective_user.id
+    
+    # Проверка доступа
+    if ALLOWED_USERS and user_id not in ALLOWED_USERS:
+        await update.message.reply_text("⛔ Доступ запрещён")
+        return
+    
     history = conversations.get(user_id, [])
     
     if not history:
