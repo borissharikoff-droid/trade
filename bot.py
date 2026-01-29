@@ -557,20 +557,42 @@ def db_add_position(user_id: int, pos: Dict) -> int:
     """Добавить позицию"""
     is_auto = 1 if pos.get('is_auto', False) else 0
     
-    if USE_POSTGRES:
-        query = """INSERT INTO positions
-            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
-    else:
-        query = """INSERT INTO positions
-            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+    # Пробуем с is_auto, если колонка есть
+    try:
+        if USE_POSTGRES:
+            query = """INSERT INTO positions
+                (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+        else:
+            query = """INSERT INTO positions
+                (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
-    pos_id = run_sql(query,
-        (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
-         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0), pos.get('realized_pnl', 0), is_auto), fetch="id")
-    logger.info(f"[DB] Position {pos_id} added for user {user_id} (is_auto={is_auto})")
-    return pos_id
+        pos_id = run_sql(query,
+            (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
+             pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0), pos.get('realized_pnl', 0), is_auto), fetch="id")
+        logger.info(f"[DB] Position {pos_id} added for user {user_id} (is_auto={is_auto})")
+        return pos_id
+    except Exception as e:
+        # Если is_auto колонка не существует - вставляем без неё
+        if 'is_auto' in str(e):
+            logger.warning(f"[DB] is_auto column missing, inserting without it")
+            if USE_POSTGRES:
+                query = """INSERT INTO positions
+                    (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+            else:
+                query = """INSERT INTO positions
+                    (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+            
+            pos_id = run_sql(query,
+                (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
+                 pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0), pos.get('realized_pnl', 0)), fetch="id")
+            logger.info(f"[DB] Position {pos_id} added for user {user_id} (without is_auto)")
+            return pos_id
+        else:
+            raise
 
 # Whitelist of allowed position columns for updates (security)
 ALLOWED_POSITION_COLUMNS = {
@@ -4938,7 +4960,9 @@ R/R: 1:{setup.risk_reward:.1f}
         # === ОТПРАВКА СИГНАЛОВ ОСТАЛЬНЫМ ЮЗЕРАМ ===
         signal_sent_to_users = False
         
-        logger.info(f"[SMART] Отправка сигналов {len(active_users)} активным пользователям (trading=1)")
+        # Считаем сколько юзеров с ручным трейдингом
+        trading_users = [uid for uid in active_users if uid not in auto_trade_executed_users and bool(get_user(uid).get('trading', False))]
+        logger.info(f"[SMART] Отправка сигналов: {len(active_users)} юзеров с балансом, {len(trading_users)} с trading=1, {len(auto_trade_executed_users)} авто-трейд")
         
         for user_id in active_users:
             # Пропускаем тех, для кого авто-трейд уже выполнен
