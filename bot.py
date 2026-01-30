@@ -653,6 +653,84 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     except Exception as e:
         logger.warning(f"[TRADE_LOGGER] Failed to log trade close: {e}")
 
+
+async def close_linked_auto_positions(symbol: str, direction: str, exit_price: float, 
+                                       pnl_percent: float, reason: str, 
+                                       exclude_user_id: int = None,
+                                       context = None):
+    """
+    Закрыть все связанные авто-позиции по тому же символу/направлению.
+    Вызывается когда основная позиция закрывается на Bybit.
+    """
+    try:
+        # Находим все авто-позиции (is_auto=1) с bybit_qty=0 по тому же symbol/direction
+        # которые были открыты недавно (в пределах 10 минут от основной)
+        linked_positions = run_sql("""
+            SELECT * FROM positions 
+            WHERE symbol = ? AND direction = ? AND is_auto = 1 AND (bybit_qty IS NULL OR bybit_qty = 0)
+            AND user_id != ?
+        """, (symbol, direction, exclude_user_id or 0), fetch="all")
+        
+        if not linked_positions:
+            return 0
+        
+        closed_count = 0
+        for pos in linked_positions:
+            try:
+                user_id = pos['user_id']
+                # Рассчитываем PnL на основе процента от основной позиции
+                local_pnl = pos['amount'] * LEVERAGE * pnl_percent
+                
+                # Возвращаем деньги пользователю
+                returned = pos['amount'] + local_pnl
+                
+                user = get_user(user_id)
+                user['balance'] = sanitize_balance(user['balance'] + returned)
+                user['total_profit'] += local_pnl
+                save_user(user_id)
+                
+                # Закрываем в БД
+                db_close_position(pos['id'], exit_price, local_pnl, f'LINKED_{reason}')
+                
+                # Очищаем кэш позиций
+                user_positions = get_positions(user_id)
+                updated = [p for p in user_positions if p.get('id') != pos['id']]
+                update_positions_cache(user_id, updated)
+                
+                closed_count += 1
+                
+                # Уведомляем пользователя
+                if context:
+                    try:
+                        ticker = symbol.split("/")[0] if "/" in symbol else symbol
+                        pnl_sign = "+" if local_pnl >= 0 else ""
+                        pnl_emoji = "✅" if local_pnl >= 0 else "📉"
+                        await context.bot.send_message(
+                            user_id,
+                            f"<b>📡 Авто-трейд закрыт</b>\n\n"
+                            f"{ticker} | {direction}\n"
+                            f"{pnl_emoji} {pnl_sign}${local_pnl:.2f}\n\n"
+                            f"💰 Баланс: ${user['balance']:.2f}",
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logger.debug(f"[LINKED_CLOSE] Notify error for {user_id}: {e}")
+                
+                logger.info(f"[LINKED_CLOSE] Closed linked position {pos['id']} for user {user_id}: {symbol} PnL=${local_pnl:.2f}")
+                
+            except Exception as e:
+                logger.error(f"[LINKED_CLOSE] Error closing position {pos.get('id')}: {e}")
+        
+        if closed_count > 0:
+            logger.info(f"[LINKED_CLOSE] Closed {closed_count} linked auto-positions for {symbol} {direction}")
+        
+        return closed_count
+        
+    except Exception as e:
+        logger.error(f"[LINKED_CLOSE] Error: {e}")
+        return 0
+
+
 def db_get_history(user_id: int, limit: int = 20) -> List[Dict]:
     """Получить историю сделок"""
     return run_sql("SELECT * FROM history WHERE user_id = ? ORDER BY closed_at DESC LIMIT ?", (user_id, limit), fetch="all")
@@ -6366,6 +6444,24 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                         user_positions = updated_positions  # Update local reference
                         logger.info(f"[BYBIT_SYNC] Position {pos_id_to_remove} removed from cache, remaining: {len(updated_positions)}")
                         
+                        # === ВАЖНО: закрываем ВСЕ связанные авто-позиции других юзеров ===
+                        # Рассчитываем PnL% для linked позиций
+                        if pos['entry'] > 0:
+                            pnl_percent = real_pnl / (pos['amount'] * LEVERAGE) if pos['amount'] > 0 else 0
+                        else:
+                            pnl_percent = 0
+                        
+                        # Закрываем все связанные авто-позиции
+                        await close_linked_auto_positions(
+                            symbol=pos['symbol'],
+                            direction=pos['direction'],
+                            exit_price=exit_price,
+                            pnl_percent=pnl_percent,
+                            reason=reason,
+                            exclude_user_id=user_id,
+                            context=context
+                        )
+                        
                         # Уведомление
                         pnl_sign = "+" if real_pnl >= 0 else ""
                         pnl_emoji = "✅" if real_pnl >= 0 else "📉"
@@ -8466,6 +8562,285 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Логируем для отладки
     logger.info(f"[DIAG] User {user_id}: cache_balance={cached_balance}, db_balance={db_balance}, positions={len(db_positions)}, frozen=${positions_value:.2f}")
 
+# ==================== СИНХРОНИЗАЦИЯ ПОЗИЦИЙ С BYBIT ====================
+async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Принудительная синхронизация позиций с Bybit.
+    Показывает фантомные позиции и позволяет их удалить.
+    """
+    user_id = update.effective_user.id
+    
+    try:
+        # Получаем позиции пользователя
+        user_positions = get_positions(user_id)
+        
+        if not user_positions:
+            await update.message.reply_text(
+                "<b>✅ Нет открытых позиций</b>\n\nСинхронизация не требуется.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Получаем позиции с Bybit
+        bybit_open_symbols = set()
+        bybit_available = False
+        
+        if await is_hedging_enabled():
+            try:
+                bybit_positions = await hedger.get_all_positions()
+                bybit_open_symbols = {p['symbol'] for p in bybit_positions}
+                bybit_available = True
+            except Exception as e:
+                logger.warning(f"[SYNC_CMD] Error getting Bybit positions: {e}")
+        
+        # Анализируем каждую позицию
+        real_positions = []
+        phantom_positions = []
+        
+        for pos in user_positions:
+            bybit_symbol = pos['symbol'].replace('/', '')
+            has_bybit_qty = pos.get('bybit_qty', 0) > 0
+            is_auto = pos.get('is_auto', 0) == 1
+            on_bybit = bybit_symbol in bybit_open_symbols if bybit_available else None
+            
+            # Определяем статус позиции
+            if has_bybit_qty and (on_bybit is True or on_bybit is None):
+                real_positions.append(pos)
+            elif not has_bybit_qty and is_auto:
+                phantom_positions.append(pos)
+            elif has_bybit_qty and on_bybit is False:
+                phantom_positions.append(pos)  # Была на Bybit, но закрылась
+            else:
+                real_positions.append(pos)  # Локальная позиция без хеджирования
+        
+        # Формируем отчёт
+        text = f"<b>🔄 Синхронизация позиций</b>\n\n"
+        
+        if bybit_available:
+            text += f"<b>Bybit:</b> {len(bybit_open_symbols)} открытых позиций\n"
+        else:
+            text += f"<b>Bybit:</b> ⚠️ Недоступен\n"
+        
+        text += f"<b>В боте:</b> {len(user_positions)} позиций\n\n"
+        
+        if phantom_positions:
+            text += f"<b>⚠️ Фантомные позиции ({len(phantom_positions)}):</b>\n"
+            for pos in phantom_positions[:5]:  # Показываем первые 5
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                pnl_sign = "+" if pos.get('pnl', 0) >= 0 else ""
+                text += f"├ {ticker} | {pos['direction']} | ${pos['amount']:.2f} | PnL: {pnl_sign}${pos.get('pnl', 0):.2f}\n"
+            if len(phantom_positions) > 5:
+                text += f"└ ... и ещё {len(phantom_positions) - 5}\n"
+            text += "\n"
+        
+        if real_positions:
+            text += f"<b>✅ Реальные позиции ({len(real_positions)}):</b>\n"
+            for pos in real_positions[:5]:
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                pnl_sign = "+" if pos.get('pnl', 0) >= 0 else ""
+                bybit_mark = "🔗" if pos.get('bybit_qty', 0) > 0 else "📊"
+                text += f"├ {bybit_mark} {ticker} | {pos['direction']} | ${pos['amount']:.2f} | PnL: {pnl_sign}${pos.get('pnl', 0):.2f}\n"
+            if len(real_positions) > 5:
+                text += f"└ ... и ещё {len(real_positions) - 5}\n"
+        
+        # Кнопки
+        keyboard = []
+        if phantom_positions:
+            # Собираем ID фантомных позиций
+            phantom_ids = [str(p['id']) for p in phantom_positions]
+            keyboard.append([InlineKeyboardButton(
+                f"🗑 Удалить фантомные ({len(phantom_positions)})", 
+                callback_data=f"sync_cleanup_{','.join(phantom_ids[:10])}"  # Лимит 10 для callback_data
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="sync_refresh")])
+        keyboard.append([InlineKeyboardButton("🏠 Назад", callback_data="back_main")])
+        
+        await update.message.reply_text(
+            text, 
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        logger.info(f"[SYNC_CMD] User {user_id}: {len(real_positions)} real, {len(phantom_positions)} phantom")
+        
+    except Exception as e:
+        logger.error(f"[SYNC_CMD] Error: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"<b>❌ Ошибка синхронизации</b>\n\n{str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+async def sync_cleanup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удалить фантомные позиции"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    
+    try:
+        # Извлекаем ID позиций из callback_data
+        data = query.data.replace("sync_cleanup_", "")
+        position_ids = [int(pid) for pid in data.split(",") if pid.isdigit()]
+        
+        if not position_ids:
+            await query.edit_message_text(
+                "<b>❌ Нет позиций для удаления</b>",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Получаем позиции пользователя
+        user_positions = get_positions(user_id)
+        user = get_user(user_id)
+        
+        removed_count = 0
+        total_returned = 0
+        
+        for pos_id in position_ids:
+            pos = next((p for p in user_positions if p['id'] == pos_id), None)
+            if pos:
+                # Возвращаем деньги
+                current_pnl = pos.get('pnl', 0) or 0
+                returned = pos['amount'] + current_pnl
+                total_returned += returned
+                
+                # Закрываем позицию
+                db_close_position(pos_id, pos.get('current', pos['entry']), current_pnl, 'MANUAL_PHANTOM_CLEANUP')
+                removed_count += 1
+                
+                logger.info(f"[SYNC_CLEANUP] User {user_id}: removed phantom position {pos_id} ({pos['symbol']}), returned ${returned:.2f}")
+        
+        # Обновляем баланс
+        if total_returned > 0:
+            user['balance'] = sanitize_balance(user['balance'] + total_returned)
+            save_user(user_id)
+        
+        # Обновляем кэш позиций
+        remaining = [p for p in user_positions if p['id'] not in position_ids]
+        update_positions_cache(user_id, remaining)
+        
+        await query.edit_message_text(
+            f"<b>✅ Очистка завершена</b>\n\n"
+            f"Удалено позиций: {removed_count}\n"
+            f"Возвращено на баланс: ${total_returned:.2f}\n\n"
+            f"<i>Нажмите /start для обновления</i>",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"[SYNC_CLEANUP] Error: {e}", exc_info=True)
+        await query.edit_message_text(
+            f"<b>❌ Ошибка очистки</b>\n\n{str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
+async def sync_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обновить информацию о синхронизации"""
+    query = update.callback_query
+    await query.answer("🔄 Обновляем...")
+    
+    # Вызываем sync_cmd но через callback
+    # Создаём fake update с message
+    try:
+        user_id = update.effective_user.id
+        
+        # Получаем позиции пользователя
+        user_positions = get_positions(user_id)
+        
+        if not user_positions:
+            await query.edit_message_text(
+                "<b>✅ Нет открытых позиций</b>\n\nСинхронизация не требуется.",
+                parse_mode="HTML"
+            )
+            return
+        
+        # Получаем позиции с Bybit
+        bybit_open_symbols = set()
+        bybit_available = False
+        
+        if await is_hedging_enabled():
+            try:
+                bybit_positions = await hedger.get_all_positions()
+                bybit_open_symbols = {p['symbol'] for p in bybit_positions}
+                bybit_available = True
+            except Exception as e:
+                logger.warning(f"[SYNC_REFRESH] Error getting Bybit positions: {e}")
+        
+        # Анализируем каждую позицию
+        real_positions = []
+        phantom_positions = []
+        
+        for pos in user_positions:
+            bybit_symbol = pos['symbol'].replace('/', '')
+            has_bybit_qty = pos.get('bybit_qty', 0) > 0
+            is_auto = pos.get('is_auto', 0) == 1
+            on_bybit = bybit_symbol in bybit_open_symbols if bybit_available else None
+            
+            if has_bybit_qty and (on_bybit is True or on_bybit is None):
+                real_positions.append(pos)
+            elif not has_bybit_qty and is_auto:
+                phantom_positions.append(pos)
+            elif has_bybit_qty and on_bybit is False:
+                phantom_positions.append(pos)
+            else:
+                real_positions.append(pos)
+        
+        # Формируем отчёт
+        text = f"<b>🔄 Синхронизация позиций</b>\n\n"
+        
+        if bybit_available:
+            text += f"<b>Bybit:</b> {len(bybit_open_symbols)} открытых позиций\n"
+        else:
+            text += f"<b>Bybit:</b> ⚠️ Недоступен\n"
+        
+        text += f"<b>В боте:</b> {len(user_positions)} позиций\n\n"
+        
+        if phantom_positions:
+            text += f"<b>⚠️ Фантомные позиции ({len(phantom_positions)}):</b>\n"
+            for pos in phantom_positions[:5]:
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                pnl_sign = "+" if pos.get('pnl', 0) >= 0 else ""
+                text += f"├ {ticker} | {pos['direction']} | ${pos['amount']:.2f} | PnL: {pnl_sign}${pos.get('pnl', 0):.2f}\n"
+            if len(phantom_positions) > 5:
+                text += f"└ ... и ещё {len(phantom_positions) - 5}\n"
+            text += "\n"
+        
+        if real_positions:
+            text += f"<b>✅ Реальные позиции ({len(real_positions)}):</b>\n"
+            for pos in real_positions[:5]:
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                pnl_sign = "+" if pos.get('pnl', 0) >= 0 else ""
+                bybit_mark = "🔗" if pos.get('bybit_qty', 0) > 0 else "📊"
+                text += f"├ {bybit_mark} {ticker} | {pos['direction']} | ${pos['amount']:.2f} | PnL: {pnl_sign}${pos.get('pnl', 0):.2f}\n"
+            if len(real_positions) > 5:
+                text += f"└ ... и ещё {len(real_positions) - 5}\n"
+        
+        # Кнопки
+        keyboard = []
+        if phantom_positions:
+            phantom_ids = [str(p['id']) for p in phantom_positions]
+            keyboard.append([InlineKeyboardButton(
+                f"🗑 Удалить фантомные ({len(phantom_positions)})", 
+                callback_data=f"sync_cleanup_{','.join(phantom_ids[:10])}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="sync_refresh")])
+        keyboard.append([InlineKeyboardButton("🏠 Назад", callback_data="back")])
+        
+        await query.edit_message_text(
+            text, 
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"[SYNC_REFRESH] Error: {e}", exc_info=True)
+        await query.edit_message_text(
+            f"<b>❌ Ошибка обновления</b>\n\n{str(e)[:100]}",
+            parse_mode="HTML"
+        )
+
 # ==================== РЕФЕРАЛЬНАЯ КОМАНДА ====================
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Реферальная ссылка"""
@@ -8691,6 +9066,7 @@ def main() -> None:
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("ref", referral_cmd))
     app.add_handler(CommandHandler("balance", balance_cmd))  # Диагностика баланса
+    app.add_handler(CommandHandler("sync", sync_cmd))  # Синхронизация позиций с Bybit
     
     # Оплата Stars
     app.add_handler(PreCheckoutQueryHandler(precheckout))
@@ -8730,6 +9106,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(handle_withdraw, pattern="^withdraw_(all|\\d+)$"))
     app.add_handler(CallbackQueryHandler(withdraw_custom_handler, pattern="^withdraw_custom$"))
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
+    app.add_handler(CallbackQueryHandler(sync_cleanup_callback, pattern="^sync_cleanup_"))
+    app.add_handler(CallbackQueryHandler(sync_refresh_callback, pattern="^sync_refresh$"))
     
     # Обработка текста для своей суммы и адреса вывода
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_amount))

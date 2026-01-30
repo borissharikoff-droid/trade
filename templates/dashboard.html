@@ -812,6 +812,101 @@
             to { transform: rotate(360deg); }
         }
 
+        /* Alerts section styles */
+        .alerts-container {
+            background: #161b22;
+            border: 1px solid #da3633;
+            border-radius: 6px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .alerts-patterns {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        
+        .alert-pattern {
+            background: rgba(218, 54, 51, 0.1);
+            border: 1px solid #da3633;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 0.75rem;
+        }
+        
+        .alert-pattern.warning {
+            background: rgba(210, 153, 34, 0.1);
+            border-color: #d29922;
+        }
+        
+        .alert-pattern-count {
+            font-weight: 700;
+            color: #da3633;
+            margin-right: 6px;
+        }
+        
+        .alert-pattern.warning .alert-pattern-count {
+            color: #d29922;
+        }
+        
+        .alert-pattern-text {
+            color: #c9d1d9;
+        }
+        
+        .alert-entry {
+            padding: 8px 12px;
+            border-bottom: 1px solid #21262d;
+            font-family: monospace;
+            font-size: 0.75rem;
+            display: flex;
+            gap: 12px;
+            background: rgba(218, 54, 51, 0.05);
+        }
+        
+        .alert-entry.warning {
+            background: rgba(210, 153, 34, 0.05);
+        }
+        
+        .alert-entry:last-child { border-bottom: none; }
+        
+        .alert-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 700;
+        }
+        
+        .alert-badge.critical {
+            background: rgba(248, 81, 73, 0.3);
+            color: #f85149;
+        }
+        
+        .alert-badge.error {
+            background: rgba(218, 54, 51, 0.2);
+            color: #da3633;
+        }
+        
+        .alert-badge.warning {
+            background: rgba(210, 153, 34, 0.2);
+            color: #d29922;
+        }
+        
+        #alertsSection {
+            animation: alertPulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes alertPulse {
+            0%, 100% { border-color: transparent; }
+            50% { border-color: rgba(218, 54, 51, 0.3); }
+        }
+        
+        #alertsSection .section-title {
+            background: rgba(218, 54, 51, 0.1);
+        }
+
         @media (max-width: 768px) {
             body { padding: 8px; }
             .reasons-grid { grid-template-columns: 1fr; }
@@ -854,6 +949,7 @@
                     <span class="status-dot"></span>
                     <span>Live</span>
                     <span class="updated" id="lastUpdate">-</span>
+                    <span class="tz-badge" id="logsCount" title="Логов в буфере">0 logs</span>
                 </div>
                 <button class="btn" onclick="refreshAll()">
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
@@ -871,16 +967,16 @@
                         Export
                     </button>
                     <div class="export-menu" id="exportMenu">
-                        <div class="export-menu-title">Период экспорта</div>
-                        <div class="export-menu-item" onclick="exportLogs(1, 'hours')">1 час</div>
-                        <div class="export-menu-item" onclick="exportLogs(6, 'hours')">6 часов</div>
-                        <div class="export-menu-item" onclick="exportLogs(12, 'hours')">12 часов</div>
-                        <div class="export-menu-item" onclick="exportLogs(24, 'hours')">24 часа</div>
-                        <div class="export-menu-item" onclick="exportLogs(3, 'days')">3 дня</div>
-                        <div class="export-menu-item" onclick="exportLogs(7, 'days')">7 дней</div>
-                        <div class="export-menu-item" onclick="exportLogs(30, 'days')">30 дней</div>
-                        <div class="export-menu-item" onclick="exportLogs(1, 'months')">1 месяц</div>
-                        <div class="export-menu-item" onclick="exportLogs(3, 'months')">3 месяца</div>
+                        <div class="export-menu-title">📥 Экспорт логов</div>
+                        <div class="export-menu-item" onclick="exportLogs(1, 'hours')">🕐 1 час</div>
+                        <div class="export-menu-item" onclick="exportLogs(6, 'hours')">🕕 6 часов</div>
+                        <div class="export-menu-item" onclick="exportLogs(12, 'hours')">🕛 12 часов</div>
+                        <div class="export-menu-item" onclick="exportLogs(24, 'hours')">📅 24 часа</div>
+                        <div class="export-menu-item" onclick="exportLogs(3, 'days')">📆 3 дня</div>
+                        <div class="export-menu-item" onclick="exportLogs(7, 'days')">📆 7 дней</div>
+                        <div class="export-menu-item" onclick="exportLogs(30, 'days')">📆 30 дней</div>
+                        <div class="export-menu-item" onclick="exportLogs(90, 'days')">📆 90 дней</div>
+                        <div class="export-menu-item" onclick="exportLogs(0, 'all')" style="border-top: 1px solid #21262d; margin-top: 4px; padding-top: 12px;">📦 ВСЕ логи</div>
                     </div>
                 </div>
                 <button class="btn btn-primary" onclick="shareStats()">
@@ -903,6 +999,25 @@
         
         <!-- Dashboard Tab -->
         <div id="tab-dashboard" class="tab-content active">
+        
+        <!-- 🚨 СЕКЦИЯ: Ошибки и предупреждения (наверху) -->
+        <div class="section" id="alertsSection" style="display: none;">
+            <div class="section-header">
+                <h2 class="section-title" style="border-left-color: #da3633;">🚨 Внимание</h2>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <span class="alert-badge critical" id="criticalCount" style="display: none;">0 CRITICAL</span>
+                    <span class="alert-badge error" id="errorCount" style="display: none;">0 ERROR</span>
+                    <span class="alert-badge warning" id="warningCount" style="display: none;">0 WARNING</span>
+                    <button class="btn" onclick="toggleAlerts()" id="alertsToggle">Свернуть</button>
+                </div>
+            </div>
+            <div id="alertsContent">
+                <div class="alerts-patterns" id="alertPatterns"></div>
+                <div class="alerts-container" id="alertsContainer">
+                    <div class="no-data">Загрузка...</div>
+                </div>
+            </div>
+        </div>
         
         <!-- 📊 СЕКЦИЯ: Текущее состояние -->
         <div class="section">
@@ -1256,6 +1371,7 @@
         let allUsers = [];
         let usersSortField = 'balance';
         let usersSortDir = 'desc';
+        let alertsExpanded = true;
         
         function formatPnl(value) {
             const num = parseFloat(value) || 0;
@@ -1308,6 +1424,7 @@
             if (unit === 'hours') url += `hours=${value}`;
             else if (unit === 'days') url += `days=${value}`;
             else if (unit === 'months') url += `months=${value}`;
+            else if (unit === 'all') url += 'all=1';
             
             window.location.href = url;
             document.getElementById('exportMenu').classList.remove('show');
@@ -1560,8 +1677,123 @@
                 const data = await response.json();
                 allLogs = data.memory_logs || [];
                 renderLogs(allLogs);
+                
+                // Update logs count in header
+                const totalLogs = data.total_logs_in_buffer || 0;
+                document.getElementById('logsCount').textContent = totalLogs.toLocaleString() + ' logs';
+                console.log('[Dashboard] Total logs in buffer:', totalLogs);
             } catch (error) {
                 console.error('Error fetching logs:', error);
+            }
+        }
+        
+        async function fetchAlerts() {
+            try {
+                const response = await fetch('/api/alerts?hours=6&limit=50');
+                const data = await response.json();
+                
+                const section = document.getElementById('alertsSection');
+                const counts = data.counts || {};
+                
+                // Show/hide section based on whether there are alerts
+                if (counts.total > 0) {
+                    section.style.display = 'block';
+                    
+                    // Update badges
+                    const criticalEl = document.getElementById('criticalCount');
+                    const errorEl = document.getElementById('errorCount');
+                    const warningEl = document.getElementById('warningCount');
+                    
+                    if (counts.critical > 0) {
+                        criticalEl.textContent = counts.critical + ' CRITICAL';
+                        criticalEl.style.display = 'inline-block';
+                    } else {
+                        criticalEl.style.display = 'none';
+                    }
+                    
+                    if (counts.error > 0) {
+                        errorEl.textContent = counts.error + ' ERROR';
+                        errorEl.style.display = 'inline-block';
+                    } else {
+                        errorEl.style.display = 'none';
+                    }
+                    
+                    if (counts.warning > 0) {
+                        warningEl.textContent = counts.warning + ' WARNING';
+                        warningEl.style.display = 'inline-block';
+                    } else {
+                        warningEl.style.display = 'none';
+                    }
+                    
+                    // Render patterns
+                    renderAlertPatterns(data.top_patterns || []);
+                    
+                    // Render alerts list
+                    renderAlerts(data.alerts || []);
+                } else {
+                    section.style.display = 'none';
+                }
+                
+                console.log('[Dashboard] Alerts loaded:', counts);
+            } catch (error) {
+                console.error('Error fetching alerts:', error);
+            }
+        }
+        
+        function renderAlertPatterns(patterns) {
+            const container = document.getElementById('alertPatterns');
+            
+            if (!patterns || patterns.length === 0) {
+                container.innerHTML = '';
+                return;
+            }
+            
+            let html = '';
+            for (const pattern of patterns.slice(0, 5)) {  // Top 5 patterns
+                const levelClass = pattern.level === 'WARNING' ? 'warning' : '';
+                html += `
+                    <div class="alert-pattern ${levelClass}">
+                        <span class="alert-pattern-count">${pattern.count}x</span>
+                        <span class="alert-pattern-text">${escapeHtml(pattern.pattern)}</span>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderAlerts(alerts) {
+            const container = document.getElementById('alertsContainer');
+            
+            if (!alerts || alerts.length === 0) {
+                container.innerHTML = '<div class="no-data">Нет ошибок за последние 6 часов</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const alert of alerts.slice(0, 30)) {  // Show last 30
+                const levelClass = alert.level === 'WARNING' ? 'warning' : '';
+                html += `
+                    <div class="alert-entry ${levelClass}">
+                        <span class="log-time">${alert.timestamp || '-'}</span>
+                        <span class="log-level ${alert.level}">${alert.level}</span>
+                        <span class="log-message">${escapeHtml(alert.message || '-')}</span>
+                    </div>
+                `;
+            }
+            container.innerHTML = html;
+        }
+        
+        function toggleAlerts() {
+            alertsExpanded = !alertsExpanded;
+            const content = document.getElementById('alertsContent');
+            const btn = document.getElementById('alertsToggle');
+            
+            if (alertsExpanded) {
+                content.style.display = 'block';
+                btn.textContent = 'Свернуть';
+            } else {
+                content.style.display = 'none';
+                btn.textContent = 'Развернуть';
             }
         }
         
@@ -1680,6 +1912,7 @@
             fetchTrades();
             fetchLogs();
             fetchWinrateBreakdown();
+            fetchAlerts();
         }
         
         async function shareStats() {
@@ -1975,6 +2208,7 @@
         setInterval(fetchLogs, 10000);
         setInterval(fetchWinrateBreakdown, 15000);
         setInterval(fetchNews, 30000);  // Refresh news every 30 seconds
+        setInterval(fetchAlerts, 15000);  // Refresh alerts every 15 seconds
     </script>
 </body>
 </html>

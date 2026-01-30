@@ -30,8 +30,11 @@ _news_analyzer = None
 # Moscow timezone (UTC+3)
 MOSCOW_TZ = timezone(timedelta(hours=3))
 
-# In-memory log buffer (last 500 logs)
-_log_buffer = deque(maxlen=500)
+# In-memory log buffer - increased to 50000 for full export capability
+_log_buffer = deque(maxlen=50000)
+
+# Separate buffer for errors and critical issues (always visible on top)
+_error_buffer = deque(maxlen=500)
 
 
 def to_moscow_time(dt=None):
@@ -53,10 +56,15 @@ class DashboardLogHandler(logging.Handler):
             moscow_now = datetime.now(MOSCOW_TZ)
             log_entry = {
                 'timestamp': moscow_now.strftime('%Y-%m-%d %H:%M:%S'),
+                'timestamp_iso': moscow_now.isoformat(),
                 'level': record.levelname,
                 'message': self.format(record)
             }
             _log_buffer.append(log_entry)
+            
+            # Also add to error buffer if it's WARNING, ERROR, or CRITICAL
+            if record.levelno >= logging.WARNING:
+                _error_buffer.append(log_entry)
         except Exception:
             pass
 
@@ -502,6 +510,79 @@ def api_logs():
     return jsonify({
         'memory_logs': memory_logs,
         'db_logs': db_logs,
+        'total_logs_in_buffer': len(_log_buffer),
+        'timestamp': to_moscow_time()
+    })
+
+
+@app.route('/api/alerts')
+def api_alerts():
+    """Get recent errors and warnings for display at top of dashboard"""
+    limit = request.args.get('limit', 50, type=int)
+    hours = request.args.get('hours', 6, type=int)  # Default 6 hours
+    
+    # Get errors from buffer
+    errors = list(_error_buffer)
+    errors.reverse()  # Newest first
+    
+    # Filter by time if specified
+    cutoff = datetime.now(MOSCOW_TZ) - timedelta(hours=hours)
+    recent_errors = []
+    
+    for error in errors:
+        try:
+            # Parse timestamp
+            ts_str = error.get('timestamp_iso') or error.get('timestamp')
+            if ts_str:
+                if 'T' in str(ts_str):
+                    ts = datetime.fromisoformat(str(ts_str).replace('Z', '+00:00'))
+                else:
+                    ts = datetime.strptime(str(ts_str), '%Y-%m-%d %H:%M:%S')
+                    ts = ts.replace(tzinfo=MOSCOW_TZ)
+                
+                if ts.replace(tzinfo=None) > cutoff.replace(tzinfo=None):
+                    recent_errors.append(error)
+        except Exception:
+            recent_errors.append(error)  # Include if we can't parse
+    
+    # Count by level
+    error_count = sum(1 for e in recent_errors if e.get('level') == 'ERROR')
+    warning_count = sum(1 for e in recent_errors if e.get('level') == 'WARNING')
+    critical_count = sum(1 for e in recent_errors if e.get('level') == 'CRITICAL')
+    
+    # Get unique error patterns (group similar errors)
+    error_patterns = {}
+    for error in recent_errors[:100]:  # Analyze first 100
+        msg = error.get('message', '')
+        # Extract key part of message for grouping
+        if '[' in msg:
+            key = msg.split(']')[0] + ']' if ']' in msg else msg[:50]
+        else:
+            key = msg[:50]
+        
+        if key not in error_patterns:
+            error_patterns[key] = {
+                'pattern': key,
+                'count': 0,
+                'level': error.get('level'),
+                'last_seen': error.get('timestamp'),
+                'sample': msg[:200]
+            }
+        error_patterns[key]['count'] += 1
+    
+    # Sort patterns by count
+    top_patterns = sorted(error_patterns.values(), key=lambda x: x['count'], reverse=True)[:10]
+    
+    return jsonify({
+        'alerts': recent_errors[:limit],
+        'counts': {
+            'critical': critical_count,
+            'error': error_count,
+            'warning': warning_count,
+            'total': len(recent_errors)
+        },
+        'top_patterns': top_patterns,
+        'hours': hours,
         'timestamp': to_moscow_time()
     })
 
@@ -598,17 +679,21 @@ def api_winrate_breakdown():
 @app.route('/api/export_logs')
 def api_export_logs():
     """Export logs for a specified period"""
-    # Period: hours, days, or months
+    # Period: hours, days, months, or all
     hours = request.args.get('hours', type=int)
     days = request.args.get('days', type=int)
     months = request.args.get('months', type=int)
+    export_all = request.args.get('all', type=int)
     
     if not _run_sql:
         return jsonify({'error': 'Database not connected'})
     
     # Calculate the cutoff time
     now = datetime.now()
-    if hours:
+    if export_all:
+        cutoff = datetime(2020, 1, 1)  # Very old date to get all logs
+        period_str = "all"
+    elif hours:
         cutoff = now - timedelta(hours=hours)
         period_str = f"{hours}h"
     elif days:
@@ -642,7 +727,7 @@ def api_export_logs():
         memory_logs = list(_log_buffer)
         memory_logs.reverse()
         
-        # Filter memory logs by time
+        # Filter memory logs by time (or include all if export_all)
         filtered_memory = []
         for log in memory_logs:
             try:
@@ -650,7 +735,9 @@ def api_export_logs():
                 if log_time > cutoff:
                     filtered_memory.append(log)
             except:
-                pass
+                # Include logs with unparseable timestamps if exporting all
+                if export_all:
+                    filtered_memory.append(log)
         
         # Combine and format for export
         export_data = {
