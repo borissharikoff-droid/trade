@@ -370,6 +370,7 @@ DEXSCREENER_API = 'https://api.dexscreener.com/latest/dex'
 RSS_APP_API_KEY = "c_xMtGIIcrdOZ8Nt"
 RSS_APP_API_SECRET = "s_r8NiIDkqNcLUwMDiusRtqf"
 RSS_APP_API_URL = "https://api.rss.app/v1"
+RSS_APP_BUNDLE_ID = "_XzgeXtiahhlT8Vg5"  # YULA bundle с Twitter аккаунтами
 
 # Кэш созданных фидов RSS.app {username: feed_id}
 _rss_app_feeds_cache = {}
@@ -1118,23 +1119,96 @@ class NewsAnalyzer:
         return events
     
     async def _fetch_twitter_via_rss_app(self, accounts: List[str]) -> List[NewsEvent]:
-        """Получить крипто-новости через RSS.app API (keyword search)"""
+        """Получить Twitter/новости через RSS.app Bundle YULA"""
         global _rss_app_feeds_cache
         events = []
         
         auth_header = f"Bearer {RSS_APP_API_KEY}:{RSS_APP_API_SECRET}"
-        logger.info(f"[RSS.APP] Fetching crypto news...")
-        
-        # Ключевые слова для поиска крипто-новостей
-        crypto_keywords = [
-            "bitcoin crypto news",
-            "ethereum defi", 
-            "cryptocurrency market",
-            "SEC crypto regulation",
-            "crypto whale alert"
-        ]
+        logger.info(f"[RSS.APP] Fetching from YULA bundle...")
         
         async with aiohttp.ClientSession() as session:
+            # 1. Получаем данные из bundle YULA
+            try:
+                async with session.get(
+                    f"{RSS_APP_API_URL}/bundles/{RSS_APP_BUNDLE_ID}",
+                    headers={'Authorization': auth_header},
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        bundle_name = data.get('name', 'YULA')
+                        items = data.get('items', [])
+                        feeds_count = len(data.get('feeds', []))
+                        
+                        logger.info(f"[RSS.APP] ✅ Bundle '{bundle_name}': {feeds_count} feeds, {len(items)} items")
+                        
+                        for item in items[:30]:  # Последние 30 постов
+                            url = item.get('url', '')
+                            is_twitter = 'twitter.com' in url or 'x.com' in url
+                            source = '🐦 Twitter/X' if is_twitter else '📰 News'
+                            
+                            event = self._parse_rss_app_feed_item(item, source, is_twitter)
+                            if event:
+                                events.append(event)
+                        
+                        if events:
+                            logger.info(f"[RSS.APP] Got {len(events)} items from bundle")
+                            events.sort(key=lambda x: x.timestamp, reverse=True)
+                            return events
+                    elif resp.status == 404:
+                        logger.warning(f"[RSS.APP] Bundle not found")
+                    else:
+                        resp_text = await resp.text()
+                        logger.warning(f"[RSS.APP] Bundle error: {resp.status} - {resp_text[:100]}")
+            except Exception as e:
+                logger.warning(f"[RSS.APP] Error fetching bundle: {e}")
+            
+            # 2. Fallback: отдельные фиды из аккаунта
+            try:
+                async with session.get(
+                    f"{RSS_APP_API_URL}/feeds?limit=30",
+                    headers={'Authorization': auth_header},
+                    timeout=aiohttp.ClientTimeout(total=15)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        existing_feeds = data.get('data', [])
+                        logger.info(f"[RSS.APP] Fallback: {len(existing_feeds)} feeds")
+                        
+                        for feed in existing_feeds[:10]:
+                            feed_id = feed.get('id')
+                            feed_title = feed.get('title', 'Unknown')
+                            source_url = feed.get('source_url', '')
+                            is_twitter = 'twitter.com' in source_url or 'x.com' in source_url
+                            
+                            if feed_id:
+                                try:
+                                    async with session.get(
+                                        f"{RSS_APP_API_URL}/feeds/{feed_id}",
+                                        headers={'Authorization': auth_header},
+                                        timeout=aiohttp.ClientTimeout(total=10)
+                                    ) as feed_resp:
+                                        if feed_resp.status == 200:
+                                            feed_data = await feed_resp.json()
+                                            items = feed_data.get('items', [])
+                                            for item in items[:5]:
+                                                source = '🐦 Twitter/X' if is_twitter else f'📰 {feed_title[:20]}'
+                                                event = self._parse_rss_app_feed_item(item, source, is_twitter)
+                                                if event:
+                                                    events.append(event)
+                                except:
+                                    pass
+                            await asyncio.sleep(0.1)
+                        
+                        if events:
+                            logger.info(f"[RSS.APP] Got {len(events)} from individual feeds")
+                            events.sort(key=lambda x: x.timestamp, reverse=True)
+                            return events
+            except Exception as e:
+                logger.warning(f"[RSS.APP] Fallback error: {e}")
+            
+            # 3. Keyword search fallback
+            crypto_keywords = ["bitcoin crypto", "ethereum defi", "SEC crypto"]
             # Метод 1: Keyword search (точно работает по документации)
             for keyword in crypto_keywords[:3]:  # Лимитируем чтобы не тратить операции
                 cache_key = f"keyword_{keyword.replace(' ', '_')}"
@@ -1203,6 +1277,54 @@ class NewsAnalyzer:
         logger.info(f"[RSS.APP] Total news fetched: {len(events)}")
         events.sort(key=lambda x: x.timestamp, reverse=True)
         return events
+    
+    def _parse_rss_app_feed_item(self, item: dict, source: str, is_twitter: bool = False) -> Optional[NewsEvent]:
+        """Парсинг item из существующего RSS.app фида"""
+        title = item.get('title', '') or item.get('description_text', '')
+        
+        if not title or len(title) < 10:
+            return None
+        
+        # Очищаем title
+        title = re.sub(r'<[^>]+>', '', title).strip()
+        
+        news_hash = self._get_news_hash(title, f"rssapp_{source[:15]}")
+        if news_hash in self.seen_news:
+            return None
+        self.seen_news.append(news_hash)
+        
+        # Анализ
+        sentiment, confidence, keywords = self.analyze_sentiment(title)
+        category = self.detect_category(title, 'twitter' if is_twitter else 'news')
+        coins = self.extract_coins(title)
+        
+        # Impact выше для Twitter
+        impact = NewsImpact.HIGH if is_twitter else NewsImpact.MEDIUM
+        
+        # Timestamp
+        timestamp = datetime.now(timezone.utc)
+        date_str = item.get('date_published')
+        if date_str:
+            try:
+                timestamp = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            except:
+                pass
+        
+        return NewsEvent(
+            id=news_hash,
+            source=source,
+            author=item.get('authors', [{}])[0].get('name', '') if item.get('authors') else '',
+            title=title[:200],
+            content=item.get('description_text', title)[:500],
+            url=item.get('url', ''),
+            timestamp=timestamp,
+            sentiment=sentiment,
+            impact=impact,
+            category=category,
+            affected_coins=coins,
+            keywords_found=keywords,
+            confidence=confidence
+        )
     
     def _parse_rss_app_keyword_item(self, item: dict, keyword: str) -> Optional[NewsEvent]:
         """Парсинг item из RSS.app keyword search в NewsEvent"""
