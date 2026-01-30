@@ -1972,16 +1972,19 @@ def sanitize_amount(amount: float) -> float:
 BINANCE_API = "https://api.binance.com/api/v3"
 
 async def get_real_price(symbol: str) -> Optional[float]:
-    """Получить реальную цену с Binance"""
+    """Получить реальную цену с Binance (с timeout 5 секунд)"""
     try:
         binance_symbol = symbol.replace("/", "")  # BTC/USDT -> BTCUSDT
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=5)  # 5 секунд timeout
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(f"{BINANCE_API}/ticker/price?symbol={binance_symbol}") as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return float(data['price'])
+    except asyncio.TimeoutError:
+        logger.warning(f"[BINANCE] Timeout getting price for {symbol}")
     except Exception as e:
-        logger.error(f"[BINANCE] Price fetch error for {symbol}: {e}")
+        logger.debug(f"[BINANCE] Price fetch error for {symbol}: {e}")
     return None
 
 # Cache is now managed by cache_manager.py
@@ -6317,18 +6320,35 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     Errors are isolated to prevent one user's failure from affecting others
     """
     try:
+        # Общий timeout для всей функции - 25 секунд (интервал 30 сек)
+        await asyncio.wait_for(_update_positions_impl(context), timeout=25.0)
+    except asyncio.TimeoutError:
+        logger.error("[UPDATE_POSITIONS] ⚠️ TIMEOUT - функция выполнялась дольше 25 секунд!")
+    except Exception as e:
+        logger.error(f"[UPDATE_POSITIONS] Critical error: {e}", exc_info=True)
+
+
+async def _update_positions_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Внутренняя реализация update_positions с timeout-ами на каждый этап"""
+    try:
         # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
         bybit_open_symbols = set()
         bybit_sync_available = False  # Флаг что данные с Bybit получены успешно
         
         if await is_hedging_enabled():
             try:
-                bybit_positions = await hedger.get_all_positions()
+                # Timeout 10 секунд на запрос к Bybit
+                bybit_positions = await asyncio.wait_for(
+                    hedger.get_all_positions(), 
+                    timeout=10.0
+                )
                 bybit_open_symbols = {p['symbol'] for p in bybit_positions}
                 bybit_sync_available = True  # Успешно получили данные (даже если список пустой)
                 logger.debug(f"[BYBIT_SYNC] Открытых позиций на Bybit: {len(bybit_positions)}")
+            except asyncio.TimeoutError:
+                logger.warning("[BYBIT_SYNC] Timeout getting positions from Bybit")
             except Exception as e:
-                logger.warning(f"[BYBIT_SYNC] Ошибка получения позиций: {e}", exc_info=True)
+                logger.warning(f"[BYBIT_SYNC] Ошибка получения позиций: {e}")
                 trade_logger.log_error(f"Error getting Bybit positions: {e}", error=e)
         
         # Process users in batches with locking
@@ -6345,24 +6365,28 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
             for user_id in batch_user_ids:
                 tasks.append(process_user_positions(user_id, bybit_sync_available, bybit_open_symbols, context))
             
-            # Wait for batch to complete - errors are isolated per user
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Log any exceptions that occurred
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    user_id = batch_user_ids[i]
-                    logger.error(f"[UPDATE_POSITIONS] Error processing user {user_id}: {result}", exc_info=True)
-                    trade_logger.log_error(f"Error in update_positions for user {user_id}: {result}", error=result, user_id=user_id)
+            # Wait for batch to complete with timeout - errors are isolated per user
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=10.0  # 10 секунд на batch
+                )
+                
+                # Log any exceptions that occurred
+                for i, result in enumerate(results):
+                    if isinstance(result, Exception):
+                        user_id = batch_user_ids[i]
+                        logger.error(f"[UPDATE_POSITIONS] Error processing user {user_id}: {result}")
+            except asyncio.TimeoutError:
+                logger.warning(f"[UPDATE_POSITIONS] Timeout processing batch {batch_start}-{batch_start + BATCH_SIZE}")
         
-        # Cleanup expired cache entries
+        # Cleanup expired cache entries (быстрая операция)
         try:
             cleanup_caches()
         except Exception as e:
             logger.warning(f"[UPDATE_POSITIONS] Error cleaning caches: {e}")
     except Exception as e:
-        logger.error(f"[UPDATE_POSITIONS] Critical error: {e}", exc_info=True)
-        trade_logger.log_error(f"Critical error in update_positions: {e}", error=e)
+        logger.error(f"[UPDATE_POSITIONS] Error in impl: {e}")
 
 
 async def process_user_positions(user_id: int, bybit_sync_available: bool, 
@@ -9130,7 +9154,7 @@ def main() -> None:
     
     # Jobs
     if app.job_queue:
-        app.job_queue.run_repeating(update_positions, interval=5, first=5)
+        app.job_queue.run_repeating(update_positions, interval=30, first=10)  # 30 секунд - защита от зависаний
         
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
             app.job_queue.run_repeating(send_smart_signal, interval=60, first=10)  # 1 минута - чаще сигналы!
