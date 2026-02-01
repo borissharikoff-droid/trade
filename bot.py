@@ -895,8 +895,10 @@ async def close_linked_auto_positions(symbol: str, direction: str, exit_price: f
                 user['total_profit'] += local_pnl
                 save_user(user_id)
                 
-                # Закрываем в БД
-                db_close_position(pos['id'], exit_price, local_pnl, f'LINKED_{reason}')
+                # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
+                accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                total_pnl_for_history = local_pnl + accumulated_pnl
+                db_close_position(pos['id'], exit_price, total_pnl_for_history, f'LINKED_{reason}')
                 
                 # Очищаем кэш позиций
                 user_positions = get_positions(user_id)
@@ -1011,6 +1013,69 @@ def db_sync_all_profits() -> int:
     
     logger.info(f"[SYNC] Synced total_profit for {updated} users")
     return updated
+
+
+def auto_fix_profit_discrepancies() -> int:
+    """
+    Автоматически исправляет расхождения между реальным профитом (баланс - депозит)
+    и профитом в истории. Добавляет корректирующие записи если нужно.
+    
+    Вызывается автоматически при старте и каждый час.
+    
+    Returns:
+        Количество исправленных пользователей
+    """
+    try:
+        users = run_sql("SELECT user_id, balance, total_deposit FROM users", fetch="all")
+        if not users:
+            return 0
+        
+        corrections = 0
+        
+        for user_row in users:
+            uid = user_row['user_id']
+            balance = float(user_row['balance'] or 0)
+            deposit = float(user_row['total_deposit'] or 0)
+            
+            # Сумма в открытых позициях
+            open_pos = run_sql(
+                "SELECT COALESCE(SUM(amount), 0) as total FROM positions WHERE user_id = ?",
+                (uid,), fetch="one"
+            )
+            open_amount = float(open_pos['total'] or 0) if open_pos else 0
+            
+            # Реальный профит = (баланс + открытые) - депозит
+            real_profit = (balance + open_amount) - deposit
+            
+            # Профит по истории
+            hist = run_sql(
+                "SELECT COALESCE(SUM(pnl), 0) as total FROM history WHERE user_id = ?",
+                (uid,), fetch="one"
+            )
+            history_profit = float(hist['total'] or 0) if hist else 0
+            
+            # Разница (только если существенная - больше 1 цента)
+            diff = real_profit - history_profit
+            
+            if abs(diff) > 0.01:
+                # Добавляем корректирующую запись
+                run_sql("""
+                    INSERT INTO history 
+                    (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at, closed_at)
+                    VALUES (?, 'CORRECTION', 'NONE', 0, 0, 0, 0, 0, 0, ?, 'AUTO_PROFIT_CORRECTION', datetime('now'), datetime('now'))
+                """, (uid, diff))
+                
+                invalidate_stats_cache(uid)
+                corrections += 1
+                
+                logger.debug(f"[PROFIT_SYNC] User {uid}: correction ${diff:.2f}")
+        
+        return corrections
+        
+    except Exception as e:
+        logger.error(f"[PROFIT_SYNC] Error in auto_fix: {e}")
+        return 0
+
 
 def db_get_loss_streak(user_id: int) -> int:
     """
@@ -4230,8 +4295,10 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                     user['total_profit'] += real_pnl
                     save_user(user_id)
 
-                # Close in DB
-                db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl, 'BYBIT_SYNC')
+                # Close in DB - включаем accumulated realized_pnl от TP1/TP2
+                accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                total_pnl_for_history = real_pnl + accumulated_pnl
+                db_close_position(pos['id'], pos.get('current', pos['entry']), total_pnl_for_history, 'BYBIT_SYNC')
                 closed_pos_ids.append(pos['id'])
                 synced += 1
 
@@ -4456,7 +4523,10 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         total_pnl += pnl
         total_returned += returned
         
-        db_close_position(pos['id'], close_price, pnl, 'MANUAL_CLOSE')
+        # Включаем accumulated realized_pnl от TP1/TP2 в историю
+        accumulated_pnl = pos.get('realized_pnl', 0) or 0
+        total_pnl_for_history = pnl + accumulated_pnl
+        db_close_position(pos['id'], close_price, total_pnl_for_history, 'MANUAL_CLOSE')
         # Явно удаляем из кэша по ID
         pos_id_to_remove = pos['id']
         current_positions = positions_cache.get(user_id, [])
@@ -4650,8 +4720,10 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             elif pnl < 0:
                 losers += 1
             
-            # Close in DB with real price
-            db_close_position(pos['id'], close_price, pnl, 'CLOSE_ALL')
+            # Close in DB with real price - включаем accumulated realized_pnl от TP1/TP2
+            accumulated_pnl = pos.get('realized_pnl', 0) or 0
+            total_pnl_for_history = pnl + accumulated_pnl
+            db_close_position(pos['id'], close_price, total_pnl_for_history, 'CLOSE_ALL')
             
         except Exception as e:
             logger.error(f"[CLOSE_ALL] Error closing position {pos.get('id')}: {e}")
@@ -6206,8 +6278,10 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             user['total_profit'] = (user.get('total_profit', 0) or 0) + pnl
             save_user(user_id)
         
-        # Закрываем в БД и удаляем из кэша
-        db_close_position(pos_id, close_price, pnl, 'MANUAL')
+        # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
+        accumulated_pnl = pos.get('realized_pnl', 0) or 0
+        total_pnl_for_history = pnl + accumulated_pnl
+        db_close_position(pos_id, close_price, total_pnl_for_history, 'MANUAL')
         
         # Явно удаляем из кэша по ID
         try:
@@ -6385,8 +6459,10 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         total_pnl += pnl
         total_returned += returned
         
-        # Закрываем в БД
-        db_close_position(pos['id'], close_price, pnl, 'MANUAL')
+        # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
+        accumulated_pnl = pos.get('realized_pnl', 0) or 0
+        total_pnl_for_history = pnl + accumulated_pnl
+        db_close_position(pos['id'], close_price, total_pnl_for_history, 'MANUAL')
         # Явно удаляем из кэша по ID
         pos_id_to_remove = pos['id']
         current_positions = positions_cache.get(user_id, [])
@@ -6968,8 +7044,10 @@ async def handle_websocket_sync(event_type: str, data: dict):
                         # Определяем причину закрытия
                         reason = "TP" if real_pnl > 0 else "SL"
                         
-                        # Закрываем в БД атомарно
-                        db_close_position(pos['id'], exit_price, real_pnl, f'WS_{reason}')
+                        # Закрываем в БД атомарно - включаем accumulated realized_pnl от TP1/TP2
+                        accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                        total_pnl_for_history = real_pnl + accumulated_pnl
+                        db_close_position(pos['id'], exit_price, total_pnl_for_history, f'WS_{reason}')
                         
                         # Обновляем кэш
                         updated_positions = [p for p in user_positions if p.get('id') != pos['id']]
@@ -7188,8 +7266,10 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                             user['total_profit'] += real_pnl
                             save_user(user_id)
                         
-                        # Закрываем в БД
-                        db_close_position(pos['id'], exit_price, real_pnl, f'BYBIT_{reason}')
+                        # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
+                        accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                        total_pnl_for_history = real_pnl + accumulated_pnl
+                        db_close_position(pos['id'], exit_price, total_pnl_for_history, f'BYBIT_{reason}')
                         
                         # Явно удаляем из кэша по ID (надёжнее чем remove)
                         pos_id_to_remove = pos['id']
@@ -7541,8 +7621,10 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                         save_user(user_id)
                                     
                                     if close_percent >= 1.0:
-                                        # Полное закрытие
-                                        db_close_position(pos['id'], pos['current'], exit_pnl, f"EARLY_EXIT_{action}")
+                                        # Полное закрытие - включаем accumulated realized_pnl
+                                        accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                                        total_pnl_for_history = exit_pnl + accumulated_pnl
+                                        db_close_position(pos['id'], pos['current'], total_pnl_for_history, f"EARLY_EXIT_{action}")
                                         update_positions_cache(user_id, [p for p in user_positions if p.get('id') != pos['id']])
                                         trailing_manager.remove_position(pos['id'])
                                         
@@ -7814,7 +7896,12 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     save_user(user_id)
                 
                 reason = 'TP3' if hit_tp3 else 'SL'
-                db_close_position(pos['id'], exit_price, real_pnl, reason)
+                
+                # ВАЖНО: включаем accumulated realized_pnl от TP1/TP2 в историю
+                # чтобы profit в истории совпадал с изменением баланса
+                accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                total_pnl_for_history = real_pnl + accumulated_pnl
+                db_close_position(pos['id'], exit_price, total_pnl_for_history, reason)
                 # Явно удаляем из кэша по ID
                 pos_id_to_remove = pos['id']
                 current_positions = positions_cache.get(user_id, [])
@@ -8095,6 +8182,28 @@ async def sync_profits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             f"<b>❌ Ошибка синхронизации</b>\n\n{str(e)}",
             parse_mode="HTML"
         )
+
+async def fix_profits_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ручной запуск исправления профитов (работает автоматически каждый час)"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    await update.message.reply_text("<b>⏳ Исправление профитов...</b>\n\n<i>Примечание: это происходит автоматически каждый час</i>", parse_mode="HTML")
+    
+    try:
+        corrections = auto_fix_profit_discrepancies()
+        
+        await update.message.reply_text(
+            f"<b>✅ Готово</b>\n\nИсправлено пользователей: {corrections}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"[FIX_PROFITS] Error: {e}", exc_info=True)
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{str(e)}", parse_mode="HTML")
+
 
 async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Статус и вывод комиссий (админ)"""
@@ -9316,6 +9425,139 @@ async def balance_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Логируем для отладки
     logger.info(f"[DIAG] User {user_id}: cache_balance={cached_balance}, db_balance={db_balance}, positions={len(db_positions)}, frozen=${positions_value:.2f}")
 
+# ==================== ИМПОРТ ПОЗИЦИЙ С BYBIT ====================
+async def import_bybit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Импорт позиций с Bybit в бота (только для админа).
+    Создаёт позиции в боте для позиций которые есть на Bybit но нет в боте.
+    """
+    user_id = update.effective_user.id
+    
+    # Только для админа
+    if user_id != AUTO_TRADE_USER_ID:
+        await update.message.reply_text("❌ Только для администратора")
+        return
+    
+    try:
+        if not await is_hedging_enabled():
+            await update.message.reply_text("❌ Хеджирование отключено")
+            return
+        
+        await update.message.reply_text("🔄 Получаю позиции с Bybit...")
+        
+        # Получаем все позиции с Bybit
+        bybit_positions = await hedger.get_all_positions()
+        
+        if not bybit_positions:
+            await update.message.reply_text("✅ Нет открытых позиций на Bybit")
+            return
+        
+        # Получаем позиции пользователя в боте
+        bot_positions = get_positions(user_id)
+        bot_symbols = {p['symbol'].replace('/', '') for p in bot_positions}
+        
+        imported = []
+        skipped = []
+        
+        for bp in bybit_positions:
+            bybit_symbol = bp['symbol']  # e.g. "TAOUSDT"
+            
+            # Проверяем есть ли уже в боте
+            if bybit_symbol in bot_symbols:
+                skipped.append(bybit_symbol)
+                continue
+            
+            # Извлекаем данные позиции (формат из hedger.get_all_positions)
+            size = float(bp.get('size', 0))
+            if size == 0:
+                continue
+                
+            side = bp.get('side', '')  # "Buy" or "Sell"
+            direction = "LONG" if side == "Buy" else "SHORT"
+            entry_price = float(bp.get('entry', 0))  # Уже преобразовано hedger'ом
+            mark_price = float(bp.get('current', entry_price))  # markPrice -> current
+            leverage = float(bp.get('leverage', LEVERAGE) or LEVERAGE)
+            unrealized_pnl = float(bp.get('pnl', 0))  # unrealisedPnl -> pnl
+            
+            # Конвертируем символ в формат бота (добавляем /)
+            # TAOUSDT -> TAO/USDT
+            if bybit_symbol.endswith('USDT'):
+                bot_symbol = bybit_symbol[:-4] + '/USDT'
+            elif bybit_symbol.endswith('USDC'):
+                bot_symbol = bybit_symbol[:-4] + '/USDC'
+            else:
+                bot_symbol = bybit_symbol
+            
+            # Рассчитываем сумму сделки (size * entry / leverage)
+            position_value = size * entry_price
+            amount = position_value / leverage
+            
+            # Создаём позицию в боте
+            commission = amount * (COMMISSION_PERCENT / 100)
+            
+            position = {
+                'symbol': bot_symbol,
+                'direction': direction,
+                'entry': entry_price,
+                'current': mark_price,
+                'amount': float(amount),
+                'tp': entry_price * (1.05 if direction == "LONG" else 0.95),  # Default 5%
+                'tp1': entry_price * (1.05 if direction == "LONG" else 0.95),
+                'tp2': entry_price * (1.08 if direction == "LONG" else 0.92),
+                'tp3': entry_price * (1.12 if direction == "LONG" else 0.88),
+                'tp1_hit': False,
+                'tp2_hit': False,
+                'sl': entry_price * (0.95 if direction == "LONG" else 1.05),  # Default 5%
+                'commission': float(commission),
+                'pnl': float(unrealized_pnl),
+                'bybit_qty': size,
+                'original_amount': float(amount),
+                'is_auto': True
+            }
+            
+            pos_id = db_add_position(user_id, position)
+            position['id'] = pos_id
+            
+            # Списываем баланс
+            user = get_user(user_id)
+            user['balance'] -= amount
+            user['balance'] = sanitize_balance(user['balance'])
+            save_user(user_id)
+            
+            imported.append({
+                'symbol': bot_symbol,
+                'direction': direction,
+                'size': size,
+                'amount': amount,
+                'pnl': unrealized_pnl
+            })
+            
+            logger.info(f"[IMPORT_BYBIT] Импортирована позиция: {bot_symbol} {direction} size={size} amount=${amount:.2f}")
+        
+        # Обновляем кэш
+        positions_cache.set(user_id, db_get_positions(user_id))
+        
+        # Формируем отчёт
+        text = f"<b>📥 Импорт позиций с Bybit</b>\n\n"
+        text += f"<b>На Bybit:</b> {len(bybit_positions)} позиций\n"
+        text += f"<b>Импортировано:</b> {len(imported)}\n"
+        text += f"<b>Уже были:</b> {len(skipped)}\n\n"
+        
+        if imported:
+            text += "<b>Импортированные:</b>\n"
+            for imp in imported[:10]:
+                pnl_sign = "+" if imp['pnl'] >= 0 else ""
+                text += f"├ {imp['symbol']} | {imp['direction']} | ${imp['amount']:.2f} | PnL: {pnl_sign}${imp['pnl']:.2f}\n"
+            if len(imported) > 10:
+                text += f"└ ... и ещё {len(imported) - 10}\n"
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"[IMPORT_BYBIT] Error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
+
+
 # ==================== СИНХРОНИЗАЦИЯ ПОЗИЦИЙ С BYBIT ====================
 async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
@@ -9466,8 +9708,10 @@ async def sync_cleanup_callback(update: Update, context: ContextTypes.DEFAULT_TY
                 returned = pos['amount'] + current_pnl
                 total_returned += returned
                 
-                # Закрываем позицию
-                db_close_position(pos_id, pos.get('current', pos['entry']), current_pnl, 'MANUAL_PHANTOM_CLEANUP')
+                # Закрываем позицию - включаем accumulated realized_pnl от TP1/TP2
+                accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                total_pnl_for_history = current_pnl + accumulated_pnl
+                db_close_position(pos_id, pos.get('current', pos['entry']), total_pnl_for_history, 'MANUAL_PHANTOM_CLEANUP')
                 removed_count += 1
                 
                 logger.info(f"[SYNC_CLEANUP] User {user_id}: removed phantom position {pos_id} ({pos['symbol']}), returned ${returned:.2f}")
@@ -9811,6 +10055,7 @@ def main() -> None:
     app.add_handler(CommandHandler("commission", commission_cmd))
     app.add_handler(CommandHandler("optimizer", optimizer_cmd))
     app.add_handler(CommandHandler("syncprofits", sync_profits_cmd))
+    app.add_handler(CommandHandler("fixprofits", fix_profits_cmd))  # Исправление несоответствия профита
     app.add_handler(CommandHandler("testbybit", test_bybit))
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
@@ -9828,6 +10073,7 @@ def main() -> None:
     app.add_handler(CommandHandler("ref", referral_cmd))
     app.add_handler(CommandHandler("balance", balance_cmd))  # Диагностика баланса
     app.add_handler(CommandHandler("sync", sync_cmd))  # Синхронизация позиций с Bybit
+    app.add_handler(CommandHandler("import_bybit", import_bybit_cmd))  # Импорт позиций с Bybit
     
     # Оплата Stars
     app.add_handler(PreCheckoutQueryHandler(precheckout))
@@ -9941,6 +10187,20 @@ def main() -> None:
                 logger.warning(f"[LOGGER] Maintenance error: {e}")
         
         app.job_queue.run_repeating(logger_maintenance_job, interval=300, first=60)  # Every 5 minutes
+        
+        # === AUTO PROFIT SYNC JOB ===
+        async def auto_profit_sync_job(context):
+            """Автоматическая синхронизация профитов - исправляет расхождения между балансом и историей"""
+            try:
+                corrections = auto_fix_profit_discrepancies()
+                if corrections > 0:
+                    logger.info(f"[PROFIT_SYNC] Auto-fixed {corrections} users with profit discrepancies")
+            except Exception as e:
+                logger.warning(f"[PROFIT_SYNC] Error: {e}")
+        
+        # Запускаем при старте (через 30 сек) и каждый час
+        app.job_queue.run_once(auto_profit_sync_job, when=30)
+        app.job_queue.run_repeating(auto_profit_sync_job, interval=3600, first=3630)  # Каждый час
         
         # === AUTO OPTIMIZER JOB ===
         async def auto_optimizer_job(context):

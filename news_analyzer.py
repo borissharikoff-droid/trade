@@ -375,16 +375,16 @@ RSS_APP_BUNDLE_ID = "_XzgeXtiahhlT8Vg5"  # YULA bundle с Twitter аккаунт
 # Кэш созданных фидов RSS.app {username: feed_id}
 _rss_app_feeds_cache = {}
 
-# Nitter instances как fallback
-NITTER_INSTANCES = [
-    'https://nitter.poast.org',
-    'https://nitter.privacydev.net',
-    'https://nitter.net',
-]
+# Кэш работающего RSSHub инстанса
+_working_rsshub_instance = None
+_rsshub_last_check = None
 
-# Кэш работающего инстанса
-_working_nitter_instance = None
-_nitter_last_check = None
+# RSSHub instances для Twitter
+RSSHUB_INSTANCES = [
+    'https://rsshub.app',
+    'https://rss.shab.fun',
+    'https://rsshub.rssforever.com',
+]
 
 # Приоритетные аккаунты для мониторинга (самые важные)
 PRIORITY_TWITTER_ACCOUNTS = [
@@ -927,7 +927,7 @@ class NewsAnalyzer:
     async def fetch_twitter_posts(self, accounts: List[str] = None) -> List[NewsEvent]:
         """
         Получить твиты от ключевых аккаунтов через RSS.app API
-        Fallback: Nitter RSS
+        Fallback: RSSHub
         """
         events = []
         accounts_to_fetch = accounts or PRIORITY_TWITTER_ACCOUNTS[:8]  # Топ 8 аккаунтов
@@ -944,20 +944,22 @@ class NewsAnalyzer:
         except Exception as e:
             logger.warning(f"[TWITTER] RSS.app failed: {e}")
         
-        # Fallback на Nitter
-        global _working_nitter_instance, _nitter_last_check
+        # Fallback на RSSHub
+        global _working_rsshub_instance, _rsshub_last_check
         working_instance = None
         now = datetime.now()
         
-        if _working_nitter_instance and _nitter_last_check:
-            if (now - _nitter_last_check).total_seconds() < 300:
-                working_instance = _working_nitter_instance
+        # Используем кэшированный инстанс если проверяли недавно
+        if _working_rsshub_instance and _rsshub_last_check:
+            if (now - _rsshub_last_check).total_seconds() < 300:
+                working_instance = _working_rsshub_instance
         
         async with aiohttp.ClientSession() as session:
+            # Ищем работающий RSSHub инстанс
             if not working_instance:
-                for instance in NITTER_INSTANCES:
+                for instance in RSSHUB_INSTANCES:
                     try:
-                        test_url = f"{instance}/elonmusk/rss"
+                        test_url = f"{instance}/twitter/user/elonmusk"
                         async with session.get(
                             test_url,
                             timeout=aiohttp.ClientTimeout(total=8),
@@ -968,28 +970,22 @@ class NewsAnalyzer:
                                 content = await resp.text()
                                 if '<item>' in content or '<entry>' in content:
                                     working_instance = instance
-                                    _working_nitter_instance = instance
-                                    _nitter_last_check = now
-                                    logger.info(f"[TWITTER] ✅ Found working Nitter: {instance}")
+                                    _working_rsshub_instance = instance
+                                    _rsshub_last_check = now
+                                    logger.info(f"[TWITTER] ✅ Found working RSSHub: {instance}")
                                     break
                     except Exception as e:
                         logger.debug(f"[TWITTER] {instance} failed: {e}")
                         continue
             
             if not working_instance:
-                logger.warning("[TWITTER] ❌ No working Nitter, trying RSSHub")
-                try:
-                    events = await self._fetch_twitter_via_rsshub(session, accounts_to_fetch[:5])
-                    if events:
-                        return events
-                except Exception as e:
-                    logger.warning(f"[TWITTER] RSSHub fallback failed: {e}")
+                logger.warning("[TWITTER] ❌ No working RSSHub instance found")
                 return events
             
-            # Парсим твиты от каждого аккаунта
+            # Парсим твиты от каждого аккаунта через RSSHub
             for username in accounts_to_fetch:
                 try:
-                    rss_url = f"{working_instance}/{username}/rss"
+                    rss_url = f"{working_instance}/twitter/user/{username}"
                     
                     async with session.get(
                         rss_url,
@@ -1057,8 +1053,8 @@ class NewsAnalyzer:
                         # Парсим ссылку
                         link_match = re.search(r'<link[^>]*>([^<]+)</link>', item)
                         url = link_match.group(1).strip() if link_match else f"https://twitter.com/{username}"
-                        # Заменяем nitter URL на twitter
-                        url = re.sub(r'https?://[^/]+/', 'https://twitter.com/', url)
+                        # Заменяем rsshub URL на twitter
+                        url = re.sub(r'https?://rsshub[^/]*/twitter/user/', 'https://twitter.com/', url)
                         
                         # Парсим дату
                         timestamp = datetime.now(timezone.utc)
@@ -1454,14 +1450,10 @@ class NewsAnalyzer:
     async def _fetch_twitter_via_rsshub(self, session, accounts: List[str]) -> List[NewsEvent]:
         """Fallback: получить твиты через RSSHub"""
         events = []
-        rsshub_instances = [
-            'https://rsshub.app',
-            'https://rss.shab.fun',
-            'https://rsshub.rssforever.com',
-        ]
+        global _working_rsshub_instance, _rsshub_last_check
         
-        working_rsshub = None
-        for instance in rsshub_instances:
+        working_rsshub = _working_rsshub_instance
+        for instance in RSSHUB_INSTANCES:
             try:
                 async with session.get(
                     f"{instance}/twitter/user/elonmusk",
