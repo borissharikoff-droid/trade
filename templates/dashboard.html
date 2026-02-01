@@ -1,11 +1,28 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Trading Bot Dashboard</title>
-    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+    <title>YULA Trading Bot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg-primary: rgba(10, 15, 20, 0.85);
+            --bg-secondary: rgba(15, 25, 35, 0.75);
+            --bg-panel: rgba(20, 30, 40, 0.65);
+            --border-color: rgba(0, 255, 136, 0.15);
+            --border-hover: rgba(0, 255, 136, 0.3);
+            --accent: #00ff88;
+            --accent-dim: rgba(0, 255, 136, 0.6);
+            --positive: #00ff88;
+            --negative: #ff4757;
+            --warning: #ffa502;
+            --text-primary: #e8f0f0;
+            --text-secondary: rgba(232, 240, 240, 0.6);
+            --text-muted: rgba(232, 240, 240, 0.4);
+        }
+        
         * {
             margin: 0;
             padding: 0;
@@ -13,426 +30,719 @@
         }
         
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: #0d1117;
-            color: #c9d1d9;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #0a0f14;
+            color: var(--text-primary);
             min-height: 100vh;
-            padding: 12px;
+            overflow-x: hidden;
+        }
+        
+        /* Background with image */
+        .bg-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            background: 
+                linear-gradient(135deg, rgba(0, 20, 30, 0.95) 0%, rgba(5, 15, 25, 0.9) 50%, rgba(10, 25, 35, 0.85) 100%),
+                url('https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1920&q=80') center/cover no-repeat;
         }
         
         .container {
-            max-width: 1800px;
+            max-width: 1920px;
             margin: 0 auto;
+            padding: 16px;
+            position: relative;
+            z-index: 1;
         }
         
-        .main-layout {
-            display: grid;
-            grid-template-columns: 1fr 380px;
-            gap: 20px;
-        }
-        
-        .main-content {
-            min-width: 0;
-        }
-        
-        .news-sidebar {
-            position: sticky;
-            top: 12px;
-            height: calc(100vh - 24px);
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-        }
-        
-        @media (max-width: 1200px) {
-            .main-layout {
-                grid-template-columns: 1fr;
-            }
-            .news-sidebar {
-                position: relative;
-                height: auto;
-                max-height: 600px;
-            }
-        }
-        
-        header {
+        /* Header */
+        .header {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            padding: 12px 20px;
+            background: var(--bg-primary);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
             margin-bottom: 16px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid #21262d;
-            flex-wrap: wrap;
-            gap: 8px;
         }
         
-        h1 {
-            font-size: 1.3rem;
-            font-weight: 600;
-            color: #f0f6fc;
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
         }
         
-        .header-actions {
+        .logo-text {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.4rem;
+            font-weight: 700;
+            color: var(--accent);
+            letter-spacing: 2px;
+        }
+        
+        .logo-version {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            background: rgba(0, 255, 136, 0.1);
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+        
+        .market-status {
             display: flex;
             align-items: center;
             gap: 8px;
-            flex-wrap: wrap;
-        }
-        
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 8px 16px;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            background: #21262d;
-            color: #c9d1d9;
-            font-size: 0.875rem;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        
-        .btn:hover {
-            background: #30363d;
-            border-color: #8b949e;
-        }
-        
-        .btn-primary {
-            background: #238636;
-            border-color: #238636;
-            color: #fff;
-        }
-        
-        .btn-primary:hover {
-            background: #2ea043;
-        }
-        
-        .status {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 0.875rem;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
         }
         
         .status-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background: #238636;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent);
             animation: pulse 2s infinite;
         }
         
+        .status-dot.offline {
+            background: var(--negative);
+            box-shadow: 0 0 10px var(--negative);
+        }
+        
         @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.9); }
         }
         
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 12px;
-            margin-bottom: 24px;
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
         }
         
-        .card {
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 6px;
-            padding: 16px;
+        .header-stat {
+            text-align: right;
+            font-family: 'JetBrains Mono', monospace;
         }
         
-        .card-label {
-            font-size: 0.7rem;
+        .header-stat-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
             text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: #8b949e;
-            margin-bottom: 6px;
+            letter-spacing: 1px;
         }
         
-        .card-value {
-            font-size: 1.5rem;
-            font-weight: 600;
-            color: #f0f6fc;
+        .header-stat-value {
+            font-size: 0.85rem;
+            color: var(--text-primary);
         }
         
-        .card-value.positive { color: #238636; }
-        .card-value.negative { color: #da3633; }
-        .card-value.neutral { color: #58a6ff; }
-        .card-value.small { font-size: 1.1rem; }
-        
-        .card-sub {
-            font-size: 0.75rem;
-            color: #8b949e;
-            margin-top: 4px;
+        .time-display {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.1rem;
+            color: var(--text-secondary);
         }
         
-        .section {
-            margin-bottom: 24px;
+        /* Main Grid Layout */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 320px 1fr 340px;
+            gap: 16px;
+            min-height: calc(100vh - 120px);
         }
         
-        .section-header {
+        @media (max-width: 1400px) {
+            .main-grid {
+                grid-template-columns: 1fr 1fr;
+            }
+            .right-panel {
+                grid-column: span 2;
+            }
+        }
+        
+        @media (max-width: 900px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+            .right-panel {
+                grid-column: span 1;
+            }
+        }
+        
+        /* Panel Base */
+        .panel {
+            background: var(--bg-panel);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            transition: border-color 0.3s;
+        }
+        
+        .panel:hover {
+            border-color: var(--border-hover);
+        }
+        
+        .panel-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            padding: 14px 18px;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(0, 0, 0, 0.2);
+        }
+        
+        .panel-title {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+        }
+        
+        .panel-badge {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+        
+        .panel-content {
+            padding: 18px;
+        }
+        
+        /* Account Panel */
+        .account-panel .panel-content {
+            padding: 20px;
+        }
+        
+        .equity-display {
+            margin-bottom: 24px;
+        }
+        
+        .equity-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 4px;
+        }
+        
+        .equity-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 2.4rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            line-height: 1;
+        }
+        
+        .account-stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .account-stat {
+            padding: 14px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.03);
+        }
+        
+        .account-stat-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 6px;
+        }
+        
+        .account-stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        /* PnL Display */
+        .pnl-section {
+            padding: 16px;
+            background: rgba(0, 255, 136, 0.05);
+            border-radius: 10px;
+            border: 1px solid rgba(0, 255, 136, 0.1);
+        }
+        
+        .pnl-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
             margin-bottom: 12px;
         }
         
-        .section-title {
-            font-size: 1rem;
+        .pnl-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+        
+        .pnl-percent {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
             font-weight: 600;
-            color: #f0f6fc;
-            padding: 8px 12px;
-            background: rgba(33, 38, 45, 0.5);
-            border-radius: 6px;
-            border-left: 3px solid #58a6ff;
         }
         
-        .tabs {
+        .pnl-percent.positive { color: var(--positive); }
+        .pnl-percent.negative { color: var(--negative); }
+        
+        .pnl-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+        
+        .pnl-value.positive { color: var(--positive); }
+        .pnl-value.negative { color: var(--negative); }
+        
+        .pnl-breakdown {
             display: flex;
-            gap: 4px;
-        }
-        
-        .tab {
-            padding: 6px 12px;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            background: transparent;
-            color: #8b949e;
+            gap: 20px;
             font-size: 0.75rem;
-            cursor: pointer;
         }
         
-        .tab.active {
-            background: #21262d;
-            color: #f0f6fc;
-            border-color: #8b949e;
+        .pnl-breakdown-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
         
-        .reasons-grid {
+        .pnl-breakdown-label {
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-size: 0.65rem;
+        }
+        
+        .pnl-breakdown-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+        }
+        
+        /* Positions Table */
+        .positions-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .positions-table th {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.65rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 12px 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(0, 0, 0, 0.2);
+        }
+        
+        .positions-table td {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            padding: 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            vertical-align: middle;
+        }
+        
+        .positions-table tr:hover td {
+            background: rgba(0, 255, 136, 0.03);
+        }
+        
+        .symbol-cell {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .symbol-icon {
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.2), rgba(0, 200, 100, 0.1));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.7rem;
+            font-weight: 700;
+            color: var(--accent);
+        }
+        
+        .symbol-info {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .symbol-name {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .symbol-type {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+        }
+        
+        .direction-badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        
+        .direction-badge.long {
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--positive);
+        }
+        
+        .direction-badge.short {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--negative);
+        }
+        
+        .pnl-cell {
+            font-weight: 600;
+        }
+        
+        .pnl-cell.positive { color: var(--positive); }
+        .pnl-cell.negative { color: var(--negative); }
+        
+        .sparkline {
+            width: 60px;
+            height: 24px;
+        }
+        
+        .sparkline svg {
+            width: 100%;
+            height: 100%;
+        }
+        
+        /* Stats Grid */
+        .stats-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: repeat(3, 1fr);
             gap: 12px;
         }
         
-        .reasons-list {
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 6px;
-            padding: 14px;
-        }
-        
-        .reasons-list h3 {
-            font-size: 0.8rem;
-            font-weight: 600;
-            margin-bottom: 10px;
-        }
-        
-        .reasons-list h3.wins { color: #238636; }
-        .reasons-list h3.losses { color: #da3633; }
-        
-        .reason-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 6px 0;
-            border-bottom: 1px solid #21262d;
-            font-size: 0.8rem;
-        }
-        
-        .reason-item:last-child { border-bottom: none; }
-        .reason-name { color: #c9d1d9; }
-        .reason-count { color: #8b949e; font-weight: 500; }
-        
-        .trades-table {
-            width: 100%;
-            border-collapse: collapse;
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 6px;
-            overflow: hidden;
-            font-size: 0.8rem;
-        }
-        
-        .trades-table th,
-        .trades-table td {
-            padding: 10px 12px;
-            text-align: left;
-            border-bottom: 1px solid #21262d;
-        }
-        
-        .trades-table th {
-            background: #0d1117;
-            color: #8b949e;
-            font-weight: 500;
-            text-transform: uppercase;
-            font-size: 0.7rem;
-            letter-spacing: 0.05em;
-        }
-        
-        .trades-table tr:last-child td { border-bottom: none; }
-        
-        .badge {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 0.7rem;
-            font-weight: 500;
-        }
-        
-        .badge-long { background: rgba(35, 134, 54, 0.2); color: #238636; }
-        .badge-short { background: rgba(218, 54, 51, 0.2); color: #da3633; }
-        
-        .pnl-positive { color: #238636; }
-        .pnl-negative { color: #da3633; }
-        
-        .no-data {
-            color: #8b949e;
-            font-style: italic;
-            padding: 20px;
+        .stat-card {
+            padding: 16px;
+            background: rgba(0, 0, 0, 0.25);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.03);
             text-align: center;
         }
         
-        .updated {
-            font-size: 0.75rem;
-            color: #8b949e;
+        .stat-card-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
         }
         
-        /* Logs section */
-        .logs-container {
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 6px;
+        .stat-card-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.3rem;
+            font-weight: 700;
+        }
+        
+        .stat-card-value.positive { color: var(--positive); }
+        .stat-card-value.negative { color: var(--negative); }
+        .stat-card-value.neutral { color: var(--text-primary); }
+        
+        .stat-card-sub {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+        
+        /* Right Panel - News/Activity */
+        .right-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        
+        .activity-list {
             max-height: 300px;
             overflow-y: auto;
         }
         
-        .log-entry {
-            padding: 8px 12px;
-            border-bottom: 1px solid #21262d;
-            font-family: monospace;
-            font-size: 0.75rem;
+        .activity-item {
             display: flex;
+            align-items: center;
             gap: 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+            transition: background 0.2s;
         }
         
-        .log-entry:last-child { border-bottom: none; }
-        
-        .log-time { color: #8b949e; min-width: 140px; }
-        .log-level { min-width: 60px; font-weight: 600; }
-        .log-level.INFO { color: #58a6ff; }
-        .log-level.WARNING { color: #d29922; }
-        .log-level.ERROR { color: #da3633; }
-        .log-message { color: #c9d1d9; word-break: break-all; }
-        
-        /* Share card (hidden, for screenshot) */
-        #shareCard {
-            position: fixed;
-            left: -9999px;
-            top: 0;
-            width: 500px;
-            padding: 24px;
-            background: linear-gradient(135deg, #0d1117 0%, #161b22 100%);
-            border-radius: 12px;
+        .activity-item:hover {
+            background: rgba(0, 255, 136, 0.03);
         }
         
-        .share-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid #21262d;
-        }
-        
-        .share-title {
-            font-size: 1.2rem;
-            font-weight: 700;
-            color: #f0f6fc;
-        }
-        
-        .share-date {
-            font-size: 0.8rem;
-            color: #8b949e;
-        }
-        
-        .share-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 16px;
-        }
-        
-        .share-stat {
-            background: rgba(255,255,255,0.03);
-            padding: 14px;
+        .activity-icon {
+            width: 32px;
+            height: 32px;
             border-radius: 8px;
-            border: 1px solid #21262d;
-        }
-        
-        .share-stat-label {
-            font-size: 0.7rem;
-            color: #8b949e;
-            text-transform: uppercase;
-            margin-bottom: 4px;
-        }
-        
-        .share-stat-value {
-            font-size: 1.4rem;
-            font-weight: 700;
-        }
-        
-        .share-footer {
-            margin-top: 16px;
-            padding-top: 12px;
-            border-top: 1px solid #21262d;
-            font-size: 0.7rem;
-            color: #8b949e;
-            text-align: center;
-        }
-        
-        /* Streak badge */
-        .streak-badge {
-            display: inline-flex;
+            display: flex;
             align-items: center;
-            gap: 4px;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 0.7rem;
+            justify-content: center;
+            font-size: 14px;
+        }
+        
+        .activity-icon.win {
+            background: rgba(0, 255, 136, 0.15);
+        }
+        
+        .activity-icon.loss {
+            background: rgba(255, 71, 87, 0.15);
+        }
+        
+        .activity-info {
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .activity-title {
+            font-size: 0.8rem;
+            color: var(--text-primary);
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .activity-time {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+        }
+        
+        .activity-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
             font-weight: 600;
         }
         
-        .streak-win { background: rgba(35, 134, 54, 0.2); color: #238636; }
-        .streak-loss { background: rgba(218, 54, 51, 0.2); color: #da3633; }
+        .activity-value.positive { color: var(--positive); }
+        .activity-value.negative { color: var(--negative); }
         
-        /* Main navigation tabs */
-        .main-tabs {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 24px;
-            border-bottom: 1px solid #21262d;
-            padding-bottom: 12px;
+        /* Chart Container */
+        .chart-container {
+            height: 200px;
+            padding: 16px;
+            position: relative;
         }
         
-        .main-tab {
-            padding: 10px 20px;
-            border: 1px solid #30363d;
-            border-radius: 6px 6px 0 0;
-            background: transparent;
-            color: #8b949e;
+        .chart-placeholder {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 3px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: rgba(0, 255, 136, 0.3);
+            border-radius: 3px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(0, 255, 136, 0.5);
+        }
+        
+        /* Signal Stats Panel */
+        .signal-stats {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-top: 16px;
+        }
+        
+        .signal-stat {
+            padding: 12px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .signal-stat-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+        }
+        
+        .signal-stat-value {
+            font-family: 'JetBrains Mono', monospace;
             font-size: 0.9rem;
-            font-weight: 500;
+            font-weight: 600;
+            color: var(--accent);
+        }
+        
+        /* News Panel */
+        .news-item {
+            padding: 14px 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
             cursor: pointer;
             transition: all 0.2s;
         }
         
-        .main-tab:hover {
-            background: #21262d;
-            color: #c9d1d9;
+        .news-item:hover {
+            background: rgba(0, 255, 136, 0.03);
         }
         
-        .main-tab.active {
-            background: #238636;
-            color: #fff;
-            border-color: #238636;
+        .news-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        
+        .news-source {
+            font-size: 0.7rem;
+            color: var(--accent);
+            font-weight: 500;
+        }
+        
+        .news-time {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+        }
+        
+        .news-title {
+            font-size: 0.8rem;
+            color: var(--text-primary);
+            line-height: 1.4;
+            margin-bottom: 8px;
+        }
+        
+        .news-tags {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        
+        .news-tag {
+            font-size: 0.6rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        
+        .news-tag.bullish {
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--positive);
+        }
+        
+        .news-tag.bearish {
+            background: rgba(255, 71, 87, 0.15);
+            color: var(--negative);
+        }
+        
+        .news-tag.coin {
+            background: rgba(88, 166, 255, 0.15);
+            color: #58a6ff;
+        }
+        
+        /* Loading State */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 40px;
+            color: var(--text-muted);
+        }
+        
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid rgba(0, 255, 136, 0.2);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-muted);
+        }
+        
+        .empty-state-icon {
+            font-size: 2rem;
+            margin-bottom: 12px;
+            opacity: 0.5;
+        }
+        
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 4px;
+            padding: 4px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+        
+        .tab {
+            flex: 1;
+            padding: 10px 16px;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+        
+        .tab:hover {
+            background: rgba(0, 255, 136, 0.05);
+            color: var(--text-primary);
+        }
+        
+        .tab.active {
+            background: rgba(0, 255, 136, 0.15);
+            color: var(--accent);
         }
         
         .tab-content {
@@ -443,1221 +753,464 @@
             display: block;
         }
         
-        /* Users table */
-        .users-table {
-            width: 100%;
-            border-collapse: collapse;
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 6px;
-            overflow: hidden;
-            font-size: 0.8rem;
-        }
-        
-        .users-table th,
-        .users-table td {
-            padding: 12px 14px;
-            text-align: left;
-            border-bottom: 1px solid #21262d;
-        }
-        
-        .users-table th {
-            background: #0d1117;
-            color: #8b949e;
-            font-weight: 500;
-            text-transform: uppercase;
-            font-size: 0.7rem;
-            letter-spacing: 0.05em;
-            position: sticky;
-            top: 0;
-            cursor: pointer;
-        }
-        
-        .users-table th:hover {
-            background: #161b22;
-        }
-        
-        .users-table th.sorted-asc::after { content: ' ↑'; }
-        .users-table th.sorted-desc::after { content: ' ↓'; }
-        
-        .users-table tr:last-child td { border-bottom: none; }
-        
-        .users-table tr:hover {
-            background: #1c2128;
-        }
-        
-        .users-summary {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        
-        .summary-card {
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 6px;
-            padding: 14px;
-            text-align: center;
-        }
-        
-        .summary-label {
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            color: #8b949e;
-            margin-bottom: 4px;
-        }
-        
-        .summary-value {
-            font-size: 1.3rem;
-            font-weight: 600;
-            color: #f0f6fc;
-        }
-        
-        .status-badge {
-            display: inline-block;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 0.65rem;
-            font-weight: 500;
-        }
-        
-        .status-on { background: rgba(35, 134, 54, 0.2); color: #238636; }
-        .status-off { background: rgba(139, 148, 158, 0.2); color: #8b949e; }
-        
-        .users-table-container {
-            max-height: 600px;
-            overflow-y: auto;
-            border-radius: 6px;
-        }
-        
-        /* Export dropdown */
-        .export-dropdown {
-            position: relative;
-            display: inline-block;
-        }
-        
-        .export-menu {
-            display: none;
-            position: absolute;
-            right: 0;
-            top: 100%;
-            background: #161b22;
-            border: 1px solid #30363d;
-            border-radius: 6px;
-            min-width: 180px;
-            z-index: 1000;
-            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
-        }
-        
-        .export-menu.show {
-            display: block;
-        }
-        
-        .export-menu-title {
-            padding: 10px 12px;
-            font-size: 0.75rem;
-            color: #8b949e;
-            border-bottom: 1px solid #21262d;
-            text-transform: uppercase;
-        }
-        
-        .export-menu-item {
-            display: block;
-            padding: 10px 12px;
-            color: #c9d1d9;
-            text-decoration: none;
-            font-size: 0.85rem;
-            cursor: pointer;
-            transition: background 0.2s;
-        }
-        
-        .export-menu-item:hover {
-            background: #21262d;
-        }
-        
-        /* Moscow time badge */
-        .tz-badge {
-            background: rgba(88, 166, 255, 0.15);
-            color: #58a6ff;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-size: 0.65rem;
-            margin-left: 4px;
-        }
-        
-        /* Stats highlight cards */
-        .card-highlight {
-            border-left: 3px solid #238636;
-        }
-        
-        .card-highlight.warning {
-            border-left-color: #d29922;
-        }
-        
-        .card-highlight.info {
-            border-left-color: #58a6ff;
-        }
-        
-        /* News Feed Styles */
-        .news-panel {
-            background: #161b22;
-            border: 1px solid #21262d;
-            border-radius: 6px;
-            display: flex;
-            flex-direction: column;
-            height: 100%;
-            overflow: hidden;
-        }
-        
-        .news-header {
-            padding: 14px 16px;
-            border-bottom: 1px solid #21262d;
+        /* Footer Stats Bar */
+        .footer-bar {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            flex-shrink: 0;
+            padding: 12px 20px;
+            background: var(--bg-primary);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-top: 16px;
         }
         
-        .news-title {
-            font-size: 1rem;
-            font-weight: 600;
-            color: #f0f6fc;
+        .footer-stats {
+            display: flex;
+            gap: 32px;
+        }
+        
+        .footer-stat {
             display: flex;
             align-items: center;
             gap: 8px;
         }
         
-        .news-sentiment {
+        .footer-stat-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+        }
+        
+        .footer-stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .footer-stat-value.positive { color: var(--positive); }
+        .footer-stat-value.negative { color: var(--negative); }
+        
+        /* Refresh Button */
+        .refresh-btn {
             display: flex;
             align-items: center;
             gap: 6px;
-            font-size: 0.75rem;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-weight: 600;
-        }
-        
-        .news-sentiment.bullish {
-            background: rgba(35, 134, 54, 0.2);
-            color: #238636;
-        }
-        
-        .news-sentiment.bearish {
-            background: rgba(218, 54, 51, 0.2);
-            color: #da3633;
-        }
-        
-        .news-sentiment.neutral {
-            background: rgba(88, 166, 255, 0.15);
-            color: #58a6ff;
-        }
-        
-        .news-list {
-            flex: 1;
-            overflow-y: auto;
-            padding: 8px;
-        }
-        
-        .news-item {
-            padding: 12px;
-            border-radius: 6px;
-            margin-bottom: 8px;
-            background: rgba(255, 255, 255, 0.02);
-            border: 1px solid #21262d;
+            padding: 8px 16px;
+            background: rgba(0, 255, 136, 0.1);
+            border: 1px solid rgba(0, 255, 136, 0.2);
+            border-radius: 8px;
+            color: var(--accent);
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
             transition: all 0.2s;
-            cursor: pointer;
         }
         
-        .news-item:hover {
-            background: rgba(255, 255, 255, 0.05);
-            border-color: #30363d;
+        .refresh-btn:hover {
+            background: rgba(0, 255, 136, 0.2);
+            border-color: rgba(0, 255, 136, 0.4);
         }
         
-        .news-item:last-child {
-            margin-bottom: 0;
-        }
-        
-        .news-item-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            gap: 8px;
-            margin-bottom: 6px;
-        }
-        
-        .news-source {
-            font-size: 0.7rem;
-            color: #8b949e;
-            font-weight: 500;
-        }
-        
-        .news-source.twitter {
-            color: #1DA1F2;
-        }
-        
-        .news-time {
-            font-size: 0.65rem;
-            color: #6e7681;
-            white-space: nowrap;
-        }
-        
-        .news-item-title {
-            font-size: 0.8rem;
-            color: #c9d1d9;
-            line-height: 1.4;
-            margin-bottom: 8px;
-        }
-        
-        .news-item-footer {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-        
-        .news-tags {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 4px;
-        }
-        
-        .news-tag {
-            font-size: 0.6rem;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-weight: 500;
-        }
-        
-        .news-tag.coin {
-            background: rgba(88, 166, 255, 0.15);
-            color: #58a6ff;
-        }
-        
-        .news-tag.bullish {
-            background: rgba(35, 134, 54, 0.2);
-            color: #238636;
-        }
-        
-        .news-tag.bearish {
-            background: rgba(218, 54, 51, 0.2);
-            color: #da3633;
-        }
-        
-        .news-tag.neutral {
-            background: rgba(139, 148, 158, 0.2);
-            color: #8b949e;
-        }
-        
-        .news-impact {
-            font-size: 0.6rem;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-weight: 600;
-        }
-        
-        .news-impact.critical {
-            background: rgba(218, 54, 51, 0.3);
-            color: #f85149;
-        }
-        
-        .news-impact.high {
-            background: rgba(210, 153, 34, 0.3);
-            color: #d29922;
-        }
-        
-        .news-impact.medium {
-            background: rgba(88, 166, 255, 0.2);
-            color: #58a6ff;
-        }
-        
-        .news-impact.low {
-            background: rgba(139, 148, 158, 0.2);
-            color: #8b949e;
-        }
-        
-        .news-keywords {
-            font-size: 0.65rem;
-            color: #6e7681;
-            margin-top: 6px;
-        }
-        
-        .news-empty {
-            text-align: center;
-            padding: 40px 20px;
-            color: #8b949e;
-        }
-        
-        .news-loading {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-            padding: 20px;
-            color: #8b949e;
-            font-size: 0.85rem;
-        }
-        
-        .spinner {
-            width: 16px;
-            height: 16px;
-            border: 2px solid #30363d;
-            border-top-color: #58a6ff;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-
-        /* Alerts section styles */
-        .alerts-container {
-            background: #161b22;
-            border: 1px solid #da3633;
-            border-radius: 6px;
-            max-height: 200px;
-            overflow-y: auto;
-        }
-        
-        .alerts-patterns {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 12px;
-        }
-        
-        .alert-pattern {
-            background: rgba(218, 54, 51, 0.1);
-            border: 1px solid #da3633;
-            border-radius: 6px;
-            padding: 8px 12px;
-            font-size: 0.75rem;
-        }
-        
-        .alert-pattern.warning {
-            background: rgba(210, 153, 34, 0.1);
-            border-color: #d29922;
-        }
-        
-        .alert-pattern-count {
-            font-weight: 700;
-            color: #da3633;
-            margin-right: 6px;
-        }
-        
-        .alert-pattern.warning .alert-pattern-count {
-            color: #d29922;
-        }
-        
-        .alert-pattern-text {
-            color: #c9d1d9;
-        }
-        
-        .alert-entry {
-            padding: 8px 12px;
-            border-bottom: 1px solid #21262d;
-            font-family: monospace;
-            font-size: 0.75rem;
-            display: flex;
-            gap: 12px;
-            background: rgba(218, 54, 51, 0.05);
-        }
-        
-        .alert-entry.warning {
-            background: rgba(210, 153, 34, 0.05);
-        }
-        
-        .alert-entry:last-child { border-bottom: none; }
-        
-        .alert-badge {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 12px;
-            font-size: 0.7rem;
-            font-weight: 700;
-        }
-        
-        .alert-badge.critical {
-            background: rgba(248, 81, 73, 0.3);
-            color: #f85149;
-        }
-        
-        .alert-badge.error {
-            background: rgba(218, 54, 51, 0.2);
-            color: #da3633;
-        }
-        
-        .alert-badge.warning {
-            background: rgba(210, 153, 34, 0.2);
-            color: #d29922;
-        }
-        
-        #alertsSection {
-            animation: alertPulse 2s ease-in-out infinite;
-        }
-        
-        @keyframes alertPulse {
-            0%, 100% { border-color: transparent; }
-            50% { border-color: rgba(218, 54, 51, 0.3); }
-        }
-        
-        #alertsSection .section-title {
-            background: rgba(218, 54, 51, 0.1);
-        }
-
-        @media (max-width: 768px) {
-            body { padding: 8px; }
-            .reasons-grid { grid-template-columns: 1fr; }
-            .grid { grid-template-columns: repeat(2, 1fr); }
-            .header-actions { width: 100%; justify-content: space-between; }
-            .main-tabs { flex-wrap: wrap; gap: 4px; }
-            .main-tab { padding: 8px 12px; font-size: 0.8rem; }
-            .users-table { font-size: 0.65rem; }
-            .users-table th, .users-table td { padding: 6px 4px; }
-            .card { padding: 12px; }
-            .card-value { font-size: 1.2rem; }
-            .card-label { font-size: 0.6rem; }
-            h1 { font-size: 1.1rem; }
-            .btn { padding: 6px 10px; font-size: 0.75rem; }
-            .section-title { font-size: 0.9rem; }
-            .trades-table { font-size: 0.7rem; }
-            .trades-table th, .trades-table td { padding: 8px 6px; }
-            .log-entry { flex-wrap: wrap; gap: 4px; }
-            .log-time { min-width: 100px; font-size: 0.65rem; }
-            .log-message { font-size: 0.7rem; }
-        }
-        
-        @media (max-width: 480px) {
-            .grid { grid-template-columns: 1fr 1fr; gap: 8px; }
-            .card { padding: 10px; }
-            .card-value { font-size: 1rem; }
-            .header-actions { gap: 4px; }
-            .btn { padding: 5px 8px; font-size: 0.7rem; gap: 3px; }
-            .main-tabs { padding-bottom: 8px; margin-bottom: 16px; }
-            .main-tab { padding: 6px 10px; font-size: 0.75rem; flex: 1; text-align: center; }
+        .refresh-btn svg {
+            width: 14px;
+            height: 14px;
         }
     </style>
 </head>
 <body>
+    <div class="bg-container"></div>
+    
     <div class="container">
-        <header>
-            <h1>Trading Bot <span class="tz-badge">MSK</span></h1>
-            <div class="header-actions">
-                <div class="status">
-                    <span class="status-dot"></span>
-                    <span>Live</span>
-                    <span class="updated" id="lastUpdate">-</span>
-                    <span class="tz-badge" id="logsCount" title="Логов в буфере">0 logs</span>
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <span class="logo-text">YULA</span>
+                <span class="logo-version">v2.0</span>
+                <div class="market-status">
+                    <span class="status-dot" id="statusDot"></span>
+                    <span id="marketStatus">LIVE</span>
                 </div>
-                <button class="btn" onclick="refreshAll()">
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
-                        <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
+            </div>
+            
+            <div class="header-right">
+                <div class="header-stat">
+                    <div class="header-stat-label">API CALLS</div>
+                    <div class="header-stat-value" id="apiCalls">0</div>
+                </div>
+                <div class="header-stat">
+                    <div class="header-stat-label">SIGNALS</div>
+                    <div class="header-stat-value" id="signalsCount">0</div>
+                </div>
+                <div class="time-display" id="currentTime">00:00:00</div>
+                <button class="refresh-btn" onclick="refreshAll()">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                     </svg>
                     Refresh
-                </button>
-                <div class="export-dropdown">
-                    <button class="btn" onclick="toggleExportMenu()">
-                        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
-                            <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
-                        </svg>
-                        Export
-                    </button>
-                    <div class="export-menu" id="exportMenu">
-                        <div class="export-menu-title">📥 Экспорт логов</div>
-                        <div class="export-menu-item" onclick="exportLogs(1, 'hours')">🕐 1 час</div>
-                        <div class="export-menu-item" onclick="exportLogs(6, 'hours')">🕕 6 часов</div>
-                        <div class="export-menu-item" onclick="exportLogs(12, 'hours')">🕛 12 часов</div>
-                        <div class="export-menu-item" onclick="exportLogs(24, 'hours')">📅 24 часа</div>
-                        <div class="export-menu-item" onclick="exportLogs(3, 'days')">📆 3 дня</div>
-                        <div class="export-menu-item" onclick="exportLogs(7, 'days')">📆 7 дней</div>
-                        <div class="export-menu-item" onclick="exportLogs(30, 'days')">📆 30 дней</div>
-                        <div class="export-menu-item" onclick="exportLogs(90, 'days')">📆 90 дней</div>
-                        <div class="export-menu-item" onclick="exportLogs(0, 'all')" style="border-top: 1px solid #21262d; margin-top: 4px; padding-top: 12px;">📦 ВСЕ логи</div>
-                    </div>
-                </div>
-                <button class="btn btn-primary" onclick="shareStats()">
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M13.5 1a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM11 2.5a2.5 2.5 0 1 1 .603 1.628l-6.718 3.12a2.499 2.499 0 0 1 0 1.504l6.718 3.12a2.5 2.5 0 1 1-.488.876l-6.718-3.12a2.5 2.5 0 1 1 0-3.256l6.718-3.12A2.5 2.5 0 0 1 11 2.5zm-8.5 4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm11 5.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
-                    </svg>
-                    Share
                 </button>
             </div>
         </header>
         
-        <!-- Main Navigation Tabs -->
-        <div class="main-tabs">
-            <button class="main-tab active" onclick="switchTab('dashboard')">📊 Dashboard</button>
-            <button class="main-tab" onclick="switchTab('users')">👥 Users</button>
-        </div>
-        
-        <div class="main-layout">
-        <div class="main-content">
-        
-        <!-- Dashboard Tab -->
-        <div id="tab-dashboard" class="tab-content active">
-        
-        <!-- 🚨 СЕКЦИЯ: Ошибки и предупреждения (наверху) -->
-        <div class="section" id="alertsSection" style="display: none;">
-            <div class="section-header">
-                <h2 class="section-title" style="border-left-color: #da3633;">🚨 Внимание</h2>
-                <div style="display: flex; gap: 8px; align-items: center;">
-                    <span class="alert-badge critical" id="criticalCount" style="display: none;">0 CRITICAL</span>
-                    <span class="alert-badge error" id="errorCount" style="display: none;">0 ERROR</span>
-                    <span class="alert-badge warning" id="warningCount" style="display: none;">0 WARNING</span>
-                    <button class="btn" onclick="toggleAlerts()" id="alertsToggle">Свернуть</button>
+        <!-- Main Grid -->
+        <div class="main-grid">
+            <!-- Left Panel - Account -->
+            <div class="panel account-panel">
+                <div class="panel-header">
+                    <span class="panel-title">Account</span>
                 </div>
-            </div>
-            <div id="alertsContent">
-                <div class="alerts-patterns" id="alertPatterns"></div>
-                <div class="alerts-container" id="alertsContainer">
-                    <div class="no-data">Загрузка...</div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 📊 СЕКЦИЯ: Текущее состояние -->
-        <div class="section">
-            <h2 class="section-title">📊 Текущее состояние</h2>
-            <div class="grid">
-                <div class="card card-highlight info">
-                    <div class="card-label">🔓 Открытые сделки</div>
-                    <div class="card-value neutral" id="openDeals">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">💰 Общий PnL</div>
-                    <div class="card-value" id="totalPnl">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">📈 Сегодня PnL</div>
-                    <div class="card-value" id="todayPnl">-</div>
-                    <div class="card-sub" id="todayTrades">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">🔥 Серия</div>
-                    <div class="card-value" id="streak">-</div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 🤖 СЕКЦИЯ: Анализ сигналов -->
-        <div class="section">
-            <h2 class="section-title">🤖 Анализ сигналов</h2>
-            <div class="grid">
-                <div class="card card-highlight info">
-                    <div class="card-label">🔍 Проанализировано</div>
-                    <div class="card-value neutral" id="analyzed">-</div>
-                </div>
-                <div class="card card-highlight">
-                    <div class="card-label">✅ Прошло фильтры</div>
-                    <div class="card-value positive" id="validSetups">-</div>
-                    <div class="card-sub" id="validSetupsPct">-</div>
-                </div>
-                <div class="card card-highlight warning">
-                    <div class="card-label">❌ Отклонено</div>
-                    <div class="card-value" id="rejected">-</div>
-                    <div class="card-sub" id="rejectedPct">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">📤 Отправлено юзерам</div>
-                    <div class="card-value small neutral" id="accepted">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">📡 На Bybit</div>
-                    <div class="card-value small neutral" id="bybitOpened">-</div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 📈 СЕКЦИЯ: Результаты торговли -->
-        <div class="section">
-            <h2 class="section-title">📈 Результаты торговли</h2>
-            <div class="grid">
-                <div class="card">
-                    <div class="card-label">🏆 Win Rate</div>
-                    <div class="card-value" id="winRate">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">✅ Профитные</div>
-                    <div class="card-value positive" id="profitable">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">❌ Убыточные</div>
-                    <div class="card-value negative" id="losing">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">📊 Всего закрыто</div>
-                    <div class="card-value" id="totalClosed">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">💵 Avg Win/Loss</div>
-                    <div class="card-value small">
-                        <span class="positive" id="avgWin">-</span> / 
-                        <span class="negative" id="avgLoss">-</span>
+                <div class="panel-content">
+                    <div class="equity-display">
+                        <div class="equity-label">Equity</div>
+                        <div class="equity-value" id="totalBalance">$0.00</div>
+                    </div>
+                    
+                    <div class="account-stats">
+                        <div class="account-stat">
+                            <div class="account-stat-label">Total Deposit</div>
+                            <div class="account-stat-value" id="totalDeposit">$0.00</div>
+                        </div>
+                        <div class="account-stat">
+                            <div class="account-stat-label">Open Positions</div>
+                            <div class="account-stat-value" id="openPositions">0</div>
+                        </div>
+                    </div>
+                    
+                    <div class="pnl-section">
+                        <div class="pnl-header">
+                            <span class="pnl-label">Total P&L</span>
+                            <span class="pnl-percent positive" id="pnlPercent">(+0.00%)</span>
+                        </div>
+                        <div class="pnl-value positive" id="totalPnl">+$0.00</div>
+                        <div class="pnl-breakdown">
+                            <div class="pnl-breakdown-item">
+                                <span class="pnl-breakdown-label">Realized</span>
+                                <span class="pnl-breakdown-value positive" id="realizedPnl">$0.00</span>
+                            </div>
+                            <div class="pnl-breakdown-item">
+                                <span class="pnl-breakdown-label">Unrealized</span>
+                                <span class="pnl-breakdown-value" id="unrealizedPnl">$0.00</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="signal-stats">
+                        <div class="signal-stat">
+                            <span class="signal-stat-label">Win Rate</span>
+                            <span class="signal-stat-value" id="winRate">0%</span>
+                        </div>
+                        <div class="signal-stat">
+                            <span class="signal-stat-label">Total Trades</span>
+                            <span class="signal-stat-value" id="totalTrades">0</span>
+                        </div>
+                        <div class="signal-stat">
+                            <span class="signal-stat-label">Wins</span>
+                            <span class="signal-stat-value" id="winsCount">0</span>
+                        </div>
+                        <div class="signal-stat">
+                            <span class="signal-stat-label">Losses</span>
+                            <span class="signal-stat-value" id="lossesCount">0</span>
+                        </div>
                     </div>
                 </div>
-                <div class="card">
-                    <div class="card-label">💎 Объём</div>
-                    <div class="card-value small" id="totalVolume">-</div>
-                </div>
             </div>
-        </div>
-        
-        <!-- 🏅 СЕКЦИЯ: Лучшие/Худшие -->
-        <div class="section">
-            <h2 class="section-title">🏅 Рекорды</h2>
-            <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
-                <div class="card">
-                    <div class="card-label">🚀 Лучшая сделка</div>
-                    <div class="card-value small positive" id="bestTrade">-</div>
-                    <div class="card-sub" id="bestTradeInfo">-</div>
+            
+            <!-- Center Panel - Positions -->
+            <div class="panel">
+                <div class="panel-header">
+                    <span class="panel-title">Positions</span>
+                    <span class="panel-badge" id="positionsCount">0/15</span>
                 </div>
-                <div class="card">
-                    <div class="card-label">💀 Худшая сделка</div>
-                    <div class="card-value small negative" id="worstTrade">-</div>
-                    <div class="card-sub" id="worstTradeInfo">-</div>
+                <div style="overflow-x: auto;">
+                    <table class="positions-table">
+                        <thead>
+                            <tr>
+                                <th>Symbol</th>
+                                <th>Direction</th>
+                                <th>Qty</th>
+                                <th>Value</th>
+                                <th>P&L</th>
+                                <th>Trend</th>
+                            </tr>
+                        </thead>
+                        <tbody id="positionsBody">
+                            <tr>
+                                <td colspan="6" class="loading">
+                                    <div class="spinner"></div>
+                                    <span>Loading positions...</span>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
                 </div>
-            </div>
-        </div>
-        
-        <!-- 🎯 СЕКЦИЯ: Успешность по порогам -->
-        <div class="section">
-            <h2 class="section-title">🎯 Успешность по порогам</h2>
-            <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
-                <div class="card">
-                    <div class="card-label">>60% WR</div>
-                    <div class="card-value small" id="wr60">-</div>
-                    <div class="card-sub" id="wr60trades">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">>70% WR</div>
-                    <div class="card-value small" id="wr70">-</div>
-                    <div class="card-sub" id="wr70trades">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">>80% WR</div>
-                    <div class="card-value small positive" id="wr80">-</div>
-                    <div class="card-sub" id="wr80trades">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">>90% WR</div>
-                    <div class="card-value small positive" id="wr90">-</div>
-                    <div class="card-sub" id="wr90trades">-</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">>95% WR</div>
-                    <div class="card-value small positive" id="wr95">-</div>
-                    <div class="card-sub" id="wr95trades">-</div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Reasons Section -->
-        <div class="section">
-            <h2 class="section-title">Reasons Analysis</h2>
-            <div class="reasons-grid">
-                <div class="reasons-list">
-                    <h3 class="wins">Winning Reasons</h3>
-                    <div id="winReasons"><div class="no-data">No data</div></div>
-                </div>
-                <div class="reasons-list">
-                    <h3 class="losses">Losing Reasons</h3>
-                    <div id="lossReasons"><div class="no-data">No data</div></div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Recent Trades Section -->
-        <div class="section">
-            <h2 class="section-title">Recent Trades</h2>
-            <table class="trades-table">
-                <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Direction</th>
-                        <th>PnL</th>
-                        <th>Reason</th>
-                        <th>Time</th>
-                    </tr>
-                </thead>
-                <tbody id="tradesBody">
-                    <tr><td colspan="5" class="no-data">Loading...</td></tr>
-                </tbody>
-            </table>
-        </div>
-        
-        <!-- Logs Section -->
-        <div class="section">
-            <div class="section-header">
-                <h2 class="section-title">Bot Logs</h2>
-                <div class="tabs">
-                    <button class="tab active" onclick="filterLogs('all')">All</button>
-                    <button class="tab" onclick="filterLogs('INFO')">Info</button>
-                    <button class="tab" onclick="filterLogs('WARNING')">Warning</button>
-                    <button class="tab" onclick="filterLogs('ERROR')">Error</button>
-                </div>
-            </div>
-            <div class="logs-container" id="logsContainer">
-                <div class="no-data">Loading logs...</div>
-            </div>
-        </div>
-        
-        <!-- User Diagnostics Section -->
-        <div class="section">
-            <div class="section-header">
-                <h2 class="section-title">User Diagnostics</h2>
-                <div style="display: flex; gap: 8px;">
-                    <input type="text" id="userIdInput" placeholder="Enter User ID" 
-                        style="padding: 8px 12px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; font-size: 0.875rem;">
-                    <button class="btn" onclick="lookupUser()">Lookup</button>
-                </div>
-            </div>
-            <div id="userInfoContainer" style="display: none;">
-                <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
-                    <div class="card">
-                        <div class="card-label">Balance</div>
-                        <div class="card-value small" id="userBalance">-</div>
-                    </div>
-                    <div class="card">
-                        <div class="card-label">Total Deposit</div>
-                        <div class="card-value small" id="userDeposit">-</div>
-                    </div>
-                    <div class="card">
-                        <div class="card-label">Total Profit</div>
-                        <div class="card-value small" id="userProfit">-</div>
-                    </div>
-                    <div class="card">
-                        <div class="card-label">Missing $</div>
-                        <div class="card-value small negative" id="userMissing">-</div>
+                
+                <!-- Stats Grid Below Table -->
+                <div class="panel-content">
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-card-label">Analyzed</div>
+                            <div class="stat-card-value neutral" id="analyzed">0</div>
+                            <div class="stat-card-sub">signals</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-label">Accepted</div>
+                            <div class="stat-card-value positive" id="accepted">0</div>
+                            <div class="stat-card-sub">signals</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-card-label">On Bybit</div>
+                            <div class="stat-card-value neutral" id="bybitOpened">0</div>
+                            <div class="stat-card-sub">hedges</div>
+                        </div>
                     </div>
                 </div>
-                <div style="margin-top: 12px;">
-                    <h3 style="font-size: 0.875rem; margin-bottom: 8px; color: #8b949e;">Open Positions (<span id="userPosCount">0</span>)</h3>
-                    <div class="logs-container" id="userPositions" style="max-height: 150px;">
-                        <div class="no-data">No positions</div>
+            </div>
+            
+            <!-- Right Panel - Activity & News -->
+            <div class="right-panel">
+                <!-- Recent Trades -->
+                <div class="panel" style="flex: 1;">
+                    <div class="panel-header">
+                        <span class="panel-title">Recent Activity</span>
+                        <span class="panel-badge" id="activityCount">0</span>
+                    </div>
+                    <div class="activity-list" id="activityList">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <span>Loading...</span>
+                        </div>
                     </div>
                 </div>
-                <div style="margin-top: 12px;">
-                    <h3 style="font-size: 0.875rem; margin-bottom: 8px; color: #8b949e;">Trade History (<span id="userHistCount">0</span>)</h3>
-                    <div class="logs-container" id="userHistory" style="max-height: 200px;">
-                        <div class="no-data">No history</div>
+                
+                <!-- News -->
+                <div class="panel" style="flex: 1;">
+                    <div class="panel-header">
+                        <span class="panel-title">📰 News Feed</span>
+                        <span class="panel-badge" id="newsStatus">LIVE</span>
                     </div>
-                </div>
-                <div style="margin-top: 12px;">
-                    <h3 style="font-size: 0.875rem; margin-bottom: 8px; color: #8b949e;">User Activity Logs</h3>
-                    <div class="logs-container" id="userLogs" style="max-height: 200px;">
-                        <div class="no-data">No logs</div>
+                    <div class="activity-list" id="newsList">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <span>Loading news...</span>
+                        </div>
                     </div>
                 </div>
             </div>
         </div>
-    </div>
-    
-    <!-- Users Tab -->
-    <div id="tab-users" class="tab-content">
-        <div class="users-summary">
-            <div class="summary-card">
-                <div class="summary-label">Всего юзеров</div>
-                <div class="summary-value" id="totalUsers">-</div>
-            </div>
-            <div class="summary-card">
-                <div class="summary-label">Общий баланс</div>
-                <div class="summary-value" id="usersBalance">-</div>
-            </div>
-            <div class="summary-card">
-                <div class="summary-label">Депозиты</div>
-                <div class="summary-value" id="usersDeposits">-</div>
-            </div>
-            <div class="summary-card">
-                <div class="summary-label">Активных</div>
-                <div class="summary-value" id="activeTraders">-</div>
-            </div>
-            <div class="summary-card">
-                <div class="summary-label">Авто-трейд</div>
-                <div class="summary-value" id="autoTraders">-</div>
-            </div>
-        </div>
         
-        <div class="users-table-container">
-            <table class="users-table">
-                <thead>
-                    <tr>
-                        <th onclick="sortUsers('user_id')">ID</th>
-                        <th onclick="sortUsers('balance')">Баланс</th>
-                        <th onclick="sortUsers('total_deposit')">Депозит</th>
-                        <th onclick="sortUsers('total_trades')">Сделок</th>
-                        <th onclick="sortUsers('wins')">W/L</th>
-                        <th onclick="sortUsers('winrate')">WR%</th>
-                        <th onclick="sortUsers('total_pnl')">PnL</th>
-                        <th onclick="sortUsers('open_positions')">Позиции</th>
-                        <th onclick="sortUsers('trading')">Торгует</th>
-                        <th onclick="sortUsers('auto_trade')">Авто</th>
-                    </tr>
-                </thead>
-                <tbody id="usersBody">
-                    <tr><td colspan="10" class="no-data">Загрузка...</td></tr>
-                </tbody>
-            </table>
-        </div>
-    </div>
-    
-    </div><!-- /.main-content -->
-    
-    <!-- News Sidebar -->
-    <div class="news-sidebar">
-        <div class="news-panel">
-            <div class="news-header">
-                <span class="news-title">📰 News & 🐦 Twitter</span>
-                <span class="news-sentiment neutral" id="newsSentiment">
-                    <span id="sentimentIcon">⚖️</span>
-                    <span id="sentimentText">NEUTRAL</span>
-                    <span id="sentimentScore">(0)</span>
-                </span>
-            </div>
-            <div class="news-list" id="newsList">
-                <div class="news-loading">
-                    <div class="spinner"></div>
-                    <span>Загрузка новостей...</span>
+        <!-- Footer Stats Bar -->
+        <div class="footer-bar">
+            <div class="footer-stats">
+                <div class="footer-stat">
+                    <span class="footer-stat-label">Today P&L</span>
+                    <span class="footer-stat-value positive" id="todayPnl">+$0.00</span>
+                </div>
+                <div class="footer-stat">
+                    <span class="footer-stat-label">Today Trades</span>
+                    <span class="footer-stat-value" id="todayTrades">0</span>
+                </div>
+                <div class="footer-stat">
+                    <span class="footer-stat-label">Users</span>
+                    <span class="footer-stat-value" id="totalUsers">0</span>
+                </div>
+                <div class="footer-stat">
+                    <span class="footer-stat-label">Best Trade</span>
+                    <span class="footer-stat-value positive" id="bestTrade">$0.00</span>
+                </div>
+                <div class="footer-stat">
+                    <span class="footer-stat-label">Streak</span>
+                    <span class="footer-stat-value" id="streak">-</span>
                 </div>
             </div>
-        </div>
-    </div>
-    
-    </div><!-- /.main-layout -->
-    
-    <!-- Hidden Share Card -->
-    <div id="shareCard">
-        <div class="share-header">
-            <span class="share-title">Trading Bot Stats</span>
-            <span class="share-date" id="shareDate">-</span>
-        </div>
-        <div class="share-grid">
-            <div class="share-stat">
-                <div class="share-stat-label">Win Rate</div>
-                <div class="share-stat-value" id="shareWinRate" style="color: #238636">-</div>
-            </div>
-            <div class="share-stat">
-                <div class="share-stat-label">Total PnL</div>
-                <div class="share-stat-value" id="sharePnl">-</div>
-            </div>
-            <div class="share-stat">
-                <div class="share-stat-label">Profitable</div>
-                <div class="share-stat-value" style="color: #238636" id="shareProfitable">-</div>
-            </div>
-            <div class="share-stat">
-                <div class="share-stat-label">Losing</div>
-                <div class="share-stat-value" style="color: #da3633" id="shareLosing">-</div>
-            </div>
-            <div class="share-stat">
-                <div class="share-stat-label">Today's PnL</div>
-                <div class="share-stat-value" id="shareTodayPnl">-</div>
-            </div>
-            <div class="share-stat">
-                <div class="share-stat-label">Open Deals</div>
-                <div class="share-stat-value" style="color: #58a6ff" id="shareOpen">-</div>
+            <div style="font-size: 0.7rem; color: var(--text-muted);">
+                Last Update: <span id="lastUpdate">-</span>
             </div>
         </div>
-        <div class="share-footer">Generated by Trading Bot Dashboard</div>
     </div>
     
     <script>
-        let currentStats = {};
-        let currentExtended = {};
-        let allLogs = [];
-        let currentLogFilter = 'all';
-        let allUsers = [];
-        let usersSortField = 'balance';
-        let usersSortDir = 'desc';
-        let alertsExpanded = true;
+        // Update time
+        function updateTime() {
+            const now = new Date();
+            // Moscow time (UTC+3)
+            const moscow = new Date(now.getTime() + (3 * 60 + now.getTimezoneOffset()) * 60000);
+            document.getElementById('currentTime').textContent = moscow.toLocaleTimeString('ru-RU', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+        setInterval(updateTime, 1000);
+        updateTime();
         
         function formatPnl(value) {
             const num = parseFloat(value) || 0;
             const sign = num >= 0 ? '+' : '';
-            return sign + '$' + num.toFixed(2);
+            return sign + '$' + Math.abs(num).toFixed(2);
         }
         
-        // Convert to Moscow time (UTC+3)
-        function toMoscowTime(date) {
-            // Moscow is UTC+3
-            const moscowOffset = 3 * 60; // minutes
-            const utc = date.getTime() + (date.getTimezoneOffset() * 60000);
-            return new Date(utc + (moscowOffset * 60000));
+        function formatMoney(value) {
+            return '$' + (parseFloat(value) || 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
         }
         
         function formatTime(isoString) {
             if (!isoString) return '-';
-            const date = toMoscowTime(new Date(isoString));
-            return date.toLocaleString('ru-RU', { 
-                hour: '2-digit', 
-                minute: '2-digit',
-                second: '2-digit',
-                day: '2-digit',
-                month: '2-digit',
-                hour12: false 
-            });
+            const date = new Date(isoString);
+            const moscow = new Date(date.getTime() + (3 * 60 + date.getTimezoneOffset()) * 60000);
+            return moscow.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
         }
         
-        function formatTime24(date) {
-            const moscow = toMoscowTime(date);
-            return moscow.toLocaleString('ru-RU', {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-                day: '2-digit',
-                month: '2-digit',
-                year: 'numeric',
-                hour12: false
-            }) + ' MSK';
+        function getTimeAgo(isoString) {
+            if (!isoString) return '';
+            const date = new Date(isoString);
+            const now = new Date();
+            const diffMs = now - date;
+            const diffMins = Math.floor(diffMs / 60000);
+            const diffHours = Math.floor(diffMs / 3600000);
+            if (diffMins < 1) return 'now';
+            if (diffMins < 60) return diffMins + 'm';
+            if (diffHours < 24) return diffHours + 'h';
+            return Math.floor(diffHours / 24) + 'd';
         }
         
-        // Export dropdown functions
-        function toggleExportMenu() {
-            const menu = document.getElementById('exportMenu');
-            menu.classList.toggle('show');
-        }
-        
-        function exportLogs(value, unit) {
-            let url = '/api/export_logs?';
-            if (unit === 'hours') url += `hours=${value}`;
-            else if (unit === 'days') url += `days=${value}`;
-            else if (unit === 'months') url += `months=${value}`;
-            else if (unit === 'all') url += 'all=1';
-            
-            window.location.href = url;
-            document.getElementById('exportMenu').classList.remove('show');
-        }
-        
-        // Close dropdown when clicking outside
-        document.addEventListener('click', function(e) {
-            const dropdown = document.querySelector('.export-dropdown');
-            if (dropdown && !dropdown.contains(e.target)) {
-                document.getElementById('exportMenu').classList.remove('show');
+        // Generate simple sparkline SVG
+        function generateSparkline(trend = 'up') {
+            const points = [];
+            let y = 12;
+            for (let i = 0; i < 10; i++) {
+                if (trend === 'up') y += (Math.random() - 0.3) * 3;
+                else y += (Math.random() - 0.7) * 3;
+                y = Math.max(2, Math.min(22, y));
+                points.push(`${i * 7},${y}`);
             }
-        });
-        
-        function renderReasons(reasons, containerId) {
-            const container = document.getElementById(containerId);
-            if (!reasons || Object.keys(reasons).length === 0) {
-                container.innerHTML = '<div class="no-data">No data</div>';
-                return;
-            }
-            
-            let html = '';
-            for (const [reason, count] of Object.entries(reasons)) {
-                html += `
-                    <div class="reason-item">
-                        <span class="reason-name">${reason || 'Unknown'}</span>
-                        <span class="reason-count">${count}</span>
-                    </div>
-                `;
-            }
-            container.innerHTML = html;
-        }
-        
-        function renderTrades(trades) {
-            const tbody = document.getElementById('tradesBody');
-            if (!trades || trades.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="no-data">No trades yet</td></tr>';
-                return;
-            }
-            
-            let html = '';
-            for (const trade of trades.slice(0, 15)) {
-                const pnl = parseFloat(trade.pnl || 0);
-                const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-                const dirClass = trade.direction === 'LONG' ? 'badge-long' : 'badge-short';
-                const symbol = trade.symbol ? trade.symbol.split('/')[0] : '-';
-                
-                html += `
-                    <tr>
-                        <td>${symbol}</td>
-                        <td><span class="badge ${dirClass}">${trade.direction || '-'}</span></td>
-                        <td class="${pnlClass}">${formatPnl(pnl)}</td>
-                        <td>${trade.reason || '-'}</td>
-                        <td>${formatTime(trade.closed_at)}</td>
-                    </tr>
-                `;
-            }
-            tbody.innerHTML = html;
-        }
-        
-        function renderLogs(logs) {
-            const container = document.getElementById('logsContainer');
-            
-            let filteredLogs = logs;
-            if (currentLogFilter !== 'all') {
-                filteredLogs = logs.filter(l => l.level === currentLogFilter);
-            }
-            
-            if (!filteredLogs || filteredLogs.length === 0) {
-                container.innerHTML = '<div class="no-data">No logs</div>';
-                return;
-            }
-            
-            let html = '';
-            for (const log of filteredLogs.slice(0, 100)) {
-                html += `
-                    <div class="log-entry">
-                        <span class="log-time">${log.timestamp || '-'}</span>
-                        <span class="log-level ${log.level}">${log.level}</span>
-                        <span class="log-message">${log.message || '-'}</span>
-                    </div>
-                `;
-            }
-            container.innerHTML = html;
-        }
-        
-        function filterLogs(level) {
-            currentLogFilter = level;
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            event.target.classList.add('active');
-            renderLogs(allLogs);
+            const color = trend === 'up' ? '#00ff88' : '#ff4757';
+            return `<svg viewBox="0 0 60 24"><polyline fill="none" stroke="${color}" stroke-width="1.5" points="${points.join(' ')}"/></svg>`;
         }
         
         async function fetchStats() {
             try {
-                const response = await fetch('/api/stats');
-                const data = await response.json();
-                currentStats = data;
+                const [statsRes, extRes, usersRes] = await Promise.all([
+                    fetch('/api/stats'),
+                    fetch('/api/extended'),
+                    fetch('/api/users')
+                ]);
                 
-                // Безопасное получение значений с fallback на 0
-                const openDeals = data.open_deals ?? 0;
-                const profitable = data.profitable ?? 0;
-                const losing = data.losing ?? 0;
-                const totalClosed = data.total_closed ?? 0;
-                const winRate = data.win_rate ?? 0;
+                const stats = await statsRes.json();
+                const extended = await extRes.json();
+                const users = await usersRes.json();
                 
-                document.getElementById('openDeals').textContent = openDeals;
-                document.getElementById('winRate').textContent = winRate + '%';
-                document.getElementById('profitable').textContent = profitable;
-                document.getElementById('losing').textContent = losing;
-                document.getElementById('totalClosed').textContent = totalClosed;
+                // Update main stats
+                document.getElementById('totalBalance').textContent = formatMoney(users.totals?.total_balance || 0);
+                document.getElementById('totalDeposit').textContent = formatMoney(users.totals?.total_deposits || 0);
+                document.getElementById('openPositions').textContent = stats.open_deals || 0;
                 
-                // Signal analysis stats
-                const analyzed = data.analyzed ?? 0;
-                const accepted = data.accepted ?? 0;
-                const rejected = data.rejected ?? 0;
-                const validSetups = data.valid_setups ?? 0;
-                const bybitOpened = data.bybit_opened ?? 0;
-                
-                document.getElementById('analyzed').textContent = analyzed.toLocaleString();
-                document.getElementById('validSetups').textContent = validSetups.toLocaleString();
-                document.getElementById('accepted').textContent = accepted.toLocaleString();
-                document.getElementById('rejected').textContent = rejected.toLocaleString();
-                document.getElementById('bybitOpened').textContent = bybitOpened.toLocaleString();
-                
-                const validPct = analyzed > 0 ? ((validSetups / analyzed) * 100).toFixed(1) : 0;
-                const rejectedPct = analyzed > 0 ? ((rejected / analyzed) * 100).toFixed(1) : 0;
-                document.getElementById('validSetupsPct').textContent = `${validPct}% конверсия`;
-                document.getElementById('rejectedPct').textContent = `${rejectedPct}% отклонено`;
-                
-                const pnl = parseFloat(data.total_pnl || 0);
+                // PnL
+                const totalPnl = stats.total_pnl || 0;
                 const pnlEl = document.getElementById('totalPnl');
-                pnlEl.textContent = formatPnl(pnl);
-                pnlEl.className = 'card-value ' + (pnl >= 0 ? 'positive' : 'negative');
+                pnlEl.textContent = formatPnl(totalPnl);
+                pnlEl.className = 'pnl-value ' + (totalPnl >= 0 ? 'positive' : 'negative');
                 
-                const winRateEl = document.getElementById('winRate');
-                winRateEl.className = 'card-value ' + (winRate >= 50 ? 'positive' : winRate > 0 ? 'negative' : '');
+                const pnlPercent = users.totals?.total_deposits > 0 
+                    ? (totalPnl / users.totals.total_deposits * 100).toFixed(2) 
+                    : 0;
+                const pnlPercentEl = document.getElementById('pnlPercent');
+                pnlPercentEl.textContent = `(${pnlPercent >= 0 ? '+' : ''}${pnlPercent}%)`;
+                pnlPercentEl.className = 'pnl-percent ' + (pnlPercent >= 0 ? 'positive' : 'negative');
                 
-                renderReasons(data.win_reasons || {}, 'winReasons');
-                renderReasons(data.loss_reasons || {}, 'lossReasons');
+                document.getElementById('realizedPnl').textContent = formatMoney(totalPnl);
                 
-                document.getElementById('lastUpdate').textContent = formatTime24(new Date());
+                // Win Rate
+                document.getElementById('winRate').textContent = (stats.win_rate || 0) + '%';
+                document.getElementById('totalTrades').textContent = stats.total_closed || 0;
+                document.getElementById('winsCount').textContent = stats.profitable || 0;
+                document.getElementById('lossesCount').textContent = stats.losing || 0;
                 
-                // Debug log
-                console.log('[Dashboard] Stats loaded:', {openDeals, profitable, losing, totalClosed, winRate, analyzed, rejected});
-                    
+                // Signals
+                document.getElementById('analyzed').textContent = (stats.analyzed || 0).toLocaleString();
+                document.getElementById('accepted').textContent = stats.accepted || 0;
+                document.getElementById('bybitOpened').textContent = stats.bybit_opened || 0;
+                document.getElementById('signalsCount').textContent = stats.valid_setups || 0;
+                
+                // Extended stats
+                const todayPnl = extended.today_pnl || 0;
+                const todayPnlEl = document.getElementById('todayPnl');
+                todayPnlEl.textContent = formatPnl(todayPnl);
+                todayPnlEl.className = 'footer-stat-value ' + (todayPnl >= 0 ? 'positive' : 'negative');
+                document.getElementById('todayTrades').textContent = extended.today_trades || 0;
+                document.getElementById('totalUsers').textContent = extended.total_users || users.count || 0;
+                
+                if (extended.best_trade) {
+                    document.getElementById('bestTrade').textContent = formatPnl(extended.best_trade.pnl);
+                }
+                
+                if (extended.current_streak && extended.streak_type) {
+                    const streakEl = document.getElementById('streak');
+                    streakEl.textContent = extended.current_streak + ' ' + (extended.streak_type === 'win' ? '🔥' : '❄️');
+                    streakEl.className = 'footer-stat-value ' + (extended.streak_type === 'win' ? 'positive' : 'negative');
+                }
+                
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('ru-RU');
+                
             } catch (error) {
                 console.error('Error fetching stats:', error);
             }
         }
         
-        async function fetchWinrateBreakdown() {
+        async function fetchPositions() {
             try {
-                const response = await fetch('/api/winrate_breakdown');
+                const response = await fetch('/api/positions');
                 const data = await response.json();
                 
-                console.log('[Dashboard] Winrate breakdown:', data);
+                document.getElementById('positionsCount').textContent = `${data.count || 0}/15`;
                 
-                if (data.thresholds) {
-                    const t = data.thresholds;
-                    
-                    const wr60 = t['60'] || {users: 0, trades: 0};
-                    const wr70 = t['70'] || {users: 0, trades: 0};
-                    const wr80 = t['80'] || {users: 0, trades: 0};
-                    const wr90 = t['90'] || {users: 0, trades: 0};
-                    const wr95 = t['95'] || {users: 0, trades: 0};
-                    
-                    document.getElementById('wr60').textContent = (wr60.users || 0) + ' юзеров';
-                    document.getElementById('wr60trades').textContent = (wr60.trades || 0) + ' сделок';
-                    
-                    document.getElementById('wr70').textContent = (wr70.users || 0) + ' юзеров';
-                    document.getElementById('wr70trades').textContent = (wr70.trades || 0) + ' сделок';
-                    
-                    document.getElementById('wr80').textContent = (wr80.users || 0) + ' юзеров';
-                    document.getElementById('wr80trades').textContent = (wr80.trades || 0) + ' сделок';
-                    
-                    document.getElementById('wr90').textContent = (wr90.users || 0) + ' юзеров';
-                    document.getElementById('wr90trades').textContent = (wr90.trades || 0) + ' сделок';
-                    
-                    document.getElementById('wr95').textContent = (wr95.users || 0) + ' юзеров';
-                    document.getElementById('wr95trades').textContent = (wr95.trades || 0) + ' сделок';
-                } else if (data.error) {
-                    console.error('[Dashboard] Winrate breakdown error:', data.error);
-                }
-            } catch (error) {
-                console.error('Error fetching winrate breakdown:', error);
-            }
-        }
-        
-        async function fetchExtended() {
-            try {
-                const response = await fetch('/api/extended');
-                const data = await response.json();
-                currentExtended = data;
+                const tbody = document.getElementById('positionsBody');
                 
-                // Today
-                const todayPnl = parseFloat(data.today_pnl || 0);
-                const todayEl = document.getElementById('todayPnl');
-                todayEl.textContent = formatPnl(todayPnl);
-                todayEl.className = 'card-value ' + (todayPnl >= 0 ? 'positive' : 'negative');
-                document.getElementById('todayTrades').textContent = 
-                    `${data.today_wins || 0}/${data.today_trades || 0} wins today`;
-                
-                // Avg
-                document.getElementById('avgWin').textContent = '+$' + (data.avg_win || 0).toFixed(2);
-                document.getElementById('avgLoss').textContent = '$' + (data.avg_loss || 0).toFixed(2);
-                
-                // Best/Worst
-                if (data.best_trade) {
-                    document.getElementById('bestTrade').textContent = formatPnl(data.best_trade.pnl);
-                    document.getElementById('bestTradeInfo').textContent = 
-                        `${data.best_trade.symbol?.split('/')[0] || '-'} ${data.best_trade.direction || ''}`;
-                }
-                if (data.worst_trade) {
-                    document.getElementById('worstTrade').textContent = formatPnl(data.worst_trade.pnl);
-                    document.getElementById('worstTradeInfo').textContent = 
-                        `${data.worst_trade.symbol?.split('/')[0] || '-'} ${data.worst_trade.direction || ''}`;
+                if (!data.positions || data.positions.length === 0) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="6" class="empty-state">
+                                <div class="empty-state-icon">📊</div>
+                                <div>No open positions</div>
+                            </td>
+                        </tr>
+                    `;
+                    return;
                 }
                 
-                // Streak
-                const streakEl = document.getElementById('streak');
-                if (data.current_streak && data.streak_type) {
-                    const streakClass = data.streak_type === 'win' ? 'streak-win' : 'streak-loss';
-                    const streakIcon = data.streak_type === 'win' ? '🔥' : '❄️';
-                    streakEl.innerHTML = `<span class="streak-badge ${streakClass}">${streakIcon} ${data.current_streak} ${data.streak_type}s</span>`;
-                } else {
-                    streakEl.textContent = '-';
+                let html = '';
+                for (const pos of data.positions) {
+                    const symbol = pos.symbol?.split('/')[0] || pos.symbol || '-';
+                    const pnl = parseFloat(pos.pnl) || 0;
+                    const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+                    const dirClass = pos.direction === 'LONG' ? 'long' : 'short';
+                    const trend = pnl >= 0 ? 'up' : 'down';
+                    
+                    html += `
+                        <tr>
+                            <td>
+                                <div class="symbol-cell">
+                                    <div class="symbol-icon">${symbol.slice(0, 2)}</div>
+                                    <div class="symbol-info">
+                                        <span class="symbol-name">${symbol}</span>
+                                        <span class="symbol-type">Perp</span>
+                                    </div>
+                                </div>
+                            </td>
+                            <td><span class="direction-badge ${dirClass}">${pos.direction || '-'}</span></td>
+                            <td>${formatMoney(pos.amount)}</td>
+                            <td>${formatMoney(pos.amount)}</td>
+                            <td class="pnl-cell ${pnlClass}">${formatPnl(pnl)}</td>
+                            <td><div class="sparkline">${generateSparkline(trend)}</div></td>
+                        </tr>
+                    `;
                 }
                 
-                // Volume
-                document.getElementById('totalVolume').textContent = '$' + (data.total_volume || 0).toLocaleString();
+                tbody.innerHTML = html;
                 
             } catch (error) {
-                console.error('Error fetching extended:', error);
+                console.error('Error fetching positions:', error);
             }
         }
         
@@ -1665,550 +1218,112 @@
             try {
                 const response = await fetch('/api/trades');
                 const data = await response.json();
-                renderTrades(data.trades);
+                
+                document.getElementById('activityCount').textContent = data.count || 0;
+                
+                const container = document.getElementById('activityList');
+                
+                if (!data.trades || data.trades.length === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📜</div>
+                            <div>No recent trades</div>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = '';
+                for (const trade of data.trades.slice(0, 15)) {
+                    const symbol = trade.symbol?.split('/')[0] || '-';
+                    const pnl = parseFloat(trade.pnl) || 0;
+                    const pnlClass = pnl >= 0 ? 'positive' : 'negative';
+                    const iconClass = pnl >= 0 ? 'win' : 'loss';
+                    const emoji = pnl >= 0 ? '✅' : '❌';
+                    
+                    html += `
+                        <div class="activity-item">
+                            <div class="activity-icon ${iconClass}">${emoji}</div>
+                            <div class="activity-info">
+                                <div class="activity-title">${symbol} ${trade.direction || ''}</div>
+                                <div class="activity-time">${trade.reason || '-'} • ${getTimeAgo(trade.closed_at)}</div>
+                            </div>
+                            <div class="activity-value ${pnlClass}">${formatPnl(pnl)}</div>
+                        </div>
+                    `;
+                }
+                
+                container.innerHTML = html;
+                
             } catch (error) {
                 console.error('Error fetching trades:', error);
             }
         }
         
-        async function fetchLogs() {
-            try {
-                const response = await fetch('/api/logs?limit=100');
-                const data = await response.json();
-                allLogs = data.memory_logs || [];
-                renderLogs(allLogs);
-                
-                // Update logs count in header
-                const totalLogs = data.total_logs_in_buffer || 0;
-                document.getElementById('logsCount').textContent = totalLogs.toLocaleString() + ' logs';
-                console.log('[Dashboard] Total logs in buffer:', totalLogs);
-            } catch (error) {
-                console.error('Error fetching logs:', error);
-            }
-        }
-        
-        async function fetchAlerts() {
-            try {
-                const response = await fetch('/api/alerts?hours=6&limit=50');
-                const data = await response.json();
-                
-                const section = document.getElementById('alertsSection');
-                const counts = data.counts || {};
-                
-                // Show/hide section based on whether there are alerts
-                if (counts.total > 0) {
-                    section.style.display = 'block';
-                    
-                    // Update badges
-                    const criticalEl = document.getElementById('criticalCount');
-                    const errorEl = document.getElementById('errorCount');
-                    const warningEl = document.getElementById('warningCount');
-                    
-                    if (counts.critical > 0) {
-                        criticalEl.textContent = counts.critical + ' CRITICAL';
-                        criticalEl.style.display = 'inline-block';
-                    } else {
-                        criticalEl.style.display = 'none';
-                    }
-                    
-                    if (counts.error > 0) {
-                        errorEl.textContent = counts.error + ' ERROR';
-                        errorEl.style.display = 'inline-block';
-                    } else {
-                        errorEl.style.display = 'none';
-                    }
-                    
-                    if (counts.warning > 0) {
-                        warningEl.textContent = counts.warning + ' WARNING';
-                        warningEl.style.display = 'inline-block';
-                    } else {
-                        warningEl.style.display = 'none';
-                    }
-                    
-                    // Render patterns
-                    renderAlertPatterns(data.top_patterns || []);
-                    
-                    // Render alerts list
-                    renderAlerts(data.alerts || []);
-                } else {
-                    section.style.display = 'none';
-                }
-                
-                console.log('[Dashboard] Alerts loaded:', counts);
-            } catch (error) {
-                console.error('Error fetching alerts:', error);
-            }
-        }
-        
-        function renderAlertPatterns(patterns) {
-            const container = document.getElementById('alertPatterns');
-            
-            if (!patterns || patterns.length === 0) {
-                container.innerHTML = '';
-                return;
-            }
-            
-            let html = '';
-            for (const pattern of patterns.slice(0, 5)) {  // Top 5 patterns
-                const levelClass = pattern.level === 'WARNING' ? 'warning' : '';
-                html += `
-                    <div class="alert-pattern ${levelClass}">
-                        <span class="alert-pattern-count">${pattern.count}x</span>
-                        <span class="alert-pattern-text">${escapeHtml(pattern.pattern)}</span>
-                    </div>
-                `;
-            }
-            container.innerHTML = html;
-        }
-        
-        function renderAlerts(alerts) {
-            const container = document.getElementById('alertsContainer');
-            
-            if (!alerts || alerts.length === 0) {
-                container.innerHTML = '<div class="no-data">Нет ошибок за последние 6 часов</div>';
-                return;
-            }
-            
-            let html = '';
-            for (const alert of alerts.slice(0, 30)) {  // Show last 30
-                const levelClass = alert.level === 'WARNING' ? 'warning' : '';
-                html += `
-                    <div class="alert-entry ${levelClass}">
-                        <span class="log-time">${alert.timestamp || '-'}</span>
-                        <span class="log-level ${alert.level}">${alert.level}</span>
-                        <span class="log-message">${escapeHtml(alert.message || '-')}</span>
-                    </div>
-                `;
-            }
-            container.innerHTML = html;
-        }
-        
-        function toggleAlerts() {
-            alertsExpanded = !alertsExpanded;
-            const content = document.getElementById('alertsContent');
-            const btn = document.getElementById('alertsToggle');
-            
-            if (alertsExpanded) {
-                content.style.display = 'block';
-                btn.textContent = 'Свернуть';
-            } else {
-                content.style.display = 'none';
-                btn.textContent = 'Развернуть';
-            }
-        }
-        
-        function switchTab(tabName) {
-            // Hide all tabs
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
-            
-            // Show selected tab
-            document.getElementById('tab-' + tabName).classList.add('active');
-            event.target.classList.add('active');
-            
-            // Load data for users tab if needed
-            if (tabName === 'users' && allUsers.length === 0) {
-                fetchUsers();
-            }
-        }
-        
-        async function fetchUsers() {
-            try {
-                const response = await fetch('/api/users');
-                const data = await response.json();
-                allUsers = data.users || [];
-                
-                // Update summary
-                document.getElementById('totalUsers').textContent = data.count || 0;
-                document.getElementById('usersBalance').textContent = '$' + (data.totals?.total_balance || 0).toLocaleString();
-                document.getElementById('usersDeposits').textContent = '$' + (data.totals?.total_deposits || 0).toLocaleString();
-                document.getElementById('activeTraders').textContent = data.totals?.active_traders || 0;
-                document.getElementById('autoTraders').textContent = data.totals?.auto_traders || 0;
-                
-                renderUsers();
-            } catch (error) {
-                console.error('Error fetching users:', error);
-            }
-        }
-        
-        function sortUsers(field) {
-            // Update sort headers
-            document.querySelectorAll('.users-table th').forEach(th => {
-                th.classList.remove('sorted-asc', 'sorted-desc');
-            });
-            
-            if (usersSortField === field) {
-                usersSortDir = usersSortDir === 'asc' ? 'desc' : 'asc';
-            } else {
-                usersSortField = field;
-                usersSortDir = 'desc';
-            }
-            
-            // Add class to current header
-            const headers = document.querySelectorAll('.users-table th');
-            const fieldIndex = ['user_id', 'balance', 'total_deposit', 'total_trades', 'wins', 'winrate', 'total_pnl', 'open_positions', 'trading', 'auto_trade'].indexOf(field);
-            if (fieldIndex >= 0 && headers[fieldIndex]) {
-                headers[fieldIndex].classList.add('sorted-' + usersSortDir);
-            }
-            
-            renderUsers();
-        }
-        
-        function renderUsers() {
-            const tbody = document.getElementById('usersBody');
-            
-            if (!allUsers || allUsers.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="10" class="no-data">No users found</td></tr>';
-                return;
-            }
-            
-            // Sort users
-            const sorted = [...allUsers].sort((a, b) => {
-                let aVal = a[usersSortField];
-                let bVal = b[usersSortField];
-                
-                // Handle booleans
-                if (typeof aVal === 'boolean') aVal = aVal ? 1 : 0;
-                if (typeof bVal === 'boolean') bVal = bVal ? 1 : 0;
-                
-                if (usersSortDir === 'asc') {
-                    return aVal > bVal ? 1 : -1;
-                } else {
-                    return aVal < bVal ? 1 : -1;
-                }
-            });
-            
-            let html = '';
-            for (const user of sorted) {
-                const pnlClass = user.total_pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-                const tradingBadge = user.trading 
-                    ? '<span class="status-badge status-on">ON</span>' 
-                    : '<span class="status-badge status-off">OFF</span>';
-                const autoBadge = user.auto_trade 
-                    ? '<span class="status-badge status-on">ON</span>' 
-                    : '<span class="status-badge status-off">OFF</span>';
-                
-                html += `
-                    <tr>
-                        <td><code>${user.user_id}</code></td>
-                        <td>$${user.balance.toLocaleString()}</td>
-                        <td>$${user.total_deposit.toLocaleString()}</td>
-                        <td>${user.total_trades}</td>
-                        <td>${user.wins}/${user.total_trades}</td>
-                        <td>${user.winrate}%</td>
-                        <td class="${pnlClass}">${formatPnl(user.total_pnl)}</td>
-                        <td>${user.open_positions}</td>
-                        <td>${tradingBadge}</td>
-                        <td>${autoBadge}</td>
-                    </tr>
-                `;
-            }
-            tbody.innerHTML = html;
-        }
-        
-        function refreshAll() {
-            fetchStats();
-            fetchExtended();
-            fetchTrades();
-            fetchLogs();
-            fetchWinrateBreakdown();
-            fetchAlerts();
-        }
-        
-        async function shareStats() {
-            // Update share card data
-            document.getElementById('shareDate').textContent = formatTime24(new Date());
-            document.getElementById('shareWinRate').textContent = (currentStats.win_rate || 0) + '%';
-            
-            const pnl = parseFloat(currentStats.total_pnl || 0);
-            const sharePnlEl = document.getElementById('sharePnl');
-            sharePnlEl.textContent = formatPnl(pnl);
-            sharePnlEl.style.color = pnl >= 0 ? '#238636' : '#da3633';
-            
-            document.getElementById('shareProfitable').textContent = currentStats.profitable || 0;
-            document.getElementById('shareLosing').textContent = currentStats.losing || 0;
-            
-            const todayPnl = parseFloat(currentExtended.today_pnl || 0);
-            const shareTodayEl = document.getElementById('shareTodayPnl');
-            shareTodayEl.textContent = formatPnl(todayPnl);
-            shareTodayEl.style.color = todayPnl >= 0 ? '#238636' : '#da3633';
-            
-            document.getElementById('shareOpen').textContent = currentStats.open_deals || 0;
-            
-            // Move card temporarily to visible area
-            const shareCard = document.getElementById('shareCard');
-            shareCard.style.left = '0';
-            shareCard.style.top = '0';
-            shareCard.style.position = 'absolute';
-            shareCard.style.zIndex = '-1';
-            
-            try {
-                const canvas = await html2canvas(shareCard, {
-                    backgroundColor: '#0d1117',
-                    scale: 2
-                });
-                
-                // Convert to blob and copy/download
-                canvas.toBlob(async (blob) => {
-                    try {
-                        // Try to copy to clipboard
-                        await navigator.clipboard.write([
-                            new ClipboardItem({ 'image/png': blob })
-                        ]);
-                        alert('Screenshot copied to clipboard!');
-                    } catch (e) {
-                        // Fallback: download
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = 'trading-stats-' + new Date().toISOString().slice(0,10) + '.png';
-                        a.click();
-                        URL.revokeObjectURL(url);
-                    }
-                }, 'image/png');
-            } catch (error) {
-                console.error('Error creating screenshot:', error);
-                alert('Error creating screenshot');
-            }
-            
-            // Hide card again
-            shareCard.style.left = '-9999px';
-        }
-        
-        async function lookupUser() {
-            const userId = document.getElementById('userIdInput').value.trim().replace(/\s/g, '');
-            if (!userId) {
-                alert('Enter a User ID');
-                return;
-            }
-            
-            try {
-                const response = await fetch(`/api/user/${userId}`);
-                const data = await response.json();
-                
-                if (data.error) {
-                    alert('Error: ' + data.error);
-                    return;
-                }
-                
-                document.getElementById('userInfoContainer').style.display = 'block';
-                
-                // Balance info
-                const balance = parseFloat(data.balance || 0);
-                const deposit = parseFloat(data.total_deposit || 0);
-                const profit = parseFloat(data.total_profit || 0);
-                
-                document.getElementById('userBalance').textContent = '$' + balance.toFixed(2);
-                document.getElementById('userDeposit').textContent = '$' + deposit.toFixed(2);
-                
-                const profitEl = document.getElementById('userProfit');
-                profitEl.textContent = formatPnl(profit);
-                profitEl.className = 'card-value small ' + (profit >= 0 ? 'positive' : 'negative');
-                
-                // Calculate missing money
-                // Expected: deposit + profit = balance + open positions amount
-                const openPosAmount = (data.open_positions || []).reduce((sum, p) => sum + (p.amount || 0), 0);
-                const expected = deposit + profit;
-                const actual = balance + openPosAmount;
-                const missing = expected - actual;
-                
-                const missingEl = document.getElementById('userMissing');
-                missingEl.textContent = '$' + missing.toFixed(2);
-                missingEl.className = 'card-value small ' + (Math.abs(missing) > 0.1 ? 'negative' : 'positive');
-                
-                // Positions
-                document.getElementById('userPosCount').textContent = data.open_positions_count || 0;
-                const posContainer = document.getElementById('userPositions');
-                if (data.open_positions && data.open_positions.length > 0) {
-                    let html = '';
-                    for (const pos of data.open_positions) {
-                        const pnl = parseFloat(pos.pnl || 0);
-                        const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-                        html += `<div class="log-entry">
-                            <span style="min-width: 80px; color: #58a6ff;">${pos.symbol?.split('/')[0] || '-'}</span>
-                            <span style="min-width: 60px;" class="badge ${pos.direction === 'LONG' ? 'badge-long' : 'badge-short'}">${pos.direction}</span>
-                            <span style="min-width: 80px;">$${(pos.amount || 0).toFixed(2)}</span>
-                            <span style="min-width: 100px;" class="${pnlClass}">${formatPnl(pnl)}</span>
-                            <span style="color: #8b949e;">${formatTime(pos.opened_at)}</span>
-                        </div>`;
-                    }
-                    posContainer.innerHTML = html;
-                } else {
-                    posContainer.innerHTML = '<div class="no-data">No open positions</div>';
-                }
-                
-                // History
-                document.getElementById('userHistCount').textContent = data.history_count || 0;
-                const histContainer = document.getElementById('userHistory');
-                if (data.history && data.history.length > 0) {
-                    let html = '';
-                    for (const trade of data.history) {
-                        const pnl = parseFloat(trade.pnl || 0);
-                        const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-                        html += `<div class="log-entry">
-                            <span style="min-width: 80px; color: #58a6ff;">${trade.symbol?.split('/')[0] || '-'}</span>
-                            <span style="min-width: 60px;" class="badge ${trade.direction === 'LONG' ? 'badge-long' : 'badge-short'}">${trade.direction}</span>
-                            <span style="min-width: 80px;">$${(trade.amount || 0).toFixed(2)}</span>
-                            <span style="min-width: 100px;" class="${pnlClass}">${formatPnl(pnl)}</span>
-                            <span style="min-width: 80px; color: #d29922;">${trade.reason || '-'}</span>
-                            <span style="color: #8b949e;">${formatTime(trade.closed_at)}</span>
-                        </div>`;
-                    }
-                    histContainer.innerHTML = html;
-                } else {
-                    histContainer.innerHTML = '<div class="no-data">No trade history</div>';
-                }
-                
-                // User logs
-                const logsContainer = document.getElementById('userLogs');
-                if (data.user_logs && data.user_logs.length > 0) {
-                    let html = '';
-                    for (const log of data.user_logs) {
-                        html += `<div class="log-entry">
-                            <span class="log-time">${log.timestamp || '-'}</span>
-                            <span class="log-level ${log.level}">${log.level}</span>
-                            <span style="min-width: 80px; color: #58a6ff;">${log.symbol || '-'}</span>
-                            <span class="log-message">${log.message || '-'}</span>
-                        </div>`;
-                    }
-                    logsContainer.innerHTML = html;
-                } else {
-                    logsContainer.innerHTML = '<div class="no-data">No logs for this user</div>';
-                }
-                
-            } catch (error) {
-                console.error('Error looking up user:', error);
-                alert('Error: ' + error.message);
-            }
-        }
-        
-        // Allow Enter key to trigger lookup
-        document.getElementById('userIdInput').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') lookupUser();
-        });
-        
-        // News functions
         async function fetchNews() {
             try {
                 const response = await fetch('/api/news');
                 const data = await response.json();
                 
-                renderNews(data.news || []);
-                updateSentiment(data.sentiment || {});
+                const container = document.getElementById('newsList');
                 
-                console.log('[Dashboard] News loaded:', data.count, 'items');
+                if (!data.news || data.news.length === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📰</div>
+                            <div>No news available</div>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                let html = '';
+                for (const item of data.news.slice(0, 10)) {
+                    const sentimentClass = item.sentiment_value >= 1 ? 'bullish' : item.sentiment_value <= -1 ? 'bearish' : '';
+                    
+                    html += `
+                        <div class="news-item" onclick="window.open('${item.url || '#'}', '_blank')">
+                            <div class="news-item-header">
+                                <span class="news-source">${item.source}</span>
+                                <span class="news-time">${getTimeAgo(item.timestamp)}</span>
+                            </div>
+                            <div class="news-title">${escapeHtml(item.title)}</div>
+                            <div class="news-tags">
+                                ${item.coins?.slice(0, 3).map(c => `<span class="news-tag coin">${c}</span>`).join('') || ''}
+                                ${sentimentClass ? `<span class="news-tag ${sentimentClass}">${item.sentiment}</span>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+                
+                container.innerHTML = html;
+                
             } catch (error) {
                 console.error('Error fetching news:', error);
-                document.getElementById('newsList').innerHTML = 
-                    '<div class="news-empty">❌ Ошибка загрузки новостей</div>';
-            }
-        }
-        
-        function renderNews(news) {
-            const container = document.getElementById('newsList');
-            
-            if (!news || news.length === 0) {
-                container.innerHTML = '<div class="news-empty">📭 Нет новостей для отображения</div>';
-                return;
-            }
-            
-            let html = '';
-            for (const item of news) {
-                const sentimentClass = getSentimentClass(item.sentiment_value);
-                const impactClass = item.impact.toLowerCase();
-                const timeAgo = formatTimeAgo(item.timestamp);
-                const isTwitter = item.source.includes('@') || item.source.includes('🐦');
-                const sourceClass = isTwitter ? 'news-source twitter' : 'news-source';
-                
-                html += `
-                    <div class="news-item" onclick="window.open('${item.url || '#'}', '_blank')">
-                        <div class="news-item-header">
-                            <span class="${sourceClass}">${item.source}</span>
-                            <span class="news-time">${timeAgo}</span>
-                        </div>
-                        <div class="news-item-title">${escapeHtml(item.title)}</div>
-                        <div class="news-item-footer">
-                            <div class="news-tags">
-                                ${item.coins.map(c => `<span class="news-tag coin">${c}</span>`).join('')}
-                                <span class="news-tag ${sentimentClass}">${item.sentiment}</span>
-                            </div>
-                            <span class="news-impact ${impactClass}">${item.impact}</span>
-                        </div>
-                        ${item.keywords.length > 0 ? `<div class="news-keywords">${item.keywords.slice(0, 3).join(' ')}</div>` : ''}
-                    </div>
-                `;
-            }
-            container.innerHTML = html;
-        }
-        
-        function updateSentiment(sentiment) {
-            const badge = document.getElementById('newsSentiment');
-            const icon = document.getElementById('sentimentIcon');
-            const text = document.getElementById('sentimentText');
-            const score = document.getElementById('sentimentScore');
-            
-            const trend = sentiment.trend || 'NEUTRAL';
-            const scoreVal = sentiment.score || 0;
-            
-            // Update classes
-            badge.className = 'news-sentiment ' + trend.toLowerCase();
-            
-            // Update content
-            if (trend === 'BULLISH') {
-                icon.textContent = '📈';
-            } else if (trend === 'BEARISH') {
-                icon.textContent = '📉';
-            } else {
-                icon.textContent = '⚖️';
-            }
-            
-            text.textContent = trend;
-            score.textContent = `(${scoreVal > 0 ? '+' : ''}${scoreVal})`;
-        }
-        
-        function getSentimentClass(value) {
-            if (value >= 1) return 'bullish';
-            if (value <= -1) return 'bearish';
-            return 'neutral';
-        }
-        
-        function formatTimeAgo(isoString) {
-            if (!isoString) return '';
-            
-            try {
-                const date = new Date(isoString);
-                const now = new Date();
-                const diffMs = now - date;
-                const diffMins = Math.floor(diffMs / 60000);
-                const diffHours = Math.floor(diffMs / 3600000);
-                
-                if (diffMins < 1) return 'сейчас';
-                if (diffMins < 60) return `${diffMins}м`;
-                if (diffHours < 24) return `${diffHours}ч`;
-                return `${Math.floor(diffHours / 24)}д`;
-            } catch {
-                return '';
             }
         }
         
         function escapeHtml(text) {
             const div = document.createElement('div');
-            div.textContent = text;
+            div.textContent = text || '';
             return div.innerHTML;
         }
         
-        // Initial fetch
-        refreshAll();
-        fetchNews();
+        function refreshAll() {
+            fetchStats();
+            fetchPositions();
+            fetchTrades();
+            fetchNews();
+        }
         
-        // Auto-refresh
+        // Initial load
+        refreshAll();
+        
+        // Auto-refresh intervals
         setInterval(fetchStats, 3000);
-        setInterval(fetchExtended, 5000);
+        setInterval(fetchPositions, 5000);
         setInterval(fetchTrades, 5000);
-        setInterval(fetchLogs, 10000);
-        setInterval(fetchWinrateBreakdown, 15000);
-        setInterval(fetchNews, 30000);  // Refresh news every 30 seconds
-        setInterval(fetchAlerts, 15000);  // Refresh alerts every 15 seconds
+        setInterval(fetchNews, 30000);
     </script>
 </body>
 </html>
