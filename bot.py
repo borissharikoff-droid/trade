@@ -5290,15 +5290,77 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         auto_trade_executed_users = set()
         
         # Получаем ВСЕХ пользователей с включенным auto_trade
+        # ВАЖНО: ORDER BY гарантирует что AUTO_TRADE_USER_ID идёт первым для хеджирования!
         all_auto_trade_users = run_sql(
-            "SELECT user_id FROM users WHERE auto_trade = 1 AND balance >= ?",
-            (AUTO_TRADE_MIN_BET,), fetch="all"
+            """SELECT user_id FROM users 
+               WHERE auto_trade = 1 AND balance >= ?
+               ORDER BY CASE WHEN user_id = ? THEN 0 ELSE 1 END, user_id""",
+            (AUTO_TRADE_MIN_BET, AUTO_TRADE_USER_ID), fetch="all"
         )
         
         logger.info(f"[AUTO_TRADE] Найдено {len(all_auto_trade_users)} пользователей с авто-трейдом")
         
         if len(all_auto_trade_users) == 0:
             logger.info("[AUTO_TRADE] Нет пользователей с auto_trade=1 и балансом >= AUTO_TRADE_MIN_BET")
+            return
+        
+        # === ГЛОБАЛЬНЫЙ BYBIT ХЕДЖ (ДО цикла пользователей) ===
+        # Открываем хедж ОДИН РАЗ для сигнала, потом используем для всех пользователей
+        hedging_enabled = await is_hedging_enabled()
+        global_bybit_qty = 0
+        hedge_opened_successfully = False
+        hedge_attempted = False
+        
+        if hedging_enabled:
+            # Находим ставку админа для расчёта hedge amount
+            admin_user = get_user(AUTO_TRADE_USER_ID)
+            admin_balance = admin_user.get('balance', 0) if admin_user else 0
+            
+            if admin_balance >= AUTO_TRADE_MIN_BET:
+                # Расчёт ставки для админа
+                loss_streak = db_get_loss_streak(AUTO_TRADE_USER_ID)
+                admin_bet = calculate_smart_bet_size(
+                    balance=admin_balance,
+                    symbol=symbol,
+                    quality=setup.quality,
+                    loss_streak=loss_streak
+                )
+                admin_bet = min(admin_bet, admin_balance - MIN_BALANCE_RESERVE)
+                admin_bet = max(admin_bet, AUTO_TRADE_MIN_BET) if admin_bet >= AUTO_TRADE_MIN_BET else 0
+                
+                if admin_bet > 0:
+                    hedge_attempted = True
+                    hedge_amount = float(admin_bet * LEVERAGE)
+                    logger.info(f"[AUTO_TRADE] Открываем Bybit хедж: {symbol} {direction} ${hedge_amount:.2f}")
+                    
+                    hedge_result = await hedge_open(0, symbol, direction, hedge_amount,
+                                                   sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
+                    
+                    if hedge_result:
+                        global_bybit_qty = hedge_result.get('qty', 0)
+                        logger.info(f"[AUTO_TRADE] ✓ Bybit хедж открыт: qty={global_bybit_qty}")
+                        
+                        # Верификация позиции
+                        await asyncio.sleep(0.5)
+                        bybit_pos = await hedger.get_position_data(symbol)
+                        if bybit_pos and bybit_pos.get('size', 0) > 0:
+                            real_bybit_qty = float(bybit_pos.get('size', 0))
+                            if real_bybit_qty > 0 and global_bybit_qty > 0 and abs(real_bybit_qty - global_bybit_qty) / global_bybit_qty > 0.01:
+                                logger.info(f"[AUTO_TRADE] Correcting qty: calculated={global_bybit_qty}, real={real_bybit_qty}")
+                                global_bybit_qty = real_bybit_qty
+                            hedge_opened_successfully = True
+                            increment_bybit_opened()
+                        else:
+                            logger.error("[AUTO_TRADE] ❌ Bybit не подтвердил позицию - ОТМЕНА авто-трейда!")
+                    else:
+                        logger.error("[AUTO_TRADE] ❌ Bybit ошибка открытия - ОТМЕНА авто-трейда!")
+            else:
+                logger.warning(f"[AUTO_TRADE] Админ {AUTO_TRADE_USER_ID} баланс ${admin_balance:.2f} < ${AUTO_TRADE_MIN_BET}")
+        
+        # Если хеджирование включено и хедж не открылся - НЕ создаём позиции (предотвращение фантомов)
+        if hedging_enabled and hedge_attempted and not hedge_opened_successfully:
+            logger.error("[AUTO_TRADE] ❌ Хедж не открылся - пропускаем создание позиций для предотвращения фантомов")
+            return
         
         # Проверяем каждого пользователя с auto_trade
         for auto_user_row in all_auto_trade_users:
@@ -5388,41 +5450,9 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 
                 ticker = symbol.split("/")[0]
                 
-                # === BYBIT ХЕДЖИРОВАНИЕ (только для первого пользователя) ===
-                bybit_qty = 0
-                hedging_enabled = await is_hedging_enabled()
-                bybit_success = True
-                
-                # Bybit хедж открываем только если это первый авто-трейд по этому сигналу
-                # и только для AUTO_TRADE_USER_ID (админ)
-                if hedging_enabled and auto_user_id == AUTO_TRADE_USER_ID and len(auto_trade_executed_users) == 0:
-                    hedge_amount = float(auto_bet * LEVERAGE)
-                    hedge_result = await hedge_open(0, symbol, direction, hedge_amount, 
-                                                   sl=float(sl), tp1=float(tp1), tp2=float(tp2), tp3=float(tp3))
-                    
-                    if hedge_result:
-                        bybit_qty = hedge_result.get('qty', 0)
-                        logger.info(f"[AUTO_TRADE] ✓ Bybit открыт: qty={bybit_qty}")
-                        
-                        await asyncio.sleep(0.5)
-                        bybit_pos = await hedger.get_position_data(symbol)
-                        if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                            logger.error("[AUTO_TRADE] ❌ Bybit не подтвердил позицию")
-                            bybit_success = False
-                        else:
-                            # Сохраняем РЕАЛЬНЫЙ размер с Bybit
-                            real_bybit_qty = float(bybit_pos.get('size', 0))
-                            if real_bybit_qty > 0 and bybit_qty > 0 and abs(real_bybit_qty - bybit_qty) / bybit_qty > 0.01:
-                                logger.info(f"[AUTO_TRADE] Correcting qty: calculated={bybit_qty}, real={real_bybit_qty}")
-                                bybit_qty = real_bybit_qty
-                            increment_bybit_opened()
-                    else:
-                        logger.error("[AUTO_TRADE] ❌ Bybit ошибка")
-                        bybit_success = False
-                
-                if not bybit_success and auto_user_id == AUTO_TRADE_USER_ID:
-                    logger.warning(f"[AUTO_TRADE] User {auto_user_id}: Bybit failed, skipping")
-                    continue
+                # === BYBIT QTY: используем глобальный хедж только для админа ===
+                # bybit_qty присваивается только админу, остальные получают 0 (локальные позиции)
+                bybit_qty = global_bybit_qty if auto_user_id == AUTO_TRADE_USER_ID else 0
                 
                 # === ОТКРЫТИЕ ПОЗИЦИИ (С ПОЛНОЙ ЗАЩИТОЙ ОТ ПОТЕРИ ДЕНЕГ) ===
                 commission = auto_bet * (COMMISSION_PERCENT / 100)
@@ -5445,7 +5475,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                         'sl': float(sl),
                         'commission': float(commission),
                         'pnl': float(-commission),
-                        'bybit_qty': bybit_qty if auto_user_id == AUTO_TRADE_USER_ID else 0,
+                        'bybit_qty': bybit_qty,  # Уже установлен корректно выше (admin=global_bybit_qty, others=0)
                         'original_amount': float(auto_bet),
                         'is_auto': True  # Помечаем как авто-сделку
                     }
@@ -9328,14 +9358,21 @@ async def sync_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             on_bybit = bybit_symbol in bybit_open_symbols if bybit_available else None
             
             # Определяем статус позиции
-            if has_bybit_qty and (on_bybit is True or on_bybit is None):
+            if has_bybit_qty and on_bybit is True:
+                # Позиция с хеджем и она есть на Bybit - реальная
                 real_positions.append(pos)
-            elif not has_bybit_qty and is_auto:
-                phantom_positions.append(pos)
             elif has_bybit_qty and on_bybit is False:
-                phantom_positions.append(pos)  # Была на Bybit, но закрылась
+                # Была на Bybit, но закрылась - фантом (нужно синхронизировать)
+                phantom_positions.append(pos)
+            elif not has_bybit_qty and is_auto and bybit_available:
+                # Авто-позиция БЕЗ хеджа когда хеджинг включен - фантом
+                phantom_positions.append(pos)
+            elif has_bybit_qty and on_bybit is None:
+                # Есть bybit_qty но Bybit недоступен - считаем реальной
+                real_positions.append(pos)
             else:
-                real_positions.append(pos)  # Локальная позиция без хеджирования
+                # Локальная позиция без хеджирования (ручная или хеджинг выключен)
+                real_positions.append(pos)
         
         # Формируем отчёт
         text = f"<b>🔄 Синхронизация позиций</b>\n\n"
