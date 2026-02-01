@@ -385,7 +385,8 @@ class BybitHedger:
     
     async def open_hedge(self, position_id: int, symbol: str, direction: str, amount_usd: float, 
                          tp: float = None, sl: float = None,
-                         tp1: float = None, tp2: float = None, tp3: float = None) -> Optional[Dict]:
+                         tp1: float = None, tp2: float = None, tp3: float = None,
+                         leverage: int = 20) -> Optional[Dict]:
         """
         Открыть хедж-позицию на Bybit с частичными TP
         
@@ -397,6 +398,7 @@ class BybitHedger:
             tp: Take Profit цена (legacy, используется как TP1 если tp1 не указан)
             sl: Stop Loss цена
             tp1, tp2, tp3: Частичные тейки (50%, 30%, 20%)
+            leverage: Плечо для позиции (по умолчанию 20)
         
         Returns:
             {'order_id': str, 'qty': float} если успешно, None если ошибка
@@ -417,8 +419,8 @@ class BybitHedger:
         bybit_symbol = self._to_bybit_symbol(symbol)
         side = "Buy" if direction == "LONG" else "Sell"
         
-        # Устанавливаем плечо x20 перед открытием
-        await self.set_leverage(symbol, 20)
+        # Устанавливаем плечо перед открытием (динамическое)
+        await self.set_leverage(symbol, leverage)
         
         # Получаем цену для расчёта qty
         price = await self.get_price(symbol)
@@ -914,9 +916,10 @@ hedger = BybitHedger()
 
 async def hedge_open(position_id: int, symbol: str, direction: str, amount: float, 
                      tp: float = None, sl: float = None,
-                     tp1: float = None, tp2: float = None, tp3: float = None) -> Optional[Dict]:
-    """Wrapper для открытия хеджа с частичными TP. Возвращает {'order_id': str, 'qty': float}"""
-    return await hedger.open_hedge(position_id, symbol, direction, amount, tp, sl, tp1, tp2, tp3)
+                     tp1: float = None, tp2: float = None, tp3: float = None,
+                     leverage: int = 20) -> Optional[Dict]:
+    """Wrapper для открытия хеджа с частичными TP и динамическим плечом. Возвращает {'order_id': str, 'qty': float}"""
+    return await hedger.open_hedge(position_id, symbol, direction, amount, tp, sl, tp1, tp2, tp3, leverage)
 
 
 async def hedge_set_partial_tps(symbol: str, direction: str, qty: float, tp1: float, tp2: float, tp3: float) -> bool:

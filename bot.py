@@ -18,6 +18,10 @@ from smart_analyzer import (
     TradeSetup, SetupQuality, MarketRegime, get_signal_stats, reset_signal_stats,
     increment_bybit_opened, increment_accepted
 )
+from bybit_ws import (
+    init_bybit_websocket, get_bybit_ws, get_position_sync,
+    start_websocket_sync, stop_websocket_sync, WEBSOCKETS_AVAILABLE
+)
 from rate_limiter import rate_limit, rate_limiter, init_rate_limiter, configure_rate_limiter
 from connection_pool import init_connection_pool, get_pooled_connection, return_pooled_connection
 from cache_manager import users_cache, positions_cache, price_cache, stats_cache, cleanup_caches, invalidate_stats_cache
@@ -161,6 +165,93 @@ def run_sql(query: str, params: tuple = (), fetch: str = None):
                 pass
         # Return connection to pool
         if conn:
+            return_pooled_connection(conn)
+
+
+def run_sql_transaction(operations: list) -> list:
+    """
+    Выполнить несколько SQL операций в одной атомарной транзакции.
+    
+    Args:
+        operations: список кортежей (query, params, fetch_type)
+                   fetch_type: None, 'one', 'all', 'id'
+    
+    Returns:
+        список результатов для каждой операции
+    
+    Если любая операция завершится неудачей, вся транзакция будет отменена (rollback).
+    """
+    conn = None
+    c = None
+    results = []
+    
+    try:
+        conn = get_pooled_connection()
+        
+        # Начинаем транзакцию явно
+        if USE_POSTGRES:
+            conn.autocommit = False
+        else:
+            conn.execute("BEGIN TRANSACTION")
+        
+        for query, params, fetch in operations:
+            if USE_POSTGRES:
+                query = query.replace("?", "%s")
+                if fetch == 'all' or fetch == 'one':
+                    c = conn.cursor(cursor_factory=RealDictCursor)
+                else:
+                    c = conn.cursor()
+            else:
+                c = conn.cursor()
+            
+            c.execute(query, params)
+            
+            result = None
+            if fetch == "one":
+                row = c.fetchone()
+                result = dict(row) if row else None
+            elif fetch == "all":
+                rows = c.fetchall()
+                result = [dict(r) for r in rows] if rows else []
+            elif fetch == "id":
+                if USE_POSTGRES:
+                    row = c.fetchone()
+                    result = row[0] if row and 'RETURNING' in query.upper() else None
+                else:
+                    result = c.lastrowid
+            
+            results.append(result)
+            
+            if c:
+                c.close()
+                c = None
+        
+        # Коммит транзакции
+        conn.commit()
+        logger.debug(f"[DB] Transaction committed: {len(operations)} operations")
+        return results
+        
+    except Exception as e:
+        if conn:
+            try:
+                conn.rollback()
+                logger.warning(f"[DB] Transaction rolled back due to error: {e}")
+            except Exception:
+                pass
+        logger.error(f"[DB] Transaction error: {e}")
+        raise
+    finally:
+        if c:
+            try:
+                c.close()
+            except Exception:
+                pass
+        if conn:
+            if USE_POSTGRES:
+                try:
+                    conn.autocommit = True
+                except Exception:
+                    pass
             return_pooled_connection(conn)
 
 def init_db():
@@ -362,6 +453,51 @@ def init_db():
         except Exception as e2:
             logger.error(f"[DB] Migration FAILED (is_auto): {e2}")
     
+    # Миграция: добавляем state для отслеживания состояния позиции (PENDING, OPENING, OPEN, CLOSING, CLOSED)
+    try:
+        if USE_POSTGRES:
+            c.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'positions' AND column_name = 'state'
+            """)
+            exists = c.fetchone()
+            if not exists:
+                logger.info("[DB] Adding state column to positions...")
+                c.execute("ALTER TABLE positions ADD COLUMN state TEXT DEFAULT 'OPEN'")
+                conn.commit()
+                logger.info("[DB] Migration: state column ADDED")
+            else:
+                logger.info("[DB] Migration: state column already exists")
+        else:
+            c.execute("PRAGMA table_info(positions)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'state' not in columns:
+                c.execute("ALTER TABLE positions ADD COLUMN state TEXT DEFAULT 'OPEN'")
+                conn.commit()
+                logger.info("[DB] Migration: state column added")
+    except Exception as e:
+        logger.error(f"[DB] Migration ERROR (state): {e}")
+    
+    # Миграция: добавляем leverage_mode и max_leverage для динамического плеча пользователя
+    try:
+        if USE_POSTGRES:
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS leverage_mode TEXT DEFAULT 'auto'")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_leverage INTEGER DEFAULT 50")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS risk_per_trade REAL DEFAULT 0.02")
+        else:
+            c.execute("PRAGMA table_info(users)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'leverage_mode' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN leverage_mode TEXT DEFAULT 'auto'")
+            if 'max_leverage' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN max_leverage INTEGER DEFAULT 50")
+            if 'risk_per_trade' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN risk_per_trade REAL DEFAULT 0.02")
+        conn.commit()
+        logger.info("[DB] Migration: leverage columns ensured")
+    except Exception as e:
+        logger.warning(f"[DB] Migration warning (leverage): {e}")
+    
     # Миграция: добавляем поля для авто-трейда пользователя
     try:
         if USE_POSTGRES:
@@ -533,7 +669,8 @@ def db_get_user(user_id: int) -> Dict:
 ALLOWED_USER_COLUMNS = {
     'balance', 'total_deposit', 'total_profit', 'trading', 'referrer_id',
     'auto_trade', 'auto_trade_max_daily', 'auto_trade_min_winrate',
-    'auto_trade_today', 'auto_trade_last_reset'
+    'auto_trade_today', 'auto_trade_last_reset',
+    'leverage_mode', 'max_leverage', 'risk_per_trade'
 }
 
 def db_update_user(user_id: int, **kwargs):
@@ -553,29 +690,76 @@ def db_get_positions(user_id: int) -> List[Dict]:
     logger.debug(f"[DB] User {user_id}: {len(positions)} positions from DB")
     return positions
 
-def db_add_position(user_id: int, pos: Dict) -> int:
-    """Добавить позицию"""
+def db_add_position(user_id: int, pos: Dict, state: str = 'OPEN') -> int:
+    """
+    Добавить позицию с указанным состоянием.
+    
+    States:
+        PENDING - позиция создана в БД, но ещё не открыта на Bybit
+        OPENING - идёт процесс открытия на Bybit
+        OPEN - позиция открыта и активна
+        CLOSING - идёт процесс закрытия
+        CLOSED - позиция закрыта
+    """
     is_auto = 1 if pos.get('is_auto', False) else 0
     
-    # Пробуем с is_auto, если колонка есть
+    # Пробуем с is_auto и state, если колонки есть
     try:
         if USE_POSTGRES:
             query = """INSERT INTO positions
-                (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+                (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto, state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
         else:
             query = """INSERT INTO positions
-                (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto, state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
 
         pos_id = run_sql(query,
             (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
-             pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0), pos.get('realized_pnl', 0), is_auto), fetch="id")
-        logger.info(f"[DB] Position {pos_id} added for user {user_id} (is_auto={is_auto})")
+             pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), 
+             pos.get('bybit_qty', 0), pos.get('realized_pnl', 0), is_auto, state), fetch="id")
+        logger.info(f"[DB] Position {pos_id} added for user {user_id} (is_auto={is_auto}, state={state})")
         return pos_id
     except Exception as e:
+        # Fallback: если state колонка не существует - вставляем без неё
+        if 'state' in str(e):
+            logger.warning(f"[DB] state column missing, inserting without it")
+            try:
+                if USE_POSTGRES:
+                    query = """INSERT INTO positions
+                        (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+                else:
+                    query = """INSERT INTO positions
+                        (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl, is_auto)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                
+                pos_id = run_sql(query,
+                    (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
+                     pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), 
+                     pos.get('bybit_qty', 0), pos.get('realized_pnl', 0), is_auto), fetch="id")
+                logger.info(f"[DB] Position {pos_id} added for user {user_id} (without state)")
+                return pos_id
+            except Exception as e2:
+                # Если is_auto тоже не существует
+                if 'is_auto' in str(e2):
+                    if USE_POSTGRES:
+                        query = """INSERT INTO positions
+                            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"""
+                    else:
+                        query = """INSERT INTO positions
+                            (user_id, symbol, direction, entry, current, sl, tp, amount, commission, pnl, bybit_qty, realized_pnl)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+                    
+                    pos_id = run_sql(query,
+                        (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
+                         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), 
+                         pos.get('bybit_qty', 0), pos.get('realized_pnl', 0)), fetch="id")
+                    return pos_id
+                raise
         # Если is_auto колонка не существует - вставляем без неё
-        if 'is_auto' in str(e):
+        elif 'is_auto' in str(e):
             logger.warning(f"[DB] is_auto column missing, inserting without it")
             if USE_POSTGRES:
                 query = """INSERT INTO positions
@@ -588,15 +772,22 @@ def db_add_position(user_id: int, pos: Dict) -> int:
             
             pos_id = run_sql(query,
                 (user_id, pos['symbol'], pos['direction'], pos['entry'], pos['current'],
-                 pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), pos.get('bybit_qty', 0), pos.get('realized_pnl', 0)), fetch="id")
+                 pos['sl'], pos['tp'], pos['amount'], pos['commission'], pos.get('pnl', 0), 
+                 pos.get('bybit_qty', 0), pos.get('realized_pnl', 0)), fetch="id")
             logger.info(f"[DB] Position {pos_id} added for user {user_id} (without is_auto)")
             return pos_id
         else:
             raise
 
+
+def db_update_position_state(pos_id: int, state: str):
+    """Обновить состояние позиции (PENDING, OPENING, OPEN, CLOSING, CLOSED)"""
+    run_sql("UPDATE positions SET state = ? WHERE id = ?", (state, pos_id))
+    logger.debug(f"[DB] Position {pos_id} state updated to {state}")
+
 # Whitelist of allowed position columns for updates (security)
 ALLOWED_POSITION_COLUMNS = {
-    'current', 'sl', 'tp', 'pnl', 'bybit_qty', 'realized_pnl', 'amount'
+    'current', 'sl', 'tp', 'pnl', 'bybit_qty', 'realized_pnl', 'amount', 'state'
 }
 
 def db_update_position(pos_id: int, **kwargs):
@@ -608,22 +799,39 @@ def db_update_position(pos_id: int, **kwargs):
         run_sql(f"UPDATE positions SET {key} = ? WHERE id = ?", (value, pos_id))
 
 def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
-    """Закрыть позицию и перенести в историю"""
+    """
+    Закрыть позицию и перенести в историю АТОМАРНО.
+    Использует транзакцию для гарантии целостности данных.
+    """
     # Получаем позицию
     pos = run_sql("SELECT * FROM positions WHERE id = ?", (pos_id,), fetch="one")
     if not pos:
+        logger.warning(f"[DB] Position {pos_id} not found for closing")
         return
     
-    # Переносим в историю
     closed_at = datetime.now().isoformat()
-    run_sql("""INSERT INTO history 
-        (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at, closed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (pos['user_id'], pos['symbol'], pos['direction'], pos['entry'], exit_price, 
-         pos['sl'], pos['tp'], pos['amount'], pos['commission'], pnl, reason, pos['opened_at'], closed_at))
     
-    # Удаляем из активных
-    run_sql("DELETE FROM positions WHERE id = ?", (pos_id,))
+    # === АТОМАРНАЯ ТРАНЗАКЦИЯ: INSERT + DELETE ===
+    try:
+        operations = [
+            # 1. Вставляем в историю
+            ("""INSERT INTO history 
+                (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at, closed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             (pos['user_id'], pos['symbol'], pos['direction'], pos['entry'], exit_price, 
+              pos['sl'], pos['tp'], pos['amount'], pos['commission'], pnl, reason, pos['opened_at'], closed_at),
+             None),
+            # 2. Удаляем из активных позиций
+            ("DELETE FROM positions WHERE id = ?", (pos_id,), None)
+        ]
+        
+        run_sql_transaction(operations)
+        logger.info(f"[DB] Position {pos_id} closed atomically: {reason}, PnL: ${pnl:.2f}")
+        
+    except Exception as e:
+        logger.error(f"[DB] CRITICAL: Failed to close position {pos_id} atomically: {e}")
+        # Транзакция автоматически откатится
+        raise
     
     # Invalidate stats cache for this user (stats changed with new trade in history)
     invalidate_stats_cache(pos['user_id'])
@@ -631,9 +839,7 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     # Записываем результат для статистики smart analyzer
     record_trade_result(pnl)
     
-    logger.info(f"[DB] Position {pos_id} closed: {reason}, PnL: ${pnl:.2f}")
-    
-    # Comprehensive logging
+    # Comprehensive logging (не критично, если не сработает)
     try:
         # Calculate holding time if possible
         holding_minutes = None
@@ -3795,6 +4001,131 @@ async def auto_trade_set_winrate(update: Update, context: ContextTypes.DEFAULT_T
     
     await auto_trade_menu(update, context)
 
+
+# ==================== НАСТРОЙКИ ПЛЕЧА ====================
+
+async def leverage_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню настроек плеча"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    balance = user.get('balance', 0)
+    
+    # Получаем текущие настройки
+    settings = run_sql("""
+        SELECT leverage_mode, max_leverage FROM users WHERE user_id = ?
+    """, (user_id,), fetch="one")
+    
+    leverage_mode = settings.get('leverage_mode', 'auto') if settings else 'auto'
+    max_leverage = settings.get('max_leverage', 50) if settings else 50
+    
+    # Текущее плечо
+    current_leverage = get_user_leverage(user_id, balance)
+    leverage_info = get_leverage_info(balance, leverage_mode)
+    
+    # Названия режимов
+    mode_names = {
+        'auto': '🔄 Авто',
+        'conservative': '🟢 Консервативный',
+        'aggressive': '🔴 Агрессивный',
+        'fixed': '⚪ Фиксированный'
+    }
+    
+    text = f"""<b>⚙️ Настройки плеча</b>
+
+💰 Баланс: ${balance:.2f}
+📊 Текущее плечо: x{current_leverage}
+{leverage_info['risk_level']} {leverage_info['risk_desc']}
+
+<b>Режим:</b> {mode_names.get(leverage_mode, leverage_mode)}
+<b>Макс. плечо:</b> x{max_leverage}
+
+<b>Режимы:</b>
+🔄 <b>Авто</b> — плечо адаптируется под баланс
+🟢 <b>Консервативный</b> — меньше риск, меньше прибыль
+🔴 <b>Агрессивный</b> — больше риск, больше прибыль
+⚪ <b>Фиксированный</b> — всегда x{DEFAULT_LEVERAGE}"""
+    
+    keyboard = [
+        [InlineKeyboardButton("🔄 Авто" + (" ✓" if leverage_mode == 'auto' else ""), callback_data="leverage_mode_auto")],
+        [InlineKeyboardButton("🟢 Консервативный" + (" ✓" if leverage_mode == 'conservative' else ""), callback_data="leverage_mode_conservative")],
+        [InlineKeyboardButton("🔴 Агрессивный" + (" ✓" if leverage_mode == 'aggressive' else ""), callback_data="leverage_mode_aggressive")],
+        [InlineKeyboardButton("⚪ Фиксированный x20" + (" ✓" if leverage_mode == 'fixed' else ""), callback_data="leverage_mode_fixed")],
+        [InlineKeyboardButton("📊 Макс. плечо", callback_data="leverage_max_menu")],
+        [InlineKeyboardButton("◀️ Назад", callback_data="menu")]
+    ]
+    
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
+
+
+async def leverage_set_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Установить режим плеча"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    mode = query.data.replace("leverage_mode_", "")
+    
+    # Обновляем в БД
+    run_sql("UPDATE users SET leverage_mode = ? WHERE user_id = ?", (mode, user_id))
+    
+    logger.info(f"[LEVERAGE] User {user_id} set mode = {mode}")
+    
+    await leverage_menu(update, context)
+
+
+async def leverage_max_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Меню выбора максимального плеча"""
+    query = update.callback_query
+    await query.answer()
+    
+    settings = run_sql("""
+        SELECT max_leverage FROM users WHERE user_id = ?
+    """, (update.effective_user.id,), fetch="one")
+    
+    current = settings.get('max_leverage', 50) if settings else 50
+    
+    text = f"""<b>📊 Максимальное плечо</b>
+
+Текущее: x{current}
+
+Это верхний лимит плеча, который будет использоваться.
+В режиме Авто плечо не превысит это значение.
+
+⚠️ <b>Внимание:</b> высокое плечо увеличивает риск ликвидации!"""
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("x25" + (" ✓" if current == 25 else ""), callback_data="leverage_max_25"),
+            InlineKeyboardButton("x35" + (" ✓" if current == 35 else ""), callback_data="leverage_max_35"),
+        ],
+        [
+            InlineKeyboardButton("x50" + (" ✓" if current == 50 else ""), callback_data="leverage_max_50"),
+            InlineKeyboardButton("x75" + (" ✓" if current == 75 else ""), callback_data="leverage_max_75"),
+        ],
+        [InlineKeyboardButton("◀️ Назад", callback_data="leverage_menu")]
+    ]
+    
+    await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
+
+
+async def leverage_set_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Установить максимальное плечо"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = update.effective_user.id
+    value = int(query.data.replace("leverage_max_", ""))
+    
+    run_sql("UPDATE users SET max_leverage = ? WHERE user_id = ?", (value, user_id))
+    
+    logger.info(f"[LEVERAGE] User {user_id} set max_leverage = {value}")
+    
+    await leverage_menu(update, context)
+
+
 async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     Синхронизация позиций с Bybit - закрывает позиции которые закрылись на бирже.
@@ -4585,7 +4916,141 @@ Winrate: <b>{winrate}%</b>
 last_signals: Dict[str, Dict] = {}  # {symbol: {'direction': str, 'price': float, 'time': datetime}}
 SIGNAL_COOLDOWN = 30  # 30 секунд между одинаковыми сигналами (уменьшено для большего количества сделок)
 PRICE_CHANGE_THRESHOLD = 0.002  # 0.2% изменение цены для нового сигнала
-LEVERAGE = 20  # Плечо x20
+DEFAULT_LEVERAGE = 20  # Дефолтное плечо x20
+LEVERAGE = 20  # Для обратной совместимости
+
+# ==================== ДИНАМИЧЕСКОЕ ПЛЕЧО ====================
+
+def calculate_dynamic_leverage(balance: float, leverage_mode: str = 'auto', max_leverage: int = 50) -> int:
+    """
+    Рассчитывает оптимальное плечо на основе размера депозита.
+    
+    Режимы:
+        'auto' - Автоматически адаптируется под баланс
+        'conservative' - Консервативный (меньше плечо)
+        'aggressive' - Агрессивный (больше плечо для роста)
+        'fixed' - Фиксированное (DEFAULT_LEVERAGE)
+    
+    Логика для 'auto':
+        - $50-100:   50x (высокий риск для быстрого роста)
+        - $100-300:  35x
+        - $300-500:  25x
+        - $500-1000: 20x
+        - $1000+:    15x (консервативно)
+    
+    Returns:
+        int: рекомендуемое плечо
+    """
+    if leverage_mode == 'fixed':
+        return DEFAULT_LEVERAGE
+    
+    if leverage_mode == 'conservative':
+        # Консервативный режим - плечо ниже
+        if balance < 100:
+            leverage = 25
+        elif balance < 300:
+            leverage = 20
+        elif balance < 500:
+            leverage = 15
+        elif balance < 1000:
+            leverage = 12
+        else:
+            leverage = 10
+        return min(leverage, max_leverage)
+    
+    if leverage_mode == 'aggressive':
+        # Агрессивный режим - плечо выше
+        if balance < 100:
+            leverage = 75
+        elif balance < 300:
+            leverage = 50
+        elif balance < 500:
+            leverage = 35
+        elif balance < 1000:
+            leverage = 25
+        else:
+            leverage = 20
+        return min(leverage, max_leverage)
+    
+    # Режим 'auto' - баланс риска и роста
+    if balance < 100:
+        leverage = 50  # Маленький депозит - нужно больше плечо для заработка
+    elif balance < 300:
+        leverage = 35
+    elif balance < 500:
+        leverage = 25
+    elif balance < 1000:
+        leverage = 20
+    else:
+        leverage = 15  # Большой депозит - консервативно
+    
+    return min(leverage, max_leverage)
+
+
+def get_user_leverage(user_id: int, balance: float = None) -> int:
+    """
+    Получает плечо для пользователя с учётом его настроек.
+    
+    Args:
+        user_id: ID пользователя
+        balance: Текущий баланс (если None, берётся из профиля)
+    
+    Returns:
+        int: плечо для использования
+    """
+    try:
+        # Получаем настройки пользователя из БД
+        settings = run_sql("""
+            SELECT leverage_mode, max_leverage 
+            FROM users WHERE user_id = ?
+        """, (user_id,), fetch="one")
+        
+        if settings:
+            leverage_mode = settings.get('leverage_mode') or 'auto'
+            max_leverage = settings.get('max_leverage') or 50
+        else:
+            leverage_mode = 'auto'
+            max_leverage = 50
+        
+        # Если баланс не передан, получаем из профиля
+        if balance is None:
+            user = get_user(user_id)
+            balance = user.get('balance', 0)
+        
+        return calculate_dynamic_leverage(balance, leverage_mode, max_leverage)
+        
+    except Exception as e:
+        logger.warning(f"[LEVERAGE] Error getting user leverage: {e}, using default")
+        return DEFAULT_LEVERAGE
+
+
+def get_leverage_info(balance: float, leverage_mode: str = 'auto') -> dict:
+    """
+    Возвращает информацию о плече для отображения пользователю.
+    """
+    leverage = calculate_dynamic_leverage(balance, leverage_mode)
+    
+    # Определяем уровень риска
+    if leverage >= 50:
+        risk_level = "🔴 Высокий"
+        risk_desc = "Агрессивный рост, высокий риск ликвидации"
+    elif leverage >= 30:
+        risk_level = "🟠 Повышенный"
+        risk_desc = "Умеренно агрессивный"
+    elif leverage >= 20:
+        risk_level = "🟡 Средний"
+        risk_desc = "Сбалансированный риск/доход"
+    else:
+        risk_level = "🟢 Низкий"
+        risk_desc = "Консервативная торговля"
+    
+    return {
+        'leverage': leverage,
+        'risk_level': risk_level,
+        'risk_desc': risk_desc,
+        'mode': leverage_mode
+    }
+
 
 # ==================== АВТО-ТОРГОВЛЯ ====================
 AUTO_TRADE_ENABLED = True  # Включить автоматическое принятие сделок
@@ -4603,12 +5068,28 @@ def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0
     - Корректировка на волатильность (высокий ATR = меньше позиция)
     - Уменьшение после серии убытков
     - Профессиональный риск-менеджмент
+    - ДИНАМИЧЕСКОЕ ПЛЕЧО для маленьких депозитов
     
     Returns:
         (bet_amount, leverage)
     """
-    # Базовое плечо (фиксированное для предсказуемости)
-    leverage = LEVERAGE  # Используем глобальное плечо
+    # === ДИНАМИЧЕСКОЕ ПЛЕЧО ===
+    if user_id:
+        leverage = get_user_leverage(user_id, balance)
+    else:
+        leverage = calculate_dynamic_leverage(balance)
+    
+    # === КОРРЕКТИРОВКА ДЛЯ МАЛЕНЬКИХ ДЕПОЗИТОВ ===
+    # Для депозитов < $200 увеличиваем процент ставки, чтобы сделки были значимыми
+    small_deposit_multiplier = 1.0
+    if balance < 100:
+        small_deposit_multiplier = 1.8  # +80% для совсем маленьких депозитов
+        logger.info(f"[BET] Small deposit < $100: bet +80%")
+    elif balance < 200:
+        small_deposit_multiplier = 1.5  # +50% для маленьких депозитов
+        logger.info(f"[BET] Small deposit < $200: bet +50%")
+    elif balance < 300:
+        small_deposit_multiplier = 1.25  # +25%
     
     # === ДИНАМИЧЕСКИЙ РАЗМЕР ПОСЛЕ УБЫТКОВ ===
     loss_streak_multiplier = 1.0
@@ -4671,18 +5152,19 @@ def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0
             # Низкая-нормальная волатильность - увеличить на 10%
             volatility_multiplier = 1.1
     
-    # Применяем корректировки: волатильность и серия убытков
-    bet_percent = bet_percent * volatility_multiplier * loss_streak_multiplier
+    # Применяем корректировки: волатильность, серия убытков, и маленькие депозиты
+    bet_percent = bet_percent * volatility_multiplier * loss_streak_multiplier * small_deposit_multiplier
     
     bet = balance * bet_percent
     
     # Ограничения
     bet = max(AUTO_TRADE_MIN_BET, min(AUTO_TRADE_MAX_BET, bet))
     
-    # Не ставить больше 20% баланса за раз (защита от слива)
-    bet = min(bet, balance * 0.20)
+    # Для маленьких депозитов: можно ставить до 30% (больше агрессии для роста)
+    max_bet_percent = 0.30 if balance < 200 else 0.25 if balance < 500 else 0.20
+    bet = min(bet, balance * max_bet_percent)
     
-    logger.info(f"[BET] Confidence={confidence}%, ATR={atr_percent:.2f}%, vol_mult={volatility_multiplier}, loss_mult={loss_streak_multiplier}, bet=${bet:.0f}")
+    logger.info(f"[BET] Confidence={confidence}%, ATR={atr_percent:.2f}%, vol_mult={volatility_multiplier}, loss_mult={loss_streak_multiplier}, small_mult={small_deposit_multiplier}, leverage=x{leverage}, bet=${bet:.0f}")
     
     return round(bet, 0), leverage
 
@@ -5257,79 +5739,40 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # === ПОКАЗЫВАЕМ "ОТКРЫВАЕМ..." ===
     await query.edit_message_text(f"<b>⏳ Открываем</b>\n\n{ticker} | {direction} | <b>${amount:.2f}</b>", parse_mode="HTML")
 
-    # === ХЕДЖИРОВАНИЕ: СНАЧАЛА открываем на Bybit ===
-    bybit_qty = 0
+    # Комиссия за открытие
+    commission = amount * (COMMISSION_PERCENT / 100)
     hedging_enabled = await is_hedging_enabled()
     
-    if hedging_enabled:
-        hedge_result = await hedge_open(0, symbol, direction, amount * LEVERAGE, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3)
-        if hedge_result:
-            bybit_qty = hedge_result.get('qty', 0)
-            logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
-            
-            # === ВЕРИФИКАЦИЯ: проверяем что позиция реально открылась на Bybit ===
-            await asyncio.sleep(0.5)  # Даём Bybit время на обработку
+    # === ДИНАМИЧЕСКОЕ ПЛЕЧО ===
+    user_leverage = get_user_leverage(user_id, user['balance'])
+    logger.info(f"[TRADE] Using dynamic leverage x{user_leverage} for user {user_id} (balance=${user['balance']:.2f})")
+    
+    # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
+    existing = None
+    for p in user_positions:
+        if p['symbol'] == symbol and p['direction'] == direction:
+            existing = p
+            break
+
+    if existing:
+        # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
+        if hedging_enabled and existing.get('bybit_qty', 0) > 0:
             bybit_pos = await hedger.get_position_data(symbol)
             if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                logger.error(f"[HEDGE] ❌ VERIFICATION FAILED: Bybit position not found after open!")
-                # Позиция не появилась - отменяем
-                await query.edit_message_text(
-                    f"<b>❌ Ошибка открытия</b>\n\n"
-                    f"Bybit не подтвердил позицию.\n"
-                    f"Попробуйте ещё раз.",
-                    parse_mode="HTML"
-                )
-                return
-            
-            # Сохраняем РЕАЛЬНЫЙ размер с Bybit (может отличаться из-за округления)
-            real_bybit_qty = float(bybit_pos.get('size', 0))
-            if real_bybit_qty > 0 and abs(real_bybit_qty - bybit_qty) / bybit_qty > 0.01:  # Разница > 1%
-                logger.info(f"[HEDGE] Correcting qty: calculated={bybit_qty}, real={real_bybit_qty}")
-                bybit_qty = real_bybit_qty
-            
-            # Успешно открыто на Bybit - инкрементируем статистику
-            increment_bybit_opened()
-        else:
-            # Bybit не открыл позицию - НЕ создаём в боте
-            logger.error(f"[HEDGE] ❌ Failed to open on Bybit - aborting trade")
-            await query.edit_message_text(
-                f"<b>❌ Ошибка открытия</b>\n\n"
-                f"Не удалось открыть позицию на Bybit.\n"
-                f"Проверьте баланс и настройки API.",
-                parse_mode="HTML"
-            )
-            return
+                logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
+                existing = None  # Создаём новую позицию вместо усреднения
 
-    # Комиссия за открытие (только после успешного открытия на Bybit)
-    commission = amount * (COMMISSION_PERCENT / 100)
+    # === НОВЫЙ ПОДХОД: DB FIRST, BYBIT SECOND ===
+    # 1. Создаём PENDING позицию в БД
+    # 2. Списываем баланс
+    # 3. Открываем на Bybit
+    # 4. Если успех - обновляем позицию (state=OPEN, bybit_qty)
+    # 5. Если ошибка - удаляем позицию и возвращаем баланс
     
-    # Защита от race conditions при изменении баланса
-    async with get_user_lock(user_id):
-        user = get_user(user_id)  # Re-read with lock
-        user['balance'] -= amount
-        user['balance'] = sanitize_balance(user['balance'])  # Security: ensure non-negative
-        save_user(user_id)  # Сохраняем в БД
-
-    # Добавляем комиссию в накопитель (авто-вывод) с учетом рефералов
-    await add_commission(commission, user_id=user_id)
-
-    # === СОЗДАЁМ ПОЗИЦИЮ С ЗАЩИТОЙ ОТ ПОТЕРИ ДЕНЕГ ===
+    pending_pos_id = None
+    bybit_qty = 0
+    
     try:
-        # === ПРОВЕРЯЕМ ЕСТЬ ЛИ УЖЕ ПОЗИЦИЯ С ТАКИМ СИМВОЛОМ И НАПРАВЛЕНИЕМ ===
-        existing = None
-        for p in user_positions:
-            if p['symbol'] == symbol and p['direction'] == direction:
-                existing = p
-                break
-
-        if existing:
-            # === ПРОВЕРЯЕМ СИНХРОНИЗАЦИЮ С BYBIT ===
-            if hedging_enabled and existing.get('bybit_qty', 0) > 0:
-                bybit_pos = await hedger.get_position_data(symbol)
-                if not bybit_pos or bybit_pos.get('size', 0) == 0:
-                    logger.warning(f"[TRADE] Existing position {symbol} not found on Bybit, creating as new")
-                    existing = None  # Создаём новую позицию вместо усреднения
-            
         if existing:
             # === ДОБАВЛЯЕМ К СУЩЕСТВУЮЩЕЙ ПОЗИЦИИ ===
             old_amount = existing['amount']
@@ -5338,33 +5781,81 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             # Weighted average entry price
             new_entry = (existing['entry'] * old_amount + entry * amount) / new_amount
             
-            # Добавляем qty к существующему
-            new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
+            # Списываем баланс СНАЧАЛА
+            async with get_user_lock(user_id):
+                user = get_user(user_id)
+                user['balance'] -= amount
+                user['balance'] = sanitize_balance(user['balance'])
+                save_user(user_id)
             
-            # Обновляем позицию
+            # Добавляем комиссию
+            await add_commission(commission, user_id=user_id)
+            
+            # === ТЕПЕРЬ ОТКРЫВАЕМ НА BYBIT (если включено) ===
+            if hedging_enabled:
+                hedge_result = await hedge_open(0, symbol, direction, amount * user_leverage, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3, leverage=user_leverage)
+                if hedge_result:
+                    bybit_qty = hedge_result.get('qty', 0)
+                    logger.info(f"[HEDGE] ✓ Added to hedge on Bybit: qty={bybit_qty}")
+                    
+                    # Верификация
+                    await asyncio.sleep(0.5)
+                    bybit_pos = await hedger.get_position_data(symbol)
+                    if bybit_pos and bybit_pos.get('size', 0) > 0:
+                        real_bybit_qty = float(bybit_pos.get('size', 0))
+                        # Сохраняем разницу если она > 1%
+                        if existing.get('bybit_qty', 0) > 0:
+                            bybit_qty = real_bybit_qty - existing.get('bybit_qty', 0)
+                            if bybit_qty < 0:
+                                bybit_qty = 0
+                        increment_bybit_opened()
+                    else:
+                        logger.warning(f"[HEDGE] Position verification warning, using calculated qty")
+                else:
+                    # Bybit ошибка - возвращаем деньги и отменяем
+                    logger.error(f"[HEDGE] ❌ Failed to add to position on Bybit")
+                    async with get_user_lock(user_id):
+                        user = get_user(user_id)
+                        user['balance'] += amount
+                        user['balance'] = sanitize_balance(user['balance'])
+                        save_user(user_id)
+                    await query.edit_message_text(
+                        f"<b>❌ Ошибка открытия</b>\n\n"
+                        f"Не удалось добавить к позиции на Bybit.\n"
+                        f"Деньги возвращены.",
+                        parse_mode="HTML"
+                    )
+                    return
+            
+            # Обновляем позицию в БД
+            new_bybit_qty = existing.get('bybit_qty', 0) + bybit_qty
             existing['amount'] = new_amount
             existing['entry'] = new_entry
             existing['commission'] = existing.get('commission', 0) + commission
             existing['bybit_qty'] = new_bybit_qty
-            # Пересчитываем PnL
             existing['pnl'] = -existing['commission']
             
-            # Обновляем в БД
             db_update_position(existing['id'], 
-                amount=new_amount, 
-                entry=new_entry, 
-                commission=existing['commission'],
+                amount=new_amount,
                 bybit_qty=new_bybit_qty,
                 pnl=existing['pnl']
             )
             
             pos_id = existing['id']
             logger.info(f"[TRADE] User {user_id} added ${amount} to existing {direction} {symbol}, total=${new_amount}")
-            
-            # Обновляем кэш после изменения позиции
             positions_cache.set(user_id, db_get_positions(user_id))
+            
         else:
-            # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ С ТРЕМЯ TP ===
+            # === СОЗДАЁМ НОВУЮ ПОЗИЦИЮ ===
+            
+            # 1. Списываем баланс СНАЧАЛА
+            async with get_user_lock(user_id):
+                user = get_user(user_id)
+                user['balance'] -= amount
+                user['balance'] = sanitize_balance(user['balance'])
+                save_user(user_id)
+            
+            # 2. Создаём PENDING позицию в БД (bybit_qty=0, state=PENDING)
             position = {
                 'symbol': symbol,
                 'direction': direction,
@@ -5372,26 +5863,91 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 'entry': entry,
                 'current': entry,
                 'sl': sl,
-                'tp': tp1,  # Основной TP = TP1
+                'tp': tp1,
                 'tp1': tp1,
                 'tp2': tp2,
                 'tp3': tp3,
-                'tp1_hit': False,  # Флаги частичных тейков
+                'tp1_hit': False,
                 'tp2_hit': False,
                 'pnl': -commission,
                 'commission': commission,
-                'bybit_qty': bybit_qty,
-                'realized_pnl': 0,  # Реализованный P&L для этой позиции
-                'original_amount': amount  # Для расчёта частичных закрытий
+                'bybit_qty': 0,  # Пока 0 - обновим после Bybit
+                'realized_pnl': 0,
+                'original_amount': amount
             }
-
-            pos_id = db_add_position(user_id, position)
-            position['id'] = pos_id
-
-            # Обновляем кэш - загружаем все позиции из БД
+            
+            # Создаём в состоянии PENDING (или OPEN если хеджинг выключен)
+            initial_state = 'PENDING' if hedging_enabled else 'OPEN'
+            pending_pos_id = db_add_position(user_id, position, state=initial_state)
+            position['id'] = pending_pos_id
+            logger.info(f"[TRADE] Created PENDING position {pending_pos_id} for user {user_id}")
+            
+            # 3. Добавляем комиссию
+            await add_commission(commission, user_id=user_id)
+            
+            # 4. Открываем на Bybit (если включено) с динамическим плечом
+            if hedging_enabled:
+                hedge_result = await hedge_open(0, symbol, direction, amount * user_leverage, sl=sl, tp1=tp1, tp2=tp2, tp3=tp3, leverage=user_leverage)
+                
+                if hedge_result:
+                    bybit_qty = hedge_result.get('qty', 0)
+                    logger.info(f"[HEDGE] ✓ Hedged on Bybit: qty={bybit_qty}, partial TPs created")
+                    
+                    # Верификация
+                    await asyncio.sleep(0.5)
+                    bybit_pos = await hedger.get_position_data(symbol)
+                    if not bybit_pos or bybit_pos.get('size', 0) == 0:
+                        logger.error(f"[HEDGE] ❌ VERIFICATION FAILED: Bybit position not found!")
+                        # Позиция не появилась - удаляем PENDING и возвращаем деньги
+                        run_sql("DELETE FROM positions WHERE id = ?", (pending_pos_id,))
+                        async with get_user_lock(user_id):
+                            user = get_user(user_id)
+                            user['balance'] += amount
+                            user['balance'] = sanitize_balance(user['balance'])
+                            save_user(user_id)
+                        positions_cache.set(user_id, db_get_positions(user_id))
+                        await query.edit_message_text(
+                            f"<b>❌ Ошибка открытия</b>\n\n"
+                            f"Bybit не подтвердил позицию.\n"
+                            f"Деньги возвращены.",
+                            parse_mode="HTML"
+                        )
+                        return
+                    
+                    # Сохраняем РЕАЛЬНЫЙ размер
+                    real_bybit_qty = float(bybit_pos.get('size', 0))
+                    if real_bybit_qty > 0 and bybit_qty > 0 and abs(real_bybit_qty - bybit_qty) / bybit_qty > 0.01:
+                        logger.info(f"[HEDGE] Correcting qty: calculated={bybit_qty}, real={real_bybit_qty}")
+                        bybit_qty = real_bybit_qty
+                    
+                    increment_bybit_opened()
+                    
+                    # 5. Обновляем позицию: state=OPEN, bybit_qty
+                    db_update_position(pending_pos_id, bybit_qty=bybit_qty, state='OPEN')
+                    logger.info(f"[TRADE] Position {pending_pos_id} updated to OPEN with bybit_qty={bybit_qty}")
+                    
+                else:
+                    # Bybit ошибка - удаляем PENDING позицию и возвращаем деньги
+                    logger.error(f"[HEDGE] ❌ Failed to open on Bybit - rolling back")
+                    run_sql("DELETE FROM positions WHERE id = ?", (pending_pos_id,))
+                    async with get_user_lock(user_id):
+                        user = get_user(user_id)
+                        user['balance'] += amount
+                        user['balance'] = sanitize_balance(user['balance'])
+                        save_user(user_id)
+                    positions_cache.set(user_id, db_get_positions(user_id))
+                    await query.edit_message_text(
+                        f"<b>❌ Ошибка открытия</b>\n\n"
+                        f"Не удалось открыть позицию на Bybit.\n"
+                        f"Деньги возвращены.",
+                        parse_mode="HTML"
+                    )
+                    return
+            
+            pos_id = pending_pos_id
             positions_cache.set(user_id, db_get_positions(user_id))
             
-            logger.info(f"[TRADE] ✅ Позиция открыта: User {user_id} {direction} {symbol} ${amount:.2f}, TP1={tp1:.4f}, TP2={tp2:.4f}, TP3={tp3:.4f}")
+            logger.info(f"[TRADE] ✅ Позиция открыта: User {user_id} {direction} {symbol} ${amount:.2f}, bybit_qty={bybit_qty}")
             
             # Comprehensive logging
             trade_logger.log_trade_open(
@@ -5399,15 +5955,33 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 amount=amount, entry=entry, sl=sl, tp=tp1,
                 bybit_qty=bybit_qty, position_id=pos_id
             )
+            
     except Exception as e:
-        # КРИТИЧЕСКАЯ ОШИБКА: позиция не создалась, возвращаем деньги
-        logger.critical(f"[TRADE] ❌ CRITICAL: Position creation failed for user {user_id}, restoring ${amount}! Error: {e}")
-        async with get_user_lock(user_id):
-            user = get_user(user_id)
-            user['balance'] += amount  # Возвращаем деньги
-            user['balance'] = sanitize_balance(user['balance'])
-            save_user(user_id)
-        trade_logger.log_error(f"Position creation failed, restored ${amount} to user {user_id}", error=e, user_id=user_id)
+        # КРИТИЧЕСКАЯ ОШИБКА
+        logger.critical(f"[TRADE] ❌ CRITICAL ERROR for user {user_id}: {e}")
+        
+        # Пытаемся откатить всё
+        try:
+            if pending_pos_id:
+                run_sql("DELETE FROM positions WHERE id = ?", (pending_pos_id,))
+                logger.info(f"[TRADE] Deleted PENDING position {pending_pos_id}")
+        except Exception as del_err:
+            logger.error(f"[TRADE] Failed to delete pending position: {del_err}")
+        
+        # Возвращаем деньги
+        try:
+            async with get_user_lock(user_id):
+                user = get_user(user_id)
+                user['balance'] += amount
+                user['balance'] = sanitize_balance(user['balance'])
+                save_user(user_id)
+            logger.info(f"[TRADE] Restored ${amount} to user {user_id}")
+        except Exception as balance_err:
+            logger.critical(f"[TRADE] FAILED to restore balance for user {user_id}: {balance_err}")
+        
+        positions_cache.set(user_id, db_get_positions(user_id))
+        trade_logger.log_error(f"Trade creation failed for user {user_id}", error=e, user_id=user_id)
+        
         await query.edit_message_text(
             f"<b>❌ Ошибка создания позиции</b>\n\n"
             f"Деньги возвращены на баланс.\n"
@@ -5422,7 +5996,10 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     tp3_percent = abs(tp3 - entry) / entry * 100
     sl_percent = abs(sl - entry) / entry * 100
     
-    text = f"""<b>✅ {winrate}%</b> | {ticker} | {dir_text} | x{LEVERAGE}
+    # Показываем информацию о динамическом плече
+    leverage_info = get_leverage_info(user['balance'])
+    
+    text = f"""<b>✅ {winrate}%</b> | {ticker} | {dir_text} | x{user_leverage}
 
 <b>${amount:.2f}</b> открыто
 
@@ -5433,7 +6010,8 @@ TP2: ${tp2:,.2f} (+{tp2_percent:.1f}%) — 30%
 TP3: ${tp3:,.2f} (+{tp3_percent:.1f}%) — 20%
 SL: ${sl:,.2f} (-{sl_percent:.1f}%)
 
-💰 Баланс: ${user['balance']:.2f}"""
+💰 Баланс: ${user['balance']:.2f}
+📊 Плечо: x{user_leverage} {leverage_info['risk_level']}"""
     
     keyboard = [[InlineKeyboardButton("📊 Сделки", callback_data="trades")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -6312,6 +6890,128 @@ async def unknown_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.answer("❌ Неизвестная команда")
     except Exception as e:
         logger.error(f"[UNKNOWN] Error handling unknown callback: {e}", exc_info=True)
+
+# ==================== WEBSOCKET REAL-TIME SYNC ====================
+
+async def handle_websocket_sync(event_type: str, data: dict):
+    """
+    Обрабатывает события синхронизации от WebSocket.
+    Мгновенно обновляет позиции в боте при изменениях на Bybit.
+    """
+    try:
+        symbol = data.get('symbol', '')
+        
+        # Конвертируем формат символа: BTCUSDT -> BTC/USDT
+        if symbol and not '/' in symbol and symbol.endswith('USDT'):
+            symbol = symbol[:-4] + '/USDT'
+        
+        logger.info(f"[WS_SYNC] Event: {event_type}, symbol: {symbol}, data: {data}")
+        
+        if event_type == 'POSITION_CLOSED':
+            # Позиция закрылась на Bybit - нужно закрыть в боте
+            realised_pnl = data.get('realised_pnl', 0)
+            
+            # Ищем позицию во всех пользователях
+            all_users = run_sql("SELECT DISTINCT user_id FROM positions WHERE symbol = ?", (symbol,), fetch="all")
+            
+            for user_row in all_users:
+                user_id = user_row['user_id']
+                user_positions = get_positions(user_id)
+                
+                for pos in user_positions:
+                    if pos['symbol'] == symbol and pos.get('bybit_qty', 0) > 0:
+                        # Эта позиция была на Bybit и теперь закрыта
+                        logger.info(f"[WS_SYNC] Closing position {pos['id']} for user {user_id} via WebSocket")
+                        
+                        # Получаем реальный PnL с Bybit
+                        real_pnl = realised_pnl if realised_pnl != 0 else pos.get('pnl', 0)
+                        exit_price = pos.get('current', pos['entry'])
+                        
+                        # Возвращаем деньги пользователю
+                        returned = pos['amount'] + real_pnl
+                        async with get_user_lock(user_id):
+                            user = get_user(user_id)
+                            user['balance'] = sanitize_balance(user['balance'] + returned)
+                            user['total_profit'] += real_pnl
+                            save_user(user_id)
+                        
+                        # Определяем причину закрытия
+                        reason = "TP" if real_pnl > 0 else "SL"
+                        
+                        # Закрываем в БД атомарно
+                        db_close_position(pos['id'], exit_price, real_pnl, f'WS_{reason}')
+                        
+                        # Обновляем кэш
+                        updated_positions = [p for p in user_positions if p.get('id') != pos['id']]
+                        update_positions_cache(user_id, updated_positions)
+                        
+                        # Закрываем связанные авто-позиции
+                        if pos['entry'] > 0 and pos['amount'] > 0:
+                            pnl_percent = real_pnl / (pos['amount'] * LEVERAGE)
+                            await close_linked_auto_positions(
+                                symbol=pos['symbol'],
+                                direction=pos['direction'],
+                                exit_price=exit_price,
+                                pnl_percent=pnl_percent,
+                                reason=reason,
+                                exclude_user_id=user_id
+                            )
+                        
+                        logger.info(f"[WS_SYNC] ✅ Position {pos['id']} closed via WebSocket, PnL=${real_pnl:.2f}")
+                        break
+        
+        elif event_type == 'EXECUTION':
+            # Исполнение ордера (частичное или полное закрытие)
+            exec_qty = data.get('exec_qty', 0)
+            closed_pnl = data.get('closed_pnl', 0)
+            reason = data.get('reason', 'TRADE')
+            exec_price = data.get('exec_price', 0)
+            
+            logger.info(f"[WS_SYNC] Execution: {symbol} qty={exec_qty} pnl={closed_pnl} reason={reason}")
+            
+            # Если это частичный тейк (TP), нужно обновить bybit_qty
+            if reason in ['TP', 'TRADE'] and exec_qty > 0:
+                all_users = run_sql("SELECT DISTINCT user_id FROM positions WHERE symbol = ?", (symbol,), fetch="all")
+                
+                for user_row in all_users:
+                    user_id = user_row['user_id']
+                    user_positions = get_positions(user_id)
+                    
+                    for pos in user_positions:
+                        if pos['symbol'] == symbol and pos.get('bybit_qty', 0) > 0:
+                            # Обновляем bybit_qty
+                            new_qty = pos.get('bybit_qty', 0) - exec_qty
+                            if new_qty < 0:
+                                new_qty = 0
+                            
+                            # Добавляем к realized_pnl
+                            new_realized_pnl = pos.get('realized_pnl', 0) + closed_pnl
+                            
+                            db_update_position(pos['id'], 
+                                bybit_qty=new_qty,
+                                realized_pnl=new_realized_pnl
+                            )
+                            
+                            logger.info(f"[WS_SYNC] Updated position {pos['id']}: bybit_qty={new_qty}, realized_pnl={new_realized_pnl}")
+                            
+                            # Если qty стало 0, позиция полностью закрыта
+                            if new_qty == 0:
+                                logger.info(f"[WS_SYNC] Position {pos['id']} fully closed (qty=0)")
+                            break
+        
+        elif event_type == 'POSITION_UPDATED':
+            # Обновление позиции (новая цена, PnL)
+            size = data.get('size', 0)
+            entry_price = data.get('entry_price', 0)
+            unrealised_pnl = data.get('unrealised_pnl', 0)
+            
+            # Можно использовать для real-time обновления PnL в боте
+            # Пока просто логируем
+            logger.debug(f"[WS_SYNC] Position update: {symbol} size={size} uPnL={unrealised_pnl}")
+            
+    except Exception as e:
+        logger.error(f"[WS_SYNC] Error handling {event_type}: {e}", exc_info=True)
+
 
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
 @isolate_errors
@@ -9104,6 +9804,10 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(auto_trade_set_daily, pattern="^auto_daily_"))
     app.add_handler(CallbackQueryHandler(auto_trade_winrate_menu, pattern="^auto_trade_winrate_menu$"))
     app.add_handler(CallbackQueryHandler(auto_trade_set_winrate, pattern="^auto_wr_"))
+    app.add_handler(CallbackQueryHandler(leverage_menu, pattern="^leverage_menu$"))
+    app.add_handler(CallbackQueryHandler(leverage_set_mode, pattern="^leverage_mode_"))
+    app.add_handler(CallbackQueryHandler(leverage_max_menu, pattern="^leverage_max_menu$"))
+    app.add_handler(CallbackQueryHandler(leverage_set_max, pattern="^leverage_max_"))
     app.add_handler(CallbackQueryHandler(close_symbol_trades, pattern="^close_symbol\\|"))
     app.add_handler(CallbackQueryHandler(deposit_menu, pattern="^deposit$"))
     app.add_handler(CallbackQueryHandler(pay_stars_menu, pattern="^pay_stars$"))
@@ -9236,6 +9940,45 @@ def main() -> None:
         app.job_queue.run_repeating(auto_optimizer_job, interval=14400, first=300)  # 4 hours, start after 5 min
         
         logger.info("[JOBS] All periodic tasks registered")
+        
+        # === WEBSOCKET REAL-TIME SYNC ===
+        async def init_websocket_sync(context):
+            """Initialize WebSocket for real-time position sync"""
+            try:
+                if not WEBSOCKETS_AVAILABLE:
+                    logger.warning("[WS] WebSocket library not available, using polling only")
+                    return
+                
+                api_key = os.getenv("BYBIT_API_KEY", "")
+                api_secret = os.getenv("BYBIT_API_SECRET", "")
+                
+                if not api_key or not api_secret:
+                    logger.warning("[WS] Bybit API keys not set, WebSocket sync disabled")
+                    return
+                
+                testnet = os.getenv("BYBIT_TESTNET", "").lower() in ("true", "1", "yes")
+                demo = os.getenv("BYBIT_DEMO", "").lower() in ("true", "1", "yes")
+                
+                # Инициализируем WebSocket
+                ws = await init_bybit_websocket(api_key, api_secret, testnet, demo)
+                if not ws:
+                    logger.warning("[WS] Failed to initialize WebSocket")
+                    return
+                
+                # Добавляем callback для синхронизации позиций
+                position_sync = get_position_sync()
+                if position_sync:
+                    position_sync.add_sync_callback(handle_websocket_sync)
+                
+                # Запускаем WebSocket в фоне
+                await start_websocket_sync()
+                logger.info("[WS] Real-time position sync started")
+                
+            except Exception as e:
+                logger.error(f"[WS] Init error: {e}")
+        
+        # Запускаем WebSocket через 5 секунд после старта
+        app.job_queue.run_once(init_websocket_sync, when=5)
     else:
         logger.warning("[JOBS] JobQueue NOT available!")
     
