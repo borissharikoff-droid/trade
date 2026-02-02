@@ -7,13 +7,17 @@ import os
 import json
 import logging
 import asyncio
+import aiohttp
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 from collections import deque
 import hashlib
 
 logger = logging.getLogger(__name__)
+
+# Price tracking for news impact
+_news_price_tracker: Dict[str, Dict] = {}  # news_id -> {timestamp, coins, prices_before, checked}
 
 # DeepSeek API Configuration
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-b2c365a48862461fb4f9ea74887a3f5c")
@@ -892,3 +896,234 @@ def get_ai_stats() -> Dict:
     """Получить статистику AI"""
     analyzer = get_ai_analyzer()
     return analyzer.get_stats()
+
+
+# ==================== NEWS PRICE TRACKING ====================
+
+async def fetch_coin_price(symbol: str) -> Optional[float]:
+    """Получить текущую цену монеты через Binance API"""
+    try:
+        # Нормализуем символ
+        clean_symbol = symbol.upper().replace('/', '').replace('USDT', '') + 'USDT'
+        
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.binance.com/api/v3/ticker/price?symbol={clean_symbol}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return float(data.get('price', 0))
+    except Exception as e:
+        logger.debug(f"[AI] Price fetch error for {symbol}: {e}")
+    return None
+
+
+async def fetch_btc_price() -> Optional[float]:
+    """Получить цену BTC как основной индикатор рынка"""
+    return await fetch_coin_price('BTCUSDT')
+
+
+async def track_news_for_impact(news_event) -> None:
+    """
+    Начать отслеживание новости для последующего анализа влияния на цену.
+    Вызывается когда приходит новая новость из RSS.
+    """
+    global _news_price_tracker
+    
+    try:
+        news_id = news_event.id if hasattr(news_event, 'id') else str(hash(str(news_event)))
+        
+        # Проверяем, не отслеживаем ли уже эту новость
+        if news_id in _news_price_tracker:
+            return
+        
+        # Получаем затронутые монеты
+        coins = []
+        if hasattr(news_event, 'affected_coins'):
+            coins = news_event.affected_coins[:5]  # Максимум 5 монет
+        
+        # Если нет конкретных монет, используем BTC как индикатор
+        if not coins:
+            coins = ['BTC']
+        
+        # Получаем текущие цены
+        prices_before = {}
+        for coin in coins:
+            price = await fetch_coin_price(coin)
+            if price:
+                prices_before[coin] = price
+        
+        # Всегда добавляем BTC для общего контекста
+        if 'BTC' not in prices_before:
+            btc_price = await fetch_btc_price()
+            if btc_price:
+                prices_before['BTC'] = btc_price
+        
+        if not prices_before:
+            logger.debug(f"[AI] Could not fetch prices for news tracking: {news_id[:8]}")
+            return
+        
+        # Сохраняем для отслеживания
+        _news_price_tracker[news_id] = {
+            'news_id': news_id,
+            'title': news_event.title if hasattr(news_event, 'title') else str(news_event),
+            'source': news_event.source if hasattr(news_event, 'source') else 'Unknown',
+            'sentiment': news_event.sentiment.name if hasattr(news_event, 'sentiment') else 'NEUTRAL',
+            'coins': coins,
+            'prices_before': prices_before,
+            'timestamp': datetime.now().isoformat(),
+            'checked': False
+        }
+        
+        logger.info(f"[AI] 📰 Tracking news impact: {_news_price_tracker[news_id]['title'][:50]}... ({len(prices_before)} coins)")
+        
+        # Ограничиваем размер трекера
+        if len(_news_price_tracker) > 100:
+            # Удаляем самые старые
+            oldest_keys = sorted(_news_price_tracker.keys(), 
+                               key=lambda k: _news_price_tracker[k]['timestamp'])[:20]
+            for k in oldest_keys:
+                del _news_price_tracker[k]
+                
+    except Exception as e:
+        logger.warning(f"[AI] Error tracking news: {e}")
+
+
+async def check_news_impacts() -> List[Dict]:
+    """
+    Проверить влияние отслеживаемых новостей (вызывается периодически).
+    Сравнивает цены до и после новости, отправляет на AI анализ.
+    """
+    global _news_price_tracker
+    
+    analyzed = []
+    analyzer = get_ai_analyzer()
+    
+    try:
+        current_time = datetime.now()
+        to_remove = []
+        
+        for news_id, data in list(_news_price_tracker.items()):
+            try:
+                # Пропускаем уже проверенные
+                if data.get('checked'):
+                    # Удаляем старые проверенные (>1 час)
+                    news_time = datetime.fromisoformat(data['timestamp'])
+                    if (current_time - news_time).total_seconds() > 3600:
+                        to_remove.append(news_id)
+                    continue
+                
+                # Проверяем только новости старше 15-30 минут
+                news_time = datetime.fromisoformat(data['timestamp'])
+                age_minutes = (current_time - news_time).total_seconds() / 60
+                
+                if age_minutes < 15:
+                    continue  # Слишком рано
+                
+                if age_minutes > 120:
+                    # Слишком старые - удаляем
+                    to_remove.append(news_id)
+                    continue
+                
+                # Получаем текущие цены
+                prices_after = {}
+                for coin in data['coins']:
+                    price = await fetch_coin_price(coin)
+                    if price:
+                        prices_after[coin] = price
+                
+                if 'BTC' not in prices_after:
+                    btc_price = await fetch_btc_price()
+                    if btc_price:
+                        prices_after['BTC'] = btc_price
+                
+                if not prices_after:
+                    continue
+                
+                # Рассчитываем изменения цен
+                price_changes = {}
+                for coin, price_before in data['prices_before'].items():
+                    if coin in prices_after:
+                        price_after = prices_after[coin]
+                        change_pct = ((price_after - price_before) / price_before) * 100
+                        price_changes[coin] = {
+                            'before': price_before,
+                            'after': price_after,
+                            'change_percent': round(change_pct, 2)
+                        }
+                
+                if not price_changes:
+                    continue
+                
+                # Определяем основное изменение (по первой монете или BTC)
+                main_coin = data['coins'][0] if data['coins'] else 'BTC'
+                if main_coin not in price_changes:
+                    main_coin = 'BTC'
+                
+                main_change = price_changes.get(main_coin, {})
+                price_before = main_change.get('before', 0)
+                price_after = main_change.get('after', 0)
+                
+                if price_before <= 0:
+                    continue
+                
+                # Отправляем на AI анализ
+                news_dict = {
+                    'title': data['title'],
+                    'source': data['source'],
+                    'affected_coins': data['coins'],
+                    'timestamp': data['timestamp'],
+                    'predicted_direction': data['sentiment']  # Исходный сентимент как предсказание
+                }
+                
+                impact = await analyzer.analyze_news_impact(news_dict, price_before, price_after)
+                
+                if impact:
+                    analyzed.append({
+                        'news_id': news_id,
+                        'title': data['title'][:80],
+                        'source': data['source'],
+                        'price_changes': price_changes,
+                        'main_change': main_change.get('change_percent', 0),
+                        'ai_analysis': {
+                            'actual_direction': impact.actual_direction,
+                            'patterns': impact.patterns_identified[:3]
+                        }
+                    })
+                    logger.info(f"[AI] 📊 News impact analyzed: {data['title'][:40]}... -> {impact.actual_direction} ({main_change.get('change_percent', 0):+.2f}%)")
+                
+                # Помечаем как проверенную
+                _news_price_tracker[news_id]['checked'] = True
+                _news_price_tracker[news_id]['prices_after'] = prices_after
+                _news_price_tracker[news_id]['impact_analyzed'] = True
+                
+            except Exception as e:
+                logger.warning(f"[AI] Error checking news impact {news_id[:8]}: {e}")
+        
+        # Удаляем старые записи
+        for news_id in to_remove:
+            del _news_price_tracker[news_id]
+            
+    except Exception as e:
+        logger.error(f"[AI] Error in check_news_impacts: {e}")
+    
+    return analyzed
+
+
+def get_tracked_news_count() -> int:
+    """Получить количество отслеживаемых новостей"""
+    return len(_news_price_tracker)
+
+
+def get_pending_news_analysis() -> List[Dict]:
+    """Получить список новостей ожидающих анализа"""
+    pending = []
+    for news_id, data in _news_price_tracker.items():
+        if not data.get('checked'):
+            pending.append({
+                'news_id': news_id[:8],
+                'title': data['title'][:60],
+                'source': data['source'],
+                'coins': data['coins'],
+                'timestamp': data['timestamp']
+            })
+    return pending

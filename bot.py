@@ -86,7 +86,10 @@ try:
         analyze_news as ai_analyze_news,
         predict_news as ai_predict_news,
         daily_insights as ai_daily_insights,
-        get_ai_stats
+        get_ai_stats,
+        track_news_for_impact,
+        check_news_impacts,
+        get_tracked_news_count
     )
     AI_FEATURES = True
     logger.info("[INIT] AI Analyzer loaded: DeepSeek powered learning")
@@ -10447,16 +10450,56 @@ def main() -> None:
         # Новости используются для внутреннего анализа и влияния на сделки
         # + отображаются на дашборде в реальном времени
         if NEWS_FEATURES:
+            # Хранилище для отслеживания новых новостей
+            _last_seen_news_ids = set()
+            
             async def news_fetch_job(context):
                 """Periodically fetch news for dashboard and analysis"""
+                nonlocal _last_seen_news_ids
                 try:
                     await news_analyzer.get_aggregated_signals()
                     logger.debug("[NEWS] Dashboard news updated")
+                    
+                    # AI Integration: отправляем новые новости на отслеживание
+                    if AI_FEATURES:
+                        try:
+                            current_events = list(news_analyzer.recent_events)[-30:]
+                            for event in current_events:
+                                # Проверяем, видели ли уже эту новость
+                                if event.id not in _last_seen_news_ids:
+                                    _last_seen_news_ids.add(event.id)
+                                    # Начинаем отслеживание влияния на цену
+                                    await track_news_for_impact(event)
+                            
+                            # Ограничиваем размер множества
+                            if len(_last_seen_news_ids) > 500:
+                                _last_seen_news_ids = set(list(_last_seen_news_ids)[-300:])
+                        except Exception as ai_err:
+                            logger.debug(f"[NEWS] AI tracking error: {ai_err}")
+                            
                 except Exception as e:
                     logger.warning(f"[NEWS] Fetch error: {e}")
             
             app.job_queue.run_repeating(news_fetch_job, interval=120, first=15)  # Every 2 min, start after 15s
             logger.info("[INIT] News analyzer enabled (dashboard + internal analysis)")
+            
+            # === AI NEWS IMPACT ANALYSIS JOB ===
+            if AI_FEATURES:
+                async def ai_news_impact_job(context):
+                    """Check news impacts and send to AI for analysis"""
+                    try:
+                        tracked_count = get_tracked_news_count()
+                        if tracked_count > 0:
+                            logger.debug(f"[AI] Checking impacts for {tracked_count} tracked news...")
+                            analyzed = await check_news_impacts()
+                            if analyzed:
+                                logger.info(f"[AI] 📊 Analyzed {len(analyzed)} news impacts")
+                    except Exception as e:
+                        logger.warning(f"[AI] News impact check error: {e}")
+                
+                # Проверяем каждые 5 минут (новости нужно проверить через 15-30 мин после публикации)
+                app.job_queue.run_repeating(ai_news_impact_job, interval=300, first=180)
+                logger.info("[INIT] AI News Impact analyzer scheduled (every 5 min)")
         
         # === TRADE LOGGER MAINTENANCE JOB ===
         async def logger_maintenance_job(context):

@@ -1110,7 +1110,7 @@ def api_ai():
     try:
         # Try to import AI analyzer
         try:
-            from ai_analyzer import get_ai_analyzer, get_ai_stats
+            from ai_analyzer import get_ai_analyzer, get_ai_stats, get_pending_news_analysis, get_tracked_news_count
             ai_available = True
         except ImportError:
             ai_available = False
@@ -1170,6 +1170,15 @@ def api_ai():
             })
         news_patterns.reverse()
         
+        # Get pending news being tracked for impact analysis
+        pending_news = []
+        tracked_count = 0
+        try:
+            pending_news = get_pending_news_analysis()
+            tracked_count = get_tracked_news_count()
+        except:
+            pass
+        
         return jsonify({
             'available': True,
             'initialized': stats.get('initialized', False),
@@ -1180,13 +1189,15 @@ def api_ai():
                 'trade_patterns_count': stats.get('trade_patterns_count', 0),
                 'news_patterns_count': stats.get('news_patterns_count', 0),
                 'market_insights_count': stats.get('market_insights_count', 0),
-                'prediction_accuracy': round(stats.get('prediction_accuracy', 0.5) * 100, 1)
+                'prediction_accuracy': round(stats.get('prediction_accuracy', 0.5) * 100, 1),
+                'news_tracking_count': tracked_count
             },
             'recent_analyses': recent_analyses,
             'learned_rules': learned_rules,
             'insights': insights,
             'pattern_summary': pattern_summary,
             'news_patterns': news_patterns,
+            'pending_news': pending_news,
             'timestamp': to_moscow_time()
         })
         
