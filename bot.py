@@ -2351,6 +2351,22 @@ rate_limits: Dict[int, Dict] = {}  # Deprecated - kept for compatibility
 # Per-user locks to prevent race conditions on balance operations
 _user_locks: Dict[int, asyncio.Lock] = {}
 
+# ==================== USER INTERACTION TRACKING ====================
+# Track when users last interacted to suppress background notifications
+_user_last_interaction: Dict[int, float] = {}
+NOTIFICATION_SUPPRESS_SECONDS = 3.0  # Подавлять уведомления в течение 3 секунд после взаимодействия
+
+def mark_user_interaction(user_id: int):
+    """Отмечаем что пользователь взаимодействует с ботом"""
+    import time
+    _user_last_interaction[user_id] = time.time()
+
+def should_suppress_notification(user_id: int) -> bool:
+    """Проверяем, нужно ли подавить уведомление (пользователь только что взаимодействовал)"""
+    import time
+    last_interaction = _user_last_interaction.get(user_id, 0)
+    return (time.time() - last_interaction) < NOTIFICATION_SUPPRESS_SECONDS
+
 def isolate_errors(func):
     """Decorator to isolate errors in async functions"""
     async def wrapper(*args, **kwargs):
@@ -4264,11 +4280,16 @@ async def leverage_set_max(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await leverage_menu(update, context)
 
 
-async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE, notify: bool = True) -> int:
     """
     Синхронизация позиций с Bybit - закрывает позиции которые закрылись на бирже.
     Оптимизированная версия с таймаутами и батчингом.
 
+    Args:
+        user_id: ID пользователя
+        context: Telegram context
+        notify: Отправлять ли уведомления о закрытии (False при просмотре сделок)
+        
     Returns:
         Количество синхронизированных (закрытых) позиций
     """
@@ -4387,13 +4408,15 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                 synced += 1
 
                 # Non-blocking notification - с учётом авто-трейда
-                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                is_auto = pos.get('is_auto', False)
-                direction = pos.get('direction', '')
-                asyncio.create_task(_send_sync_notification(
-                    context, user_id, ticker, real_pnl, user['balance'],
-                    is_auto=is_auto, direction=direction
-                ))
+                # Не отправляем уведомления если notify=False (пользователь смотрит сделки)
+                if notify:
+                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    is_auto = pos.get('is_auto', False)
+                    direction = pos.get('direction', '')
+                    asyncio.create_task(_send_sync_notification(
+                        context, user_id, ticker, real_pnl, user['balance'],
+                        is_auto=is_auto, direction=direction
+                    ))
                 
         except Exception as e:
             logger.error(f"[SYNC] Error processing position {pos.get('id')}: {e}")
@@ -4680,6 +4703,10 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         pass
     
     user_id = update.effective_user.id
+    
+    # Подавляем фоновые уведомления во время закрытия
+    mark_user_interaction(user_id)
+    
     user = get_user(user_id)
     user_positions = get_positions(user_id)
     
@@ -4923,6 +4950,9 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not user_id:
             return
         
+        # Отмечаем взаимодействие пользователя - подавляем фоновые уведомления
+        mark_user_interaction(user_id)
+        
         # Answer callback immediately to prevent Telegram timeout
         try:
             await query.answer()
@@ -4939,10 +4969,11 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             user_positions = []
         
         # Background sync - truly non-blocking with fire-and-forget
+        # ВАЖНО: notify=False чтобы не показывать уведомления о закрытии когда пользователь смотрит сделки
         async def background_sync():
             """Background sync - doesn't block user response"""
             try:
-                synced = await asyncio.wait_for(sync_bybit_positions(user_id, context), timeout=3.0)
+                synced = await asyncio.wait_for(sync_bybit_positions(user_id, context, notify=False), timeout=3.0)
                 if synced > 0:
                     positions_cache.set(user_id, db_get_positions(user_id))
             except (asyncio.TimeoutError, Exception):
@@ -6289,6 +6320,9 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     
     user_id = update.effective_user.id
     
+    # Подавляем фоновые уведомления во время закрытия
+    mark_user_interaction(user_id)
+    
     try:
         pos_id = int(query.data.split("_")[1])
     except (ValueError, IndexError):
@@ -6490,6 +6524,10 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     
     user_id = update.effective_user.id
+    
+    # Подавляем фоновые уведомления во время закрытия
+    mark_user_interaction(user_id)
+    
     user = get_user(user_id)
     user_positions = get_positions(user_id)
     
@@ -7221,15 +7259,19 @@ async def handle_websocket_sync(event_type: str, data: dict):
                         logger.info(f"[WS_SYNC] ✅ Position {pos['id']} closed via WebSocket, PnL=${real_pnl:.2f}")
                         
                         # ВАЖНО: Отправляем уведомление пользователю СРАЗУ
-                        try:
-                            ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                            pnl_abs = abs(real_pnl)
-                            is_auto = pos.get('is_auto', False)
-                            
-                            if is_auto:
-                                # Уведомление для авто-трейда
-                                if real_pnl >= 0:
-                                    text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+                        # НО: Подавляем если пользователь только что нажал на кнопку (смотрит сделки)
+                        if should_suppress_notification(user_id):
+                            logger.debug(f"[WS_SYNC] Suppressing notification for user {user_id} - recent interaction")
+                        else:
+                            try:
+                                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                                pnl_abs = abs(real_pnl)
+                                is_auto = pos.get('is_auto', False)
+                                
+                                if is_auto:
+                                    # Уведомление для авто-трейда
+                                    if real_pnl >= 0:
+                                        text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
 
 <b>+${pnl_abs:.2f}</b> | {reason} {'🎯' if reason == 'TP' else '📊'}
 
@@ -7237,8 +7279,8 @@ async def handle_websocket_sync(event_type: str, data: dict):
 Bybit синхронизация
 
 💰 Баланс: ${user['balance']:.2f}"""
-                                else:
-                                    text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+                                    else:
+                                        text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
 
 <b>-${pnl_abs:.2f}</b> | {reason} 📉
 
@@ -7246,22 +7288,22 @@ Bybit синхронизация
 Bybit синхронизация
 
 💰 Баланс: ${user['balance']:.2f}"""
-                            else:
-                                # Обычное уведомление
-                                pnl_sign = "+" if real_pnl >= 0 else "-"
-                                text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\nИтого: <b>{pnl_sign}${pnl_abs:.2f}</b>\n\n💰 Баланс: ${user['balance']:.2f}"
-                            
-                            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
-                            
-                            # Отправляем через create_task для non-blocking
-                            bot = get_bot_instance()
-                            if bot:
-                                asyncio.create_task(
-                                    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
-                                )
-                        except Exception as notify_err:
-                            logger.warning(f"[WS_SYNC] Failed to notify user {user_id}: {notify_err}")
+                                else:
+                                    # Обычное уведомление
+                                    pnl_sign = "+" if real_pnl >= 0 else "-"
+                                    text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\nИтого: <b>{pnl_sign}${pnl_abs:.2f}</b>\n\n💰 Баланс: ${user['balance']:.2f}"
+                                
+                                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
+                                
+                                # Отправляем через create_task для non-blocking
+                                bot = get_bot_instance()
+                                if bot:
+                                    asyncio.create_task(
+                                        bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
+                                    )
+                            except Exception as notify_err:
+                                logger.warning(f"[WS_SYNC] Failed to notify user {user_id}: {notify_err}")
                         
                         break
         
