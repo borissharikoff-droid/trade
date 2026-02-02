@@ -77,6 +77,23 @@ except ImportError as e:
     NEWS_FEATURES = False
     logger.warning(f"[INIT] News analyzer disabled: {e}")
 
+# AI Analyzer - DeepSeek powered анализ и обучение
+try:
+    from ai_analyzer import (
+        get_ai_analyzer, init_ai_analyzer,
+        analyze_trade as ai_analyze_trade,
+        should_take_signal as ai_should_take_signal,
+        analyze_news as ai_analyze_news,
+        predict_news as ai_predict_news,
+        daily_insights as ai_daily_insights,
+        get_ai_stats
+    )
+    AI_FEATURES = True
+    logger.info("[INIT] AI Analyzer loaded: DeepSeek powered learning")
+except ImportError as e:
+    AI_FEATURES = False
+    logger.warning(f"[INIT] AI Analyzer disabled: {e}")
+
 # ==================== GLOBAL BOT INSTANCE ====================
 # Глобальная ссылка на бот для отправки уведомлений из WebSocket и других мест
 _bot_instance = None
@@ -871,6 +888,42 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
         )
     except Exception as e:
         logger.warning(f"[TRADE_LOGGER] Failed to log trade close: {e}")
+    
+    # AI Analysis - анализируем закрытую сделку в фоне
+    if AI_FEATURES:
+        try:
+            trade_data = {
+                'id': pos_id,
+                'symbol': pos['symbol'],
+                'direction': pos['direction'],
+                'entry': pos['entry'],
+                'exit_price': exit_price,
+                'pnl': pnl,
+                'reason': reason,
+                'amount': pos['amount'],
+                'duration': f"{holding_minutes:.0f}min" if holding_minutes else "N/A"
+            }
+            # Fire and forget - не блокируем основной поток
+            asyncio.create_task(_ai_analyze_trade_background(trade_data))
+        except Exception as e:
+            logger.debug(f"[AI] Failed to queue trade analysis: {e}")
+
+
+async def _ai_analyze_trade_background(trade_data: Dict):
+    """Фоновый AI анализ закрытой сделки"""
+    try:
+        if not AI_FEATURES:
+            return
+        
+        analysis = await ai_analyze_trade(trade_data)
+        if analysis:
+            # Логируем ключевые инсайты
+            if analysis.lessons_learned:
+                logger.info(f"[AI] Trade lessons for {trade_data['symbol']}: {', '.join(analysis.lessons_learned[:2])}")
+            if analysis.recommendations:
+                logger.info(f"[AI] AI recommendations: {', '.join(analysis.recommendations[:2])}")
+    except Exception as e:
+        logger.warning(f"[AI] Background analysis error: {e}")
 
 
 async def close_linked_auto_positions(symbol: str, direction: str, exit_price: float, 
@@ -5574,6 +5627,43 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 
                 ticker = symbol.split("/")[0]
                 
+                # === AI DECISION: Спрашиваем AI стоит ли брать сделку ===
+                ai_decision = None
+                if AI_FEATURES:
+                    try:
+                        signal_data = {
+                            'symbol': symbol,
+                            'direction': direction,
+                            'entry': entry,
+                            'sl': sl,
+                            'tp': tp1,
+                            'sl_percent': abs(entry - sl) / entry * 100 if entry else 0,
+                            'tp_percent': abs(tp1 - entry) / entry * 100 if entry else 0,
+                            'quality': setup.quality if hasattr(setup, 'quality') else 'UNKNOWN',
+                            'provider_winrate': confidence_percent
+                        }
+                        ai_decision = await asyncio.wait_for(
+                            ai_should_take_signal(signal_data),
+                            timeout=5.0
+                        )
+                        
+                        # AI может отменить сделку или изменить размер
+                        if ai_decision and not ai_decision.get('should_trade', True):
+                            logger.info(f"[AUTO_TRADE] User {auto_user_id}: AI отменил сделку - {ai_decision.get('reasoning', 'no reason')}")
+                            continue
+                        
+                        # AI может уменьшить размер позиции при высоком риске
+                        if ai_decision:
+                            size_mult = ai_decision.get('position_size_multiplier', 1.0)
+                            if size_mult < 1.0:
+                                old_bet = auto_bet
+                                auto_bet = auto_bet * size_mult
+                                logger.info(f"[AUTO_TRADE] AI уменьшил размер: ${old_bet:.2f} -> ${auto_bet:.2f} (risk: {ai_decision.get('risk_level', 'unknown')})")
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[AUTO_TRADE] AI decision timeout, proceeding with trade")
+                    except Exception as ai_err:
+                        logger.warning(f"[AUTO_TRADE] AI decision error: {ai_err}")
+                
                 # === BYBIT QTY: используем глобальный хедж только для админа ===
                 # bybit_qty присваивается только админу, остальные получают 0 (локальные позиции)
                 bybit_qty = global_bybit_qty if auto_user_id == AUTO_TRADE_USER_ID else 0
@@ -8614,6 +8704,85 @@ R/R: 1:{setup.risk_reward:.1f}
         await smart.close()
 
 
+async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """AI Analyzer stats and insights: /ai [insights]"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    if not AI_FEATURES:
+        await update.message.reply_text(
+            "<b>❌ AI Analyzer не загружен</b>\n\n"
+            "Установите: pip install openai\n"
+            "И проверьте ai_analyzer.py",
+            parse_mode="HTML"
+        )
+        return
+    
+    args = context.args
+    
+    # /ai insights - генерировать инсайты
+    if args and args[0].lower() == 'insights':
+        await update.message.reply_text("🤖 Генерирую AI инсайты...")
+        
+        try:
+            trades = run_sql("""
+                SELECT * FROM history 
+                WHERE closed_at > datetime('now', '-1 day')
+                ORDER BY closed_at DESC
+            """, fetch="all") or []
+            
+            news = []
+            if NEWS_FEATURES:
+                try:
+                    news = list(news_analyzer.recent_events)[-50:]
+                    news = [{'title': n.title, 'source': n.source} for n in news]
+                except:
+                    pass
+            
+            insights = await ai_daily_insights(trades, news)
+            
+            await update.message.reply_text(
+                f"<b>🤖 AI Daily Insights</b>\n\n{insights[:3800]}",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
+        return
+    
+    # /ai - показать статистику
+    try:
+        stats = get_ai_stats()
+        
+        text = f"""<b>🤖 AI Analyzer Stats</b>
+
+<b>Статус:</b> {'✅ Active' if stats['initialized'] else '⏳ Initializing...'}
+
+<b>📊 Анализ:</b>
+• Сделок проанализировано: <code>{stats['total_trades_analyzed']}</code>
+• Новостей обработано: <code>{stats['total_news_analyzed']}</code>
+• Паттернов сделок: <code>{stats['trade_patterns_count']}</code>
+• Паттернов новостей: <code>{stats['news_patterns_count']}</code>
+
+<b>🧠 Обучение:</b>
+• Выученных правил: <code>{stats['learned_rules_count']}</code>
+• Market insights: <code>{stats['market_insights_count']}</code>
+• Точность предсказаний: <code>{stats['prediction_accuracy']*100:.1f}%</code>
+
+<b>📝 Команды:</b>
+<code>/ai</code> - эта статистика
+<code>/ai insights</code> - сгенерировать инсайты
+
+<i>AI анализирует каждую закрытую сделку и учится на ошибках</i>"""
+        
+        await update.message.reply_text(text, parse_mode="HTML")
+        
+    except Exception as e:
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
+
+
 async def whale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Анализ китов на Hyperliquid: /whale [COIN]"""
     user_id = update.effective_user.id
@@ -10174,6 +10343,7 @@ def main() -> None:
     app.add_handler(CommandHandler("testhedge", test_hedge))
     app.add_handler(CommandHandler("testsignal", test_signal))
     app.add_handler(CommandHandler("signalstats", signal_stats_cmd))
+    app.add_handler(CommandHandler("ai", ai_cmd))
     app.add_handler(CommandHandler("whale", whale_cmd))
     app.add_handler(CommandHandler("memes", memes_cmd))
     app.add_handler(CommandHandler("market", market_cmd))
@@ -10315,6 +10485,62 @@ def main() -> None:
         # Запускаем при старте (через 30 сек) и каждый час
         app.job_queue.run_once(auto_profit_sync_job, when=30)
         app.job_queue.run_repeating(auto_profit_sync_job, interval=3600, first=3630)  # Каждый час
+        
+        # === AI ANALYZER INITIALIZATION ===
+        if AI_FEATURES:
+            async def init_ai_job(context):
+                """Initialize AI Analyzer on startup"""
+                try:
+                    success = await init_ai_analyzer()
+                    if success:
+                        logger.info("[AI] ✅ DeepSeek AI Analyzer initialized successfully")
+                    else:
+                        logger.warning("[AI] ⚠️ AI Analyzer initialization failed")
+                except Exception as e:
+                    logger.error(f"[AI] Initialization error: {e}")
+            
+            app.job_queue.run_once(init_ai_job, when=5)  # Через 5 секунд после старта
+            
+            # Daily AI Insights - каждый день в 23:55 MSK
+            async def ai_daily_insights_job(context):
+                """Generate daily AI insights"""
+                try:
+                    # Получаем сделки и новости за последние 24 часа
+                    trades = run_sql("""
+                        SELECT * FROM history 
+                        WHERE closed_at > datetime('now', '-1 day')
+                        ORDER BY closed_at DESC
+                    """, fetch="all") or []
+                    
+                    # Получаем новости из news_analyzer если есть
+                    news = []
+                    if NEWS_FEATURES:
+                        try:
+                            news = list(news_analyzer.recent_events)[-50:]
+                            news = [{'title': n.title, 'source': n.source} for n in news]
+                        except:
+                            pass
+                    
+                    insights = await ai_daily_insights(trades, news)
+                    
+                    # Отправляем админу
+                    if AUTO_TRADE_USER_ID:
+                        try:
+                            await context.bot.send_message(
+                                AUTO_TRADE_USER_ID,
+                                f"<b>🤖 AI Daily Insights</b>\n\n{insights[:3500]}",
+                                parse_mode="HTML"
+                            )
+                        except:
+                            pass
+                    
+                    logger.info(f"[AI] Daily insights generated, {len(trades)} trades analyzed")
+                except Exception as e:
+                    logger.error(f"[AI] Daily insights error: {e}")
+            
+            # Запускаем ежедневно (86400 секунд = 24 часа)
+            app.job_queue.run_repeating(ai_daily_insights_job, interval=86400, first=3600)  # Первый через час
+            logger.info("[AI] Daily insights job scheduled")
         
         # === AUTO OPTIMIZER JOB ===
         async def auto_optimizer_job(context):

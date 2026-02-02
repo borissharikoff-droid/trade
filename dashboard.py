@@ -1104,6 +1104,101 @@ def api_news():
         })
 
 
+@app.route('/api/ai')
+def api_ai():
+    """AI Analyzer statistics and learning history"""
+    try:
+        # Try to import AI analyzer
+        try:
+            from ai_analyzer import get_ai_analyzer, get_ai_stats
+            ai_available = True
+        except ImportError:
+            ai_available = False
+            return jsonify({
+                'available': False,
+                'error': 'AI Analyzer not installed',
+                'timestamp': to_moscow_time()
+            })
+        
+        analyzer = get_ai_analyzer()
+        stats = get_ai_stats()
+        memory = analyzer.memory
+        
+        # Get recent trade analyses
+        recent_analyses = list(analyzer.recent_analyses)[-20:]
+        recent_analyses.reverse()
+        
+        # Get learned rules (last 50)
+        learned_rules = memory.learned_rules[-50:]
+        learned_rules.reverse()
+        
+        # Get market insights (last 30)
+        insights = memory.market_insights[-30:]
+        insights.reverse()
+        
+        # Get trade patterns summary per symbol
+        pattern_summary = {}
+        for symbol, patterns in memory.trade_patterns.items():
+            wins = len(patterns.get('wins', []))
+            losses = len(patterns.get('losses', []))
+            total = wins + losses
+            pattern_summary[symbol] = {
+                'wins': wins,
+                'losses': losses,
+                'total': total,
+                'winrate': round(wins / total * 100, 1) if total > 0 else 0,
+                'recent_lessons': []
+            }
+            # Add recent lessons from wins and losses
+            for p in patterns.get('wins', [])[-2:]:
+                if p.get('lessons'):
+                    pattern_summary[symbol]['recent_lessons'].extend(p['lessons'][:1])
+            for p in patterns.get('losses', [])[-2:]:
+                if p.get('lessons'):
+                    pattern_summary[symbol]['recent_lessons'].extend(p['lessons'][:1])
+        
+        # Get news patterns summary
+        news_patterns = []
+        for news_hash, pattern in list(memory.news_patterns.items())[-20:]:
+            news_patterns.append({
+                'title': pattern.get('title', '')[:80],
+                'direction': pattern.get('actual_direction', 'NEUTRAL'),
+                'change': round(pattern.get('price_change', 0), 2),
+                'category': pattern.get('category', 'other'),
+                'patterns': pattern.get('patterns', [])[:2],
+                'timestamp': pattern.get('timestamp', '')
+            })
+        news_patterns.reverse()
+        
+        return jsonify({
+            'available': True,
+            'initialized': stats.get('initialized', False),
+            'stats': {
+                'total_trades_analyzed': stats.get('total_trades_analyzed', 0),
+                'total_news_analyzed': stats.get('total_news_analyzed', 0),
+                'learned_rules_count': stats.get('learned_rules_count', 0),
+                'trade_patterns_count': stats.get('trade_patterns_count', 0),
+                'news_patterns_count': stats.get('news_patterns_count', 0),
+                'market_insights_count': stats.get('market_insights_count', 0),
+                'prediction_accuracy': round(stats.get('prediction_accuracy', 0.5) * 100, 1)
+            },
+            'recent_analyses': recent_analyses,
+            'learned_rules': learned_rules,
+            'insights': insights,
+            'pattern_summary': pattern_summary,
+            'news_patterns': news_patterns,
+            'timestamp': to_moscow_time()
+        })
+        
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting AI stats: {e}", exc_info=True)
+        return jsonify({
+            'available': False,
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
+
+
 def run_dashboard(port: int = 5000, host: str = '0.0.0.0'):
     """Run Flask server (called in thread)"""
     # Disable Flask's default logging for cleaner output

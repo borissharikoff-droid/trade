@@ -1261,6 +1261,9 @@
             <button class="main-tab" onclick="switchTab('logs')">
                 <span>📝</span> Logs
             </button>
+            <button class="main-tab" onclick="switchTab('ai')">
+                <span>🤖</span> AI Brain
+            </button>
         </div>
         
         <div class="main-layout">
@@ -1610,6 +1613,100 @@
                     </div>
                 </div>
                 
+                <!-- AI Brain Tab -->
+                <div id="tab-ai" class="tab-content">
+                    
+                    <!-- AI Status Header -->
+                    <div class="stats-grid" style="grid-template-columns: repeat(6, 1fr); margin-bottom: 16px;">
+                        <div class="stat-card">
+                            <div class="stat-label">AI Status</div>
+                            <div class="stat-value" id="aiStatus" style="font-size: 1.1rem;">⏳ Loading...</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Trades Analyzed</div>
+                            <div class="stat-value" id="aiTradesAnalyzed" style="color: var(--info);">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">News Analyzed</div>
+                            <div class="stat-value" id="aiNewsAnalyzed" style="color: var(--purple);">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Learned Rules</div>
+                            <div class="stat-value" id="aiLearnedRules" style="color: var(--warning);">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Trade Patterns</div>
+                            <div class="stat-value" id="aiTradePatterns" style="color: var(--accent);">0</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Prediction Accuracy</div>
+                            <div class="stat-value" id="aiAccuracy" style="color: var(--positive);">0%</div>
+                        </div>
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        
+                        <!-- Recent Trade Analyses -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <span class="panel-title"><span class="panel-title-icon">🔬</span> Recent Trade Analyses</span>
+                                <span class="panel-badge" id="aiAnalysesCount">0</span>
+                            </div>
+                            <div class="panel-content" id="aiAnalysesList" style="max-height: 400px; overflow-y: auto;">
+                                <div class="no-data">No analyses yet</div>
+                            </div>
+                        </div>
+                        
+                        <!-- Learned Rules -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <span class="panel-title"><span class="panel-title-icon">🧠</span> Learned Rules</span>
+                                <span class="panel-badge" id="aiRulesCount">0</span>
+                            </div>
+                            <div class="panel-content" id="aiRulesList" style="max-height: 400px; overflow-y: auto;">
+                                <div class="no-data">No rules learned yet</div>
+                            </div>
+                        </div>
+                        
+                    </div>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
+                        
+                        <!-- Symbol Patterns -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <span class="panel-title"><span class="panel-title-icon">📊</span> Symbol Knowledge</span>
+                            </div>
+                            <div class="panel-content" id="aiSymbolPatterns" style="max-height: 350px; overflow-y: auto;">
+                                <div class="no-data">No symbol patterns yet</div>
+                            </div>
+                        </div>
+                        
+                        <!-- News Pattern Learning -->
+                        <div class="panel">
+                            <div class="panel-header">
+                                <span class="panel-title"><span class="panel-title-icon">📰</span> News Impact Learning</span>
+                            </div>
+                            <div class="panel-content" id="aiNewsPatterns" style="max-height: 350px; overflow-y: auto;">
+                                <div class="no-data">No news patterns yet</div>
+                            </div>
+                        </div>
+                        
+                    </div>
+                    
+                    <!-- Market Insights -->
+                    <div class="panel" style="margin-top: 16px;">
+                        <div class="panel-header">
+                            <span class="panel-title"><span class="panel-title-icon">💡</span> Market Insights</span>
+                            <span class="panel-badge" id="aiInsightsCount">0</span>
+                        </div>
+                        <div class="panel-content" id="aiInsightsList" style="max-height: 300px; overflow-y: auto;">
+                            <div class="no-data">No insights generated yet</div>
+                        </div>
+                    </div>
+                    
+                </div>
+                
             </div>
             
             <!-- Sidebar -->
@@ -1774,6 +1871,7 @@
             event.target.closest('.main-tab').classList.add('active');
             
             if (tabName === 'users' && allUsers.length === 0) fetchUsers();
+            if (tabName === 'ai' && !aiData) fetchAI();
             if (tabName === 'analytics') {
                 fetchWinrateBreakdown();
                 initPnlChart();
@@ -2238,6 +2336,235 @@
             tbody.innerHTML = html;
         }
         
+        // ==================== AI BRAIN ====================
+        let aiData = null;
+        
+        async function fetchAI() {
+            try {
+                const response = await fetch('/api/ai');
+                aiData = await response.json();
+                renderAI();
+            } catch (error) {
+                console.error('Error fetching AI data:', error);
+                document.getElementById('aiStatus').innerHTML = '<span style="color: var(--negative);">❌ Error</span>';
+            }
+        }
+        
+        function renderAI() {
+            if (!aiData) return;
+            
+            // Status & Stats
+            if (aiData.available) {
+                const statusText = aiData.initialized ? '✅ Active' : '⏳ Initializing...';
+                document.getElementById('aiStatus').innerHTML = `<span style="color: ${aiData.initialized ? 'var(--positive)' : 'var(--warning)'}">${statusText}</span>`;
+            } else {
+                document.getElementById('aiStatus').innerHTML = '<span style="color: var(--negative);">❌ Not Available</span>';
+                return;
+            }
+            
+            const stats = aiData.stats || {};
+            document.getElementById('aiTradesAnalyzed').textContent = stats.total_trades_analyzed || 0;
+            document.getElementById('aiNewsAnalyzed').textContent = stats.total_news_analyzed || 0;
+            document.getElementById('aiLearnedRules').textContent = stats.learned_rules_count || 0;
+            document.getElementById('aiTradePatterns').textContent = stats.trade_patterns_count || 0;
+            document.getElementById('aiAccuracy').textContent = (stats.prediction_accuracy || 0) + '%';
+            
+            // Recent Analyses
+            renderAIAnalyses(aiData.recent_analyses || []);
+            
+            // Learned Rules
+            renderAIRules(aiData.learned_rules || []);
+            
+            // Symbol Patterns
+            renderAISymbolPatterns(aiData.pattern_summary || {});
+            
+            // News Patterns
+            renderAINewsPatterns(aiData.news_patterns || []);
+            
+            // Insights
+            renderAIInsights(aiData.insights || []);
+        }
+        
+        function renderAIAnalyses(analyses) {
+            const container = document.getElementById('aiAnalysesList');
+            document.getElementById('aiAnalysesCount').textContent = analyses.length;
+            
+            if (!analyses || analyses.length === 0) {
+                container.innerHTML = '<div class="no-data">No trade analyses yet. AI will analyze each closed trade.</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const a of analyses) {
+                const isWin = a.is_win;
+                const pnlClass = isWin ? 'pnl-positive' : 'pnl-negative';
+                const icon = isWin ? '✅' : '❌';
+                
+                html += `<div class="analysis-item" style="padding: 12px; background: var(--bg-card); border-radius: 8px; margin-bottom: 8px; border-left: 3px solid ${isWin ? 'var(--positive)' : 'var(--negative)'};">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 600; color: var(--accent);">${icon} ${a.symbol}</span>
+                        <span class="${pnlClass}" style="font-family: 'JetBrains Mono', monospace;">${formatPnl(a.pnl)}</span>
+                    </div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px;">
+                        ${a.direction} | Entry: $${a.entry_price?.toFixed(4) || '?'} → Exit: $${a.exit_price?.toFixed(4) || '?'}
+                    </div>
+                    <div style="display: flex; gap: 8px; margin-bottom: 6px;">
+                        <span class="badge" style="background: var(--accent-bg); color: var(--accent);">Entry: ${a.entry_quality}/10</span>
+                        <span class="badge" style="background: var(--accent-bg); color: var(--accent);">Exit: ${a.exit_quality}/10</span>
+                    </div>`;
+                
+                if (a.lessons_learned && a.lessons_learned.length > 0) {
+                    html += `<div style="font-size: 0.75rem; margin-top: 6px;">
+                        <strong style="color: var(--warning);">📚 Lessons:</strong>
+                        <ul style="margin: 4px 0 0 16px; color: var(--text-secondary);">
+                            ${a.lessons_learned.slice(0, 2).map(l => `<li>${escapeHtml(l)}</li>`).join('')}
+                        </ul>
+                    </div>`;
+                }
+                
+                if (a.recommendations && a.recommendations.length > 0) {
+                    html += `<div style="font-size: 0.75rem; margin-top: 6px;">
+                        <strong style="color: var(--info);">💡 Recommendations:</strong>
+                        <ul style="margin: 4px 0 0 16px; color: var(--text-secondary);">
+                            ${a.recommendations.slice(0, 2).map(r => `<li>${escapeHtml(r)}</li>`).join('')}
+                        </ul>
+                    </div>`;
+                }
+                
+                html += '</div>';
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderAIRules(rules) {
+            const container = document.getElementById('aiRulesList');
+            document.getElementById('aiRulesCount').textContent = rules.length;
+            
+            if (!rules || rules.length === 0) {
+                container.innerHTML = '<div class="no-data">AI is learning rules from each trade. Rules will appear here.</div>';
+                return;
+            }
+            
+            let html = '';
+            for (let i = 0; i < rules.length; i++) {
+                const rule = rules[i];
+                const isNewsRule = rule.startsWith('[NEWS]');
+                const icon = isNewsRule ? '📰' : '📊';
+                const bgColor = isNewsRule ? 'rgba(168, 85, 247, 0.1)' : 'var(--bg-card)';
+                const borderColor = isNewsRule ? 'var(--purple)' : 'var(--accent)';
+                
+                html += `<div style="padding: 10px 12px; background: ${bgColor}; border-radius: 6px; margin-bottom: 6px; border-left: 2px solid ${borderColor}; font-size: 0.85rem;">
+                    <span style="margin-right: 6px;">${icon}</span>
+                    <span style="color: var(--text-primary);">${escapeHtml(rule.replace('[NEWS] ', ''))}</span>
+                </div>`;
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderAISymbolPatterns(patterns) {
+            const container = document.getElementById('aiSymbolPatterns');
+            const symbols = Object.keys(patterns);
+            
+            if (!symbols || symbols.length === 0) {
+                container.innerHTML = '<div class="no-data">AI is building knowledge about each symbol.</div>';
+                return;
+            }
+            
+            // Sort by total trades
+            symbols.sort((a, b) => (patterns[b].total || 0) - (patterns[a].total || 0));
+            
+            let html = '';
+            for (const symbol of symbols.slice(0, 15)) {
+                const p = patterns[symbol];
+                const winrate = p.winrate || 0;
+                const wrColor = winrate >= 60 ? 'var(--positive)' : winrate >= 40 ? 'var(--warning)' : 'var(--negative)';
+                
+                html += `<div style="padding: 10px 12px; background: var(--bg-card); border-radius: 8px; margin-bottom: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                        <span style="font-weight: 600; color: var(--accent);">${symbol}</span>
+                        <span style="font-family: 'JetBrains Mono', monospace; color: ${wrColor}; font-weight: 600;">${winrate}% WR</span>
+                    </div>
+                    <div style="display: flex; gap: 12px; font-size: 0.8rem; margin-bottom: 6px;">
+                        <span style="color: var(--positive);">✅ ${p.wins} wins</span>
+                        <span style="color: var(--negative);">❌ ${p.losses} losses</span>
+                        <span style="color: var(--text-muted);">📊 ${p.total} total</span>
+                    </div>
+                    <div style="background: rgba(0,0,0,0.3); border-radius: 4px; height: 6px; overflow: hidden;">
+                        <div style="background: linear-gradient(90deg, var(--positive), var(--accent)); height: 100%; width: ${winrate}%;"></div>
+                    </div>`;
+                
+                if (p.recent_lessons && p.recent_lessons.length > 0) {
+                    html += `<div style="font-size: 0.7rem; margin-top: 6px; color: var(--text-secondary);">
+                        💡 ${p.recent_lessons.slice(0, 2).map(l => escapeHtml(l)).join(' | ')}
+                    </div>`;
+                }
+                
+                html += '</div>';
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderAINewsPatterns(patterns) {
+            const container = document.getElementById('aiNewsPatterns');
+            
+            if (!patterns || patterns.length === 0) {
+                container.innerHTML = '<div class="no-data">AI is learning how news affects the market.</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const p of patterns) {
+                const dirIcon = p.direction === 'BULLISH' ? '📈' : p.direction === 'BEARISH' ? '📉' : '➡️';
+                const dirColor = p.direction === 'BULLISH' ? 'var(--positive)' : p.direction === 'BEARISH' ? 'var(--negative)' : 'var(--text-secondary)';
+                const changeColor = p.change >= 0 ? 'var(--positive)' : 'var(--negative)';
+                
+                html += `<div style="padding: 10px 12px; background: var(--bg-card); border-radius: 8px; margin-bottom: 8px; border-left: 3px solid ${dirColor};">
+                    <div style="font-size: 0.85rem; color: var(--text-primary); margin-bottom: 6px;">
+                        ${escapeHtml(p.title || 'Unknown news')}
+                    </div>
+                    <div style="display: flex; gap: 12px; font-size: 0.75rem; align-items: center;">
+                        <span style="color: ${dirColor};">${dirIcon} ${p.direction}</span>
+                        <span style="color: ${changeColor}; font-family: 'JetBrains Mono', monospace;">${p.change >= 0 ? '+' : ''}${p.change}%</span>
+                        <span class="badge" style="font-size: 0.65rem;">${p.category || 'other'}</span>
+                    </div>`;
+                
+                if (p.patterns && p.patterns.length > 0) {
+                    html += `<div style="font-size: 0.7rem; margin-top: 6px; color: var(--warning);">
+                        🔍 ${p.patterns.slice(0, 2).map(pt => escapeHtml(pt)).join(', ')}
+                    </div>`;
+                }
+                
+                html += '</div>';
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderAIInsights(insights) {
+            const container = document.getElementById('aiInsightsList');
+            document.getElementById('aiInsightsCount').textContent = insights.length;
+            
+            if (!insights || insights.length === 0) {
+                container.innerHTML = '<div class="no-data">Daily insights will appear here after trading sessions.</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const insight of insights) {
+                const categoryIcon = insight.category === 'daily_summary' ? '📅' : insight.category === 'trade' ? '📊' : '💡';
+                
+                html += `<div style="padding: 12px; background: var(--bg-card); border-radius: 8px; margin-bottom: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 600; color: var(--accent);">${categoryIcon} ${insight.category || 'insight'}</span>
+                        <span style="font-size: 0.7rem; color: var(--text-muted);">${formatTimeAgo(insight.timestamp)}</span>
+                    </div>
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.5;">
+                        ${escapeHtml(insight.insight?.substring(0, 500) || '')}${insight.insight?.length > 500 ? '...' : ''}
+                    </div>
+                </div>`;
+            }
+            container.innerHTML = html;
+        }
+        
         // PnL Chart
         function initPnlChart() {
             const ctx = document.getElementById('pnlChart');
@@ -2458,6 +2785,13 @@
         setInterval(fetchAlerts, 15000);
         setInterval(fetchPositions, 5000);
         setInterval(fetchNews, 30000);
+        
+        // AI refresh - every 30 seconds if tab is active
+        setInterval(() => {
+            if (document.getElementById('tab-ai')?.classList.contains('active')) {
+                fetchAI();
+            }
+        }, 30000);
     </script>
 </body>
 </html>
