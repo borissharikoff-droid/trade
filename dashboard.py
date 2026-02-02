@@ -101,18 +101,86 @@ def get_open_positions_count() -> int:
         return 0
 
 
+def get_positions_stats() -> dict:
+    """Get detailed statistics about open positions across all users"""
+    if not _run_sql:
+        return {
+            'total_positions': 0,
+            'users_with_positions': 0,
+            'total_value': 0,
+            'total_unrealized_pnl': 0,
+            'by_direction': {'LONG': 0, 'SHORT': 0}
+        }
+    try:
+        # Total positions and users with positions
+        stats = _run_sql("""
+            SELECT 
+                COUNT(*) as total_positions,
+                COUNT(DISTINCT user_id) as users_with_positions,
+                COALESCE(SUM(amount), 0) as total_value,
+                COALESCE(SUM(pnl), 0) as total_unrealized_pnl
+            FROM positions
+        """, fetch="one")
+        
+        # By direction
+        by_dir = _run_sql("""
+            SELECT direction, COUNT(*) as count
+            FROM positions
+            GROUP BY direction
+        """, fetch="all")
+        
+        direction_counts = {'LONG': 0, 'SHORT': 0}
+        for row in (by_dir or []):
+            d = row.get('direction', '').upper()
+            if d in direction_counts:
+                direction_counts[d] = int(row.get('count', 0))
+        
+        return {
+            'total_positions': int(stats.get('total_positions', 0) or 0) if stats else 0,
+            'users_with_positions': int(stats.get('users_with_positions', 0) or 0) if stats else 0,
+            'total_value': round(float(stats.get('total_value', 0) or 0), 2) if stats else 0,
+            'total_unrealized_pnl': round(float(stats.get('total_unrealized_pnl', 0) or 0), 2) if stats else 0,
+            'by_direction': direction_counts
+        }
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting positions stats: {e}")
+        return {
+            'total_positions': 0,
+            'users_with_positions': 0,
+            'total_value': 0,
+            'total_unrealized_pnl': 0,
+            'by_direction': {'LONG': 0, 'SHORT': 0}
+        }
+
+
 def get_open_positions_details() -> list:
     """Get details of all open positions"""
     if not _run_sql:
         return []
     try:
         positions = _run_sql("""
-            SELECT symbol, direction, entry, current, pnl, amount, opened_at
+            SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id, is_auto, bybit_qty
             FROM positions
-            ORDER BY opened_at DESC
+            ORDER BY ABS(pnl) DESC, opened_at DESC
             LIMIT 50
         """, fetch="all")
-        return positions or []
+        
+        # Format positions for API response
+        result = []
+        for pos in (positions or []):
+            result.append({
+                'symbol': pos.get('symbol', ''),
+                'direction': pos.get('direction', ''),
+                'entry': float(pos.get('entry', 0) or 0),
+                'current': float(pos.get('current', 0) or 0),
+                'pnl': round(float(pos.get('pnl', 0) or 0), 2),
+                'amount': round(float(pos.get('amount', 0) or 0), 2),
+                'opened_at': pos.get('opened_at'),
+                'user_id': pos.get('user_id'),
+                'is_auto': bool(pos.get('is_auto')),
+                'on_bybit': float(pos.get('bybit_qty', 0) or 0) > 0
+            })
+        return result
     except Exception as e:
         logger.error(f"[DASHBOARD] Error getting positions details: {e}")
         return []
@@ -206,13 +274,38 @@ def get_recent_trades(limit: int = 20) -> list:
     if not _run_sql:
         return []
     try:
-        trades = _run_sql("""
-            SELECT symbol, direction, entry, exit_price, pnl, reason, amount, closed_at
-            FROM history
-            ORDER BY closed_at DESC
-            LIMIT ?
-        """, (limit,), fetch="all")
-        return trades or []
+        # Try with is_auto first, fallback without it
+        try:
+            trades = _run_sql("""
+                SELECT symbol, direction, entry, exit_price, pnl, reason, amount, closed_at, is_auto
+                FROM history
+                ORDER BY closed_at DESC
+                LIMIT ?
+            """, (limit,), fetch="all")
+        except Exception:
+            # is_auto column might not exist
+            trades = _run_sql("""
+                SELECT symbol, direction, entry, exit_price, pnl, reason, amount, closed_at
+                FROM history
+                ORDER BY closed_at DESC
+                LIMIT ?
+            """, (limit,), fetch="all")
+        
+        # Format trades for API response
+        result = []
+        for trade in (trades or []):
+            result.append({
+                'symbol': trade.get('symbol', ''),
+                'direction': trade.get('direction', ''),
+                'entry': float(trade.get('entry', 0) or 0),
+                'exit_price': float(trade.get('exit_price', 0) or 0),
+                'pnl': round(float(trade.get('pnl', 0) or 0), 2),
+                'reason': trade.get('reason', ''),
+                'amount': round(float(trade.get('amount', 0) or 0), 2),
+                'closed_at': trade.get('closed_at'),
+                'is_auto': bool(trade.get('is_auto', False))
+            })
+        return result
     except Exception as e:
         logger.error(f"[DASHBOARD] Error getting recent trades: {e}")
         return []
@@ -439,6 +532,7 @@ def api_stats():
     """Main statistics endpoint"""
     open_count = get_open_positions_count()
     history_stats = get_history_stats()
+    positions_stats = get_positions_stats()
     
     # Get signal stats if available
     signal_stats = {}
@@ -459,6 +553,13 @@ def api_stats():
         'valid_setups': signal_stats.get('valid_setups', 0),
         'accepted': signal_stats.get('accepted', 0),
         'bybit_opened': signal_stats.get('bybit_opened', 0),
+        # New positions stats
+        'positions_total': positions_stats['total_positions'],
+        'positions_users': positions_stats['users_with_positions'],
+        'positions_value': positions_stats['total_value'],
+        'positions_unrealized_pnl': positions_stats['total_unrealized_pnl'],
+        'positions_long': positions_stats['by_direction']['LONG'],
+        'positions_short': positions_stats['by_direction']['SHORT'],
         'timestamp': to_moscow_time()
     })
 

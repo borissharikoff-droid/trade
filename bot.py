@@ -77,6 +77,19 @@ except ImportError as e:
     NEWS_FEATURES = False
     logger.warning(f"[INIT] News analyzer disabled: {e}")
 
+# ==================== GLOBAL BOT INSTANCE ====================
+# Глобальная ссылка на бот для отправки уведомлений из WebSocket и других мест
+_bot_instance = None
+
+def set_bot_instance(bot):
+    """Установить глобальную ссылку на бот"""
+    global _bot_instance
+    _bot_instance = bot
+
+def get_bot_instance():
+    """Получить глобальную ссылку на бот"""
+    return _bot_instance
+
 # ==================== DATABASE ====================
 DATABASE_URL = os.environ.get("DATABASE_URL")
 DB_PATH = os.environ.get("DB_PATH", "bot_data.db")
@@ -4302,10 +4315,13 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
                 closed_pos_ids.append(pos['id'])
                 synced += 1
 
-                # Non-blocking notification
+                # Non-blocking notification - с учётом авто-трейда
                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                is_auto = pos.get('is_auto', False)
+                direction = pos.get('direction', '')
                 asyncio.create_task(_send_sync_notification(
-                    context, user_id, ticker, real_pnl, user['balance']
+                    context, user_id, ticker, real_pnl, user['balance'],
+                    is_auto=is_auto, direction=direction
                 ))
                 
         except Exception as e:
@@ -4326,22 +4342,47 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _send_sync_notification(context, user_id: int, ticker: str, pnl: float, balance: float, 
-                                   is_orphan: bool = False, returned: float = 0):
+                                   is_orphan: bool = False, returned: float = 0, is_auto: bool = False,
+                                   direction: str = ""):
     """Helper to send sync notification without blocking"""
     try:
+        pnl_abs = abs(pnl)
+        pnl_sign = "+" if pnl >= 0 else "-"
+        pnl_emoji = "✅" if pnl >= 0 else "📉"
+        
         if is_orphan:
             text = f"<b>📡 Синхронизация</b>\n\n{ticker} закрыт (не был на Bybit)\nВозврат: <b>${returned:.2f}</b>\n\n💰 Баланс: ${balance:.2f}"
+        elif is_auto:
+            # Специальное уведомление для авто-трейда
+            if pnl >= 0:
+                text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>+${pnl_abs:.2f}</b> {pnl_emoji}
+
+{ticker} | {direction}
+Bybit синхронизация
+
+💰 Баланс: ${balance:.2f}"""
+            else:
+                text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>-${pnl_abs:.2f}</b> {pnl_emoji}
+
+{ticker} | {direction}
+Bybit синхронизация
+
+💰 Баланс: ${balance:.2f}"""
         else:
-            pnl_abs = abs(pnl)
-            pnl_sign = "+" if pnl >= 0 else "-"
             text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\nИтого: <b>{pnl_sign}${pnl_abs:.2f}</b>\n\n💰 Баланс: ${balance:.2f}"
         
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
+        
         await asyncio.wait_for(
-            context.bot.send_message(user_id, text, parse_mode="HTML"),
+            context.bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard),
             timeout=3.0
         )
-    except (asyncio.TimeoutError, Exception):
-        pass  # Non-critical, silently ignore
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.debug(f"[SYNC_NOTIFY] Failed to notify {user_id}: {e}")
 
 
 def stack_positions(positions: List[Dict]) -> List[Dict]:
@@ -7066,6 +7107,50 @@ async def handle_websocket_sync(event_type: str, data: dict):
                             )
                         
                         logger.info(f"[WS_SYNC] ✅ Position {pos['id']} closed via WebSocket, PnL=${real_pnl:.2f}")
+                        
+                        # ВАЖНО: Отправляем уведомление пользователю СРАЗУ
+                        try:
+                            ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                            pnl_abs = abs(real_pnl)
+                            is_auto = pos.get('is_auto', False)
+                            
+                            if is_auto:
+                                # Уведомление для авто-трейда
+                                if real_pnl >= 0:
+                                    text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>+${pnl_abs:.2f}</b> | {reason} {'🎯' if reason == 'TP' else '📊'}
+
+{ticker} | {pos['direction']}
+Bybit синхронизация
+
+💰 Баланс: ${user['balance']:.2f}"""
+                                else:
+                                    text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>-${pnl_abs:.2f}</b> | {reason} 📉
+
+{ticker} | {pos['direction']}
+Bybit синхронизация
+
+💰 Баланс: ${user['balance']:.2f}"""
+                            else:
+                                # Обычное уведомление
+                                pnl_sign = "+" if real_pnl >= 0 else "-"
+                                text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\nИтого: <b>{pnl_sign}${pnl_abs:.2f}</b>\n\n💰 Баланс: ${user['balance']:.2f}"
+                            
+                            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
+                            
+                            # Отправляем через create_task для non-blocking
+                            bot = get_bot_instance()
+                            if bot:
+                                asyncio.create_task(
+                                    bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
+                                )
+                        except Exception as notify_err:
+                            logger.warning(f"[WS_SYNC] Failed to notify user {user_id}: {notify_err}")
+                        
                         break
         
         elif event_type == 'EXECUTION':
@@ -7296,20 +7381,29 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                             context=context
                         )
                         
-                        # Уведомление
-                        pnl_sign = "+" if real_pnl >= 0 else ""
+                        # Уведомление - с учётом авто-трейда
+                        pnl_abs = abs(real_pnl)
+                        pnl_sign = "+" if real_pnl >= 0 else "-"
                         pnl_emoji = "✅" if real_pnl >= 0 else "📉"
+                        is_auto = pos.get('is_auto', False)
+                        
                         try:
-                            await context.bot.send_message(
-                                user_id,
-                                f"<b>📡 Bybit</b>\n\n"
-                                f"{ticker} закрыт\n"
-                                f"{pos['direction']} | {reason}\n"
-                                f"{pnl_emoji} {pnl_sign}${real_pnl:.2f}\n\n"
-                                f"💰 Баланс: ${user['balance']:.2f}",
-                                parse_mode="HTML"
-                            )
-                            logger.info(f"[BYBIT_SYNC] User {user_id}: {ticker} closed on Bybit, PnL=${real_pnl:.2f}")
+                            if is_auto:
+                                # Уведомление для авто-трейда
+                                text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>{pnl_sign}${pnl_abs:.2f}</b> | {reason} {pnl_emoji}
+
+{ticker} | {pos['direction']}
+Bybit синхронизация
+
+💰 Баланс: ${user['balance']:.2f}"""
+                            else:
+                                text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\n{pos['direction']} | {reason}\n{pnl_emoji} {pnl_sign}${pnl_abs:.2f}\n\n💰 Баланс: ${user['balance']:.2f}"
+                            
+                            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
+                            await context.bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
+                            logger.info(f"[BYBIT_SYNC] User {user_id}: {ticker} closed on Bybit, PnL=${real_pnl:.2f} (auto={is_auto})")
                         except Exception as e:
                             logger.error(f"[BYBIT_SYNC] Notify error: {e}")
                         continue
@@ -10046,6 +10140,9 @@ def main() -> None:
     load_pending_invoices()
     
     app = Application.builder().token(token).build()
+    
+    # Сохраняем глобальную ссылку на бот для WebSocket уведомлений
+    set_bot_instance(app.bot)
     
     # Команды
     app.add_handler(CommandHandler("start", start))

@@ -3,18 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>YULA Trading Bot</title>
+    <title>YULA Trading Bot | Dashboard</title>
     <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-primary: rgba(10, 15, 20, 0.85);
-            --bg-secondary: rgba(15, 25, 35, 0.75);
-            --bg-panel: rgba(20, 30, 40, 0.65);
-            --bg-card: rgba(0, 0, 0, 0.25);
-            --border-color: rgba(0, 255, 136, 0.15);
-            --border-hover: rgba(0, 255, 136, 0.3);
+            --bg-primary: rgba(10, 15, 20, 0.92);
+            --bg-secondary: rgba(15, 25, 35, 0.85);
+            --bg-panel: rgba(18, 28, 38, 0.75);
+            --bg-card: rgba(0, 0, 0, 0.3);
+            --bg-card-hover: rgba(0, 255, 136, 0.05);
+            --border-color: rgba(0, 255, 136, 0.12);
+            --border-hover: rgba(0, 255, 136, 0.35);
             --accent: #00ff88;
             --accent-dim: rgba(0, 255, 136, 0.6);
             --accent-bg: rgba(0, 255, 136, 0.1);
@@ -22,36 +24,51 @@
             --negative: #ff4757;
             --warning: #ffa502;
             --info: #58a6ff;
+            --purple: #a855f7;
             --text-primary: #e8f0f0;
-            --text-secondary: rgba(232, 240, 240, 0.6);
+            --text-secondary: rgba(232, 240, 240, 0.65);
             --text-muted: rgba(232, 240, 240, 0.4);
+            --glass-blur: blur(20px);
+            --shadow-glow: 0 0 30px rgba(0, 255, 136, 0.1);
         }
         
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
         
         body {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: #0a0f14;
+            background: #080c10;
             color: var(--text-primary);
             min-height: 100vh;
             overflow-x: hidden;
         }
         
-        /* Background */
+        /* Animated Background */
         .bg-container {
             position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
             z-index: -1;
             background: 
-                linear-gradient(135deg, rgba(0, 20, 30, 0.95) 0%, rgba(5, 15, 25, 0.9) 50%, rgba(10, 25, 35, 0.85) 100%),
-                url('https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=1920&q=80') center/cover no-repeat;
+                radial-gradient(ellipse at 20% 20%, rgba(0, 255, 136, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(88, 166, 255, 0.06) 0%, transparent 50%),
+                linear-gradient(180deg, #080c10 0%, #0a1015 50%, #0c1218 100%);
+        }
+        
+        .bg-grid {
+            position: fixed;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            z-index: -1;
+            background-image: 
+                linear-gradient(rgba(0, 255, 136, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 255, 136, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            animation: gridMove 20s linear infinite;
+        }
+        
+        @keyframes gridMove {
+            0% { transform: translate(0, 0); }
+            100% { transform: translate(50px, 50px); }
         }
         
         .container {
@@ -67,14 +84,15 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 12px 20px;
+            padding: 14px 20px;
             background: var(--bg-primary);
-            backdrop-filter: blur(20px);
+            backdrop-filter: var(--glass-blur);
             border: 1px solid var(--border-color);
-            border-radius: 12px;
+            border-radius: 16px;
             margin-bottom: 16px;
             flex-wrap: wrap;
             gap: 12px;
+            box-shadow: var(--shadow-glow);
         }
         
         .logo {
@@ -83,33 +101,52 @@
             gap: 12px;
         }
         
+        .logo-icon {
+            width: 36px; height: 36px;
+            background: linear-gradient(135deg, var(--accent), #00cc6a);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.4);
+        }
+        
         .logo-text {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 1.4rem;
+            font-size: 1.5rem;
             font-weight: 700;
-            color: var(--accent);
-            letter-spacing: 2px;
+            background: linear-gradient(135deg, var(--accent), #58a6ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            letter-spacing: 3px;
         }
         
         .logo-version {
-            font-size: 0.65rem;
+            font-size: 0.6rem;
             color: var(--text-muted);
-            background: var(--accent-bg);
-            padding: 2px 8px;
-            border-radius: 4px;
+            background: var(--bg-card);
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
         }
         
-        .market-status {
+        .status-indicator {
             display: flex;
             align-items: center;
             gap: 8px;
+            padding: 6px 14px;
+            background: rgba(0, 255, 136, 0.1);
+            border: 1px solid rgba(0, 255, 136, 0.2);
+            border-radius: 20px;
             font-size: 0.75rem;
-            color: var(--text-secondary);
+            font-weight: 600;
+            color: var(--accent);
         }
         
         .status-dot {
-            width: 8px;
-            height: 8px;
+            width: 8px; height: 8px;
             border-radius: 50%;
             background: var(--accent);
             box-shadow: 0 0 10px var(--accent);
@@ -118,8 +155,40 @@
         
         @keyframes pulse {
             0%, 100% { opacity: 1; transform: scale(1); }
-            50% { opacity: 0.5; transform: scale(0.9); }
+            50% { opacity: 0.6; transform: scale(0.85); }
         }
+        
+        .header-center {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+        
+        .quick-stat {
+            text-align: center;
+            padding: 0 16px;
+            border-right: 1px solid var(--border-color);
+        }
+        
+        .quick-stat:last-child { border-right: none; }
+        
+        .quick-stat-label {
+            font-size: 0.6rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 2px;
+        }
+        
+        .quick-stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        
+        .quick-stat-value.positive { color: var(--positive); }
+        .quick-stat-value.negative { color: var(--negative); }
         
         .header-actions {
             display: flex;
@@ -128,34 +197,14 @@
             flex-wrap: wrap;
         }
         
-        .header-stat {
-            text-align: center;
-            padding: 0 12px;
-            border-right: 1px solid var(--border-color);
-        }
-        
-        .header-stat:last-of-type {
-            border-right: none;
-        }
-        
-        .header-stat-label {
-            font-size: 0.6rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        
-        .header-stat-value {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.85rem;
-            color: var(--text-primary);
-        }
-        
         .time-display {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 1rem;
+            font-size: 0.85rem;
             color: var(--text-secondary);
-            padding: 0 12px;
+            padding: 8px 14px;
+            background: var(--bg-card);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
         }
         
         /* Buttons */
@@ -163,131 +212,189 @@
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            padding: 8px 14px;
+            padding: 9px 16px;
             background: var(--bg-card);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
+            border-radius: 10px;
             color: var(--text-secondary);
             font-size: 0.8rem;
             font-weight: 500;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: all 0.25s ease;
         }
         
         .btn:hover {
-            background: var(--accent-bg);
+            background: var(--bg-card-hover);
             border-color: var(--border-hover);
             color: var(--text-primary);
+            transform: translateY(-1px);
         }
         
         .btn-primary {
-            background: var(--accent-bg);
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.15), rgba(0, 255, 136, 0.05));
             border-color: rgba(0, 255, 136, 0.3);
             color: var(--accent);
         }
         
         .btn-primary:hover {
-            background: rgba(0, 255, 136, 0.2);
+            background: linear-gradient(135deg, rgba(0, 255, 136, 0.25), rgba(0, 255, 136, 0.1));
             border-color: var(--accent);
+            box-shadow: 0 0 20px rgba(0, 255, 136, 0.2);
         }
         
-        .btn svg {
-            width: 14px;
-            height: 14px;
+        .btn svg { width: 14px; height: 14px; }
+        
+        /* Dropdown - FIXED z-index */
+        .dropdown {
+            position: relative;
+            display: inline-block;
+        }
+        
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            right: 0;
+            top: calc(100% + 6px);
+            background: var(--bg-primary);
+            backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            min-width: 200px;
+            z-index: 99999;
+            box-shadow: 0 15px 50px rgba(0, 0, 0, 0.6), var(--shadow-glow);
+            overflow: hidden;
+        }
+        
+        .dropdown-menu.show { display: block; }
+        
+        .dropdown-title {
+            padding: 12px 16px;
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border-color);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            background: rgba(0, 0, 0, 0.2);
+        }
+        
+        .dropdown-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 16px;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .dropdown-item:hover {
+            background: var(--accent-bg);
+            color: var(--text-primary);
+        }
+        
+        .dropdown-item span { font-size: 1rem; }
+        
+        .dropdown-divider {
+            height: 1px;
+            background: var(--border-color);
+            margin: 4px 0;
         }
         
         /* Main Layout */
         .main-layout {
             display: grid;
-            grid-template-columns: 1fr 360px;
+            grid-template-columns: 1fr 380px;
             gap: 16px;
         }
         
+        @media (max-width: 1400px) {
+            .main-layout { grid-template-columns: 1fr 320px; }
+        }
+        
         @media (max-width: 1200px) {
-            .main-layout {
-                grid-template-columns: 1fr;
-            }
-            .news-sidebar {
-                max-height: 500px;
-            }
+            .main-layout { grid-template-columns: 1fr; }
+            .sidebar { max-height: 600px; }
         }
         
-        .main-content {
-            min-width: 0;
-        }
+        .main-content { min-width: 0; }
         
-        .news-sidebar {
+        .sidebar {
             position: sticky;
             top: 12px;
             height: calc(100vh - 100px);
-            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
         }
         
         /* Tabs */
         .main-tabs {
             display: flex;
-            gap: 6px;
-            margin-bottom: 16px;
+            gap: 4px;
             padding: 6px;
             background: var(--bg-primary);
-            backdrop-filter: blur(20px);
+            backdrop-filter: var(--glass-blur);
             border: 1px solid var(--border-color);
-            border-radius: 10px;
+            border-radius: 12px;
+            margin-bottom: 16px;
         }
         
         .main-tab {
-            padding: 10px 20px;
+            flex: 1;
+            padding: 12px 20px;
             border: none;
             background: transparent;
             color: var(--text-secondary);
             font-size: 0.85rem;
             font-weight: 500;
             cursor: pointer;
-            border-radius: 6px;
-            transition: all 0.2s;
+            border-radius: 8px;
+            transition: all 0.25s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
         }
         
         .main-tab:hover {
-            background: var(--accent-bg);
+            background: var(--bg-card);
             color: var(--text-primary);
         }
         
         .main-tab.active {
-            background: var(--accent);
+            background: linear-gradient(135deg, var(--accent), #00cc6a);
             color: #0a0f14;
             font-weight: 600;
+            box-shadow: 0 4px 15px rgba(0, 255, 136, 0.3);
         }
         
-        .tab-content {
-            display: none;
-        }
-        
-        .tab-content.active {
-            display: block;
-        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
         
         /* Panel */
         .panel {
             background: var(--bg-panel);
-            backdrop-filter: blur(20px);
+            backdrop-filter: var(--glass-blur);
             border: 1px solid var(--border-color);
-            border-radius: 12px;
+            border-radius: 16px;
             margin-bottom: 16px;
             overflow: hidden;
-            transition: border-color 0.3s;
+            transition: all 0.3s ease;
         }
         
         .panel:hover {
             border-color: var(--border-hover);
+            box-shadow: var(--shadow-glow);
         }
         
         .panel-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 14px 18px;
+            padding: 16px 20px;
             border-bottom: 1px solid var(--border-color);
-            background: rgba(0, 0, 0, 0.2);
+            background: rgba(0, 0, 0, 0.25);
         }
         
         .panel-title {
@@ -296,100 +403,157 @@
             font-weight: 600;
             color: var(--accent);
             text-transform: uppercase;
-            letter-spacing: 1px;
+            letter-spacing: 1.5px;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
         }
         
-        .panel-title-icon {
-            font-size: 1rem;
+        .panel-title-icon { font-size: 1.1rem; }
+        
+        .panel-badge {
+            padding: 4px 10px;
+            background: var(--accent-bg);
+            border: 1px solid rgba(0, 255, 136, 0.2);
+            border-radius: 6px;
+            font-size: 0.7rem;
+            color: var(--accent);
         }
         
-        .panel-content {
-            padding: 16px;
-        }
+        .panel-content { padding: 18px; }
         
-        /* Section Title */
+        /* Section */
         .section-title {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
+            font-size: 0.75rem;
             font-weight: 600;
             color: var(--accent);
             text-transform: uppercase;
-            letter-spacing: 1px;
-            padding: 10px 14px;
+            letter-spacing: 1.5px;
+            padding: 12px 16px;
             background: var(--bg-primary);
-            backdrop-filter: blur(20px);
+            backdrop-filter: var(--glass-blur);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
+            border-radius: 10px;
             margin-bottom: 12px;
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 10px;
         }
         
-        /* Grid Cards */
-        .grid {
+        .section-icon { font-size: 1rem; }
+        
+        /* Stats Grid */
+        .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
             gap: 12px;
             margin-bottom: 16px;
         }
         
-        .card {
+        .stat-card {
             background: var(--bg-card);
             border: 1px solid rgba(255, 255, 255, 0.03);
-            border-radius: 10px;
-            padding: 16px;
-            transition: all 0.2s;
+            border-radius: 12px;
+            padding: 18px;
+            transition: all 0.25s ease;
+            position: relative;
+            overflow: hidden;
         }
         
-        .card:hover {
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: linear-gradient(135deg, transparent 50%, rgba(0, 255, 136, 0.02) 100%);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        .stat-card:hover {
             border-color: var(--border-color);
-            background: rgba(0, 255, 136, 0.02);
+            transform: translateY(-2px);
         }
         
-        .card-label {
+        .stat-card:hover::before { opacity: 1; }
+        
+        .stat-card.highlight {
+            border-left: 3px solid var(--accent);
+        }
+        
+        .stat-card.highlight-info { border-left-color: var(--info); }
+        .stat-card.highlight-warning { border-left-color: var(--warning); }
+        .stat-card.highlight-purple { border-left-color: var(--purple); }
+        
+        .stat-label {
             font-size: 0.65rem;
             text-transform: uppercase;
             letter-spacing: 0.5px;
             color: var(--text-muted);
             margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
         }
         
-        .card-value {
+        .stat-label-icon { font-size: 0.9rem; }
+        
+        .stat-value {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 1.4rem;
+            font-size: 1.5rem;
             font-weight: 700;
             color: var(--text-primary);
+            line-height: 1.2;
         }
         
-        .card-value.positive { color: var(--positive); }
-        .card-value.negative { color: var(--negative); }
-        .card-value.warning { color: var(--warning); }
-        .card-value.info { color: var(--info); }
-        .card-value.small { font-size: 1.1rem; }
+        .stat-value.sm { font-size: 1.2rem; }
+        .stat-value.xs { font-size: 1rem; }
+        .stat-value.positive { color: var(--positive); }
+        .stat-value.negative { color: var(--negative); }
+        .stat-value.warning { color: var(--warning); }
+        .stat-value.info { color: var(--info); }
+        .stat-value.purple { color: var(--purple); }
         
-        .card-sub {
+        .stat-sub {
             font-size: 0.7rem;
             color: var(--text-muted);
             margin-top: 4px;
         }
         
-        .card-highlight {
-            border-left: 3px solid var(--accent);
+        .stat-trend {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-top: 6px;
         }
         
-        .card-highlight.warning {
-            border-left-color: var(--warning);
+        .stat-trend.up {
+            background: rgba(0, 255, 136, 0.1);
+            color: var(--positive);
         }
         
-        .card-highlight.info {
-            border-left-color: var(--info);
+        .stat-trend.down {
+            background: rgba(255, 71, 87, 0.1);
+            color: var(--negative);
         }
         
-        /* Reasons Grid */
+        /* Two Column Stats */
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .stat-pair {
+            display: flex;
+            gap: 8px;
+        }
+        
+        /* Reasons */
         .reasons-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -397,24 +561,25 @@
         }
         
         @media (max-width: 768px) {
-            .reasons-grid {
-                grid-template-columns: 1fr;
-            }
+            .reasons-grid { grid-template-columns: 1fr; }
         }
         
         .reasons-list {
             background: var(--bg-card);
             border: 1px solid rgba(255, 255, 255, 0.03);
-            border-radius: 10px;
-            padding: 14px;
+            border-radius: 12px;
+            padding: 16px;
         }
         
         .reasons-list h3 {
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.75rem;
             font-weight: 600;
-            margin-bottom: 12px;
+            margin-bottom: 14px;
             text-transform: uppercase;
+            display: flex;
+            align-items: center;
+            gap: 8px;
         }
         
         .reasons-list h3.wins { color: var(--positive); }
@@ -423,17 +588,45 @@
         .reason-item {
             display: flex;
             justify-content: space-between;
-            padding: 8px 0;
+            align-items: center;
+            padding: 10px 0;
             border-bottom: 1px solid rgba(255, 255, 255, 0.03);
             font-size: 0.8rem;
         }
         
         .reason-item:last-child { border-bottom: none; }
-        .reason-name { color: var(--text-secondary); }
+        
+        .reason-name { 
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .reason-bar {
+            flex: 1;
+            height: 4px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 2px;
+            margin: 0 12px;
+            overflow: hidden;
+        }
+        
+        .reason-bar-fill {
+            height: 100%;
+            border-radius: 2px;
+            transition: width 0.5s ease;
+        }
+        
+        .reason-bar-fill.win { background: var(--positive); }
+        .reason-bar-fill.loss { background: var(--negative); }
+        
         .reason-count { 
             font-family: 'JetBrains Mono', monospace;
             color: var(--text-primary); 
-            font-weight: 500; 
+            font-weight: 600;
+            min-width: 30px;
+            text-align: right;
         }
         
         /* Tables */
@@ -450,47 +643,47 @@
             color: var(--text-muted);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            padding: 12px 14px;
+            padding: 14px 16px;
             text-align: left;
             border-bottom: 1px solid var(--border-color);
-            background: rgba(0, 0, 0, 0.2);
+            background: rgba(0, 0, 0, 0.25);
+            position: sticky;
+            top: 0;
         }
         
         .data-table td {
-            padding: 12px 14px;
+            padding: 14px 16px;
             border-bottom: 1px solid rgba(255, 255, 255, 0.03);
             color: var(--text-secondary);
         }
         
         .data-table tr:hover td {
-            background: rgba(0, 255, 136, 0.02);
+            background: var(--bg-card-hover);
         }
         
-        .data-table th.sortable {
-            cursor: pointer;
-        }
-        
-        .data-table th.sortable:hover {
-            color: var(--text-primary);
-        }
-        
+        .data-table th.sortable { cursor: pointer; }
+        .data-table th.sortable:hover { color: var(--text-primary); }
         .data-table th.sorted-asc::after { content: ' ↑'; color: var(--accent); }
         .data-table th.sorted-desc::after { content: ' ↓'; color: var(--accent); }
         
+        /* Badges */
         .badge {
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 6px;
             font-size: 0.65rem;
             font-weight: 600;
             text-transform: uppercase;
             font-family: 'JetBrains Mono', monospace;
         }
         
-        .badge-long { background: rgba(0, 255, 136, 0.15); color: var(--positive); }
-        .badge-short { background: rgba(255, 71, 87, 0.15); color: var(--negative); }
-        .badge-on { background: rgba(0, 255, 136, 0.15); color: var(--positive); }
-        .badge-off { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+        .badge-long { background: rgba(0, 255, 136, 0.12); color: var(--positive); }
+        .badge-short { background: rgba(255, 71, 87, 0.12); color: var(--negative); }
+        .badge-on { background: rgba(0, 255, 136, 0.12); color: var(--positive); }
+        .badge-off { background: rgba(139, 148, 158, 0.12); color: var(--text-muted); }
+        .badge-auto { background: rgba(168, 85, 247, 0.12); color: var(--purple); }
         
         .pnl-positive { color: var(--positive); font-family: 'JetBrains Mono', monospace; }
         .pnl-negative { color: var(--negative); font-family: 'JetBrains Mono', monospace; }
@@ -499,31 +692,32 @@
         .logs-container {
             background: var(--bg-card);
             border: 1px solid rgba(255, 255, 255, 0.03);
-            border-radius: 10px;
-            max-height: 300px;
+            border-radius: 12px;
+            max-height: 350px;
             overflow-y: auto;
         }
         
         .log-entry {
-            padding: 10px 14px;
+            padding: 12px 16px;
             border-bottom: 1px solid rgba(255, 255, 255, 0.03);
             font-family: 'JetBrains Mono', monospace;
             font-size: 0.75rem;
             display: flex;
-            gap: 12px;
+            gap: 14px;
             align-items: flex-start;
+            transition: background 0.2s;
         }
         
         .log-entry:last-child { border-bottom: none; }
-        .log-entry:hover { background: rgba(0, 255, 136, 0.02); }
+        .log-entry:hover { background: var(--bg-card-hover); }
         
         .log-time { color: var(--text-muted); min-width: 130px; flex-shrink: 0; }
-        .log-level { min-width: 65px; font-weight: 600; flex-shrink: 0; }
+        .log-level { min-width: 70px; font-weight: 600; flex-shrink: 0; }
         .log-level.INFO { color: var(--info); }
         .log-level.WARNING { color: var(--warning); }
         .log-level.ERROR { color: var(--negative); }
         .log-level.CRITICAL { color: #ff0055; }
-        .log-message { color: var(--text-secondary); word-break: break-word; }
+        .log-message { color: var(--text-secondary); word-break: break-word; line-height: 1.4; }
         
         .log-tabs {
             display: flex;
@@ -531,9 +725,9 @@
         }
         
         .log-tab {
-            padding: 6px 12px;
+            padding: 7px 14px;
             border: 1px solid var(--border-color);
-            border-radius: 6px;
+            border-radius: 8px;
             background: transparent;
             color: var(--text-muted);
             font-size: 0.7rem;
@@ -542,94 +736,86 @@
         }
         
         .log-tab:hover {
-            background: var(--accent-bg);
+            background: var(--bg-card);
             color: var(--text-primary);
         }
         
         .log-tab.active {
             background: var(--accent-bg);
             color: var(--accent);
-            border-color: var(--accent);
+            border-color: rgba(0, 255, 136, 0.3);
         }
         
-        /* Alerts Section */
-        .alerts-section {
-            border-color: var(--negative);
-            animation: alertPulse 3s ease-in-out infinite;
+        /* Alerts */
+        .alerts-panel {
+            border-color: rgba(255, 71, 87, 0.3);
+            animation: alertGlow 3s ease-in-out infinite;
         }
         
-        @keyframes alertPulse {
-            0%, 100% { border-color: rgba(255, 71, 87, 0.3); }
-            50% { border-color: rgba(255, 71, 87, 0.6); }
+        @keyframes alertGlow {
+            0%, 100% { box-shadow: 0 0 10px rgba(255, 71, 87, 0.1); }
+            50% { box-shadow: 0 0 25px rgba(255, 71, 87, 0.2); }
         }
         
-        .alerts-section .panel-title {
-            color: var(--negative);
-        }
+        .alerts-panel .panel-title { color: var(--negative); }
         
         .alert-badge {
-            display: inline-block;
-            padding: 4px 10px;
+            padding: 5px 12px;
             border-radius: 6px;
             font-size: 0.7rem;
             font-weight: 700;
             font-family: 'JetBrains Mono', monospace;
         }
         
-        .alert-badge.critical { background: rgba(255, 0, 85, 0.2); color: #ff0055; }
-        .alert-badge.error { background: rgba(255, 71, 87, 0.2); color: var(--negative); }
-        .alert-badge.warning { background: rgba(255, 165, 2, 0.2); color: var(--warning); }
-        
-        .alerts-patterns {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 12px;
-        }
+        .alert-badge.critical { background: rgba(255, 0, 85, 0.15); color: #ff0055; }
+        .alert-badge.error { background: rgba(255, 71, 87, 0.15); color: var(--negative); }
+        .alert-badge.warning { background: rgba(255, 165, 2, 0.15); color: var(--warning); }
         
         .alert-pattern {
-            background: rgba(255, 71, 87, 0.1);
-            border: 1px solid rgba(255, 71, 87, 0.3);
-            border-radius: 6px;
-            padding: 8px 12px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(255, 71, 87, 0.08);
+            border: 1px solid rgba(255, 71, 87, 0.2);
+            border-radius: 8px;
+            padding: 8px 14px;
             font-size: 0.75rem;
+            margin: 0 8px 8px 0;
         }
         
         .alert-pattern.warning {
-            background: rgba(255, 165, 2, 0.1);
-            border-color: rgba(255, 165, 2, 0.3);
+            background: rgba(255, 165, 2, 0.08);
+            border-color: rgba(255, 165, 2, 0.2);
         }
         
         .alert-pattern-count {
             font-family: 'JetBrains Mono', monospace;
             font-weight: 700;
             color: var(--negative);
-            margin-right: 6px;
         }
         
         .alert-pattern.warning .alert-pattern-count { color: var(--warning); }
         
-        /* User Diagnostics */
+        /* User Input */
         .user-input {
             padding: 10px 14px;
             background: var(--bg-card);
             border: 1px solid var(--border-color);
-            border-radius: 8px;
+            border-radius: 10px;
             color: var(--text-primary);
             font-size: 0.85rem;
             font-family: 'JetBrains Mono', monospace;
             width: 180px;
+            transition: all 0.2s;
         }
         
         .user-input:focus {
             outline: none;
             border-color: var(--accent);
-            box-shadow: 0 0 0 2px rgba(0, 255, 136, 0.1);
+            box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.1);
         }
         
-        .user-input::placeholder {
-            color: var(--text-muted);
-        }
+        .user-input::placeholder { color: var(--text-muted); }
         
         /* Users Summary */
         .users-summary {
@@ -642,9 +828,14 @@
         .summary-card {
             background: var(--bg-card);
             border: 1px solid rgba(255, 255, 255, 0.03);
-            border-radius: 10px;
-            padding: 14px;
+            border-radius: 12px;
+            padding: 16px;
             text-align: center;
+            transition: all 0.2s;
+        }
+        
+        .summary-card:hover {
+            border-color: var(--border-color);
         }
         
         .summary-label {
@@ -652,11 +843,12 @@
             text-transform: uppercase;
             color: var(--text-muted);
             margin-bottom: 6px;
+            letter-spacing: 0.5px;
         }
         
         .summary-value {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 1.2rem;
+            font-size: 1.3rem;
             font-weight: 600;
             color: var(--text-primary);
         }
@@ -664,64 +856,96 @@
         .users-table-container {
             max-height: 600px;
             overflow-y: auto;
-            border-radius: 10px;
+            border-radius: 12px;
         }
         
-        /* News Panel */
-        .news-panel {
+        /* Sidebar Panels */
+        .sidebar-panel {
             background: var(--bg-panel);
-            backdrop-filter: blur(20px);
+            backdrop-filter: var(--glass-blur);
             border: 1px solid var(--border-color);
-            border-radius: 12px;
+            border-radius: 16px;
             display: flex;
             flex-direction: column;
-            height: 100%;
             overflow: hidden;
+            transition: all 0.3s;
         }
         
-        .news-header {
+        .sidebar-panel:hover {
+            border-color: var(--border-hover);
+        }
+        
+        .sidebar-header {
             padding: 14px 18px;
             border-bottom: 1px solid var(--border-color);
-            background: rgba(0, 0, 0, 0.2);
+            background: rgba(0, 0, 0, 0.25);
             display: flex;
             justify-content: space-between;
             align-items: center;
         }
         
-        .news-title {
+        .sidebar-title {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8rem;
+            font-size: 0.75rem;
             font-weight: 600;
             color: var(--accent);
             text-transform: uppercase;
             letter-spacing: 1px;
         }
         
-        .news-sentiment {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 0.7rem;
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-weight: 600;
-            font-family: 'JetBrains Mono', monospace;
-        }
-        
-        .news-sentiment.bullish { background: rgba(0, 255, 136, 0.15); color: var(--positive); }
-        .news-sentiment.bearish { background: rgba(255, 71, 87, 0.15); color: var(--negative); }
-        .news-sentiment.neutral { background: rgba(88, 166, 255, 0.15); color: var(--info); }
-        
-        .news-list {
+        .sidebar-content {
             flex: 1;
             overflow-y: auto;
-            padding: 8px;
+            padding: 12px;
         }
         
+        /* Live Positions */
+        .position-card {
+            background: var(--bg-card);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+        }
+        
+        .position-card:hover {
+            border-color: var(--border-color);
+        }
+        
+        .position-card:last-child { margin-bottom: 0; }
+        
+        .position-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .position-symbol {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--text-primary);
+        }
+        
+        .position-details {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+        
+        .position-pnl {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+        }
+        
+        /* News Panel */
         .news-item {
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 8px;
+            padding: 14px;
+            border-radius: 10px;
+            margin-bottom: 10px;
             background: var(--bg-card);
             border: 1px solid rgba(255, 255, 255, 0.03);
             cursor: pointer;
@@ -729,7 +953,7 @@
         }
         
         .news-item:hover {
-            background: rgba(0, 255, 136, 0.03);
+            background: var(--bg-card-hover);
             border-color: var(--border-color);
         }
         
@@ -737,13 +961,13 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 6px;
+            margin-bottom: 8px;
         }
         
         .news-source {
             font-size: 0.7rem;
-            color: var(--accent);
             font-weight: 500;
+            color: var(--accent);
         }
         
         .news-source.twitter { color: #1DA1F2; }
@@ -754,121 +978,148 @@
             font-family: 'JetBrains Mono', monospace;
         }
         
-        .news-item-title {
+        .news-title {
             font-size: 0.8rem;
             color: var(--text-primary);
             line-height: 1.4;
-            margin-bottom: 8px;
+            margin-bottom: 10px;
         }
         
         .news-tags {
             display: flex;
             flex-wrap: wrap;
-            gap: 4px;
+            gap: 6px;
         }
         
         .news-tag {
             font-size: 0.6rem;
-            padding: 2px 6px;
+            padding: 3px 8px;
             border-radius: 4px;
             font-weight: 500;
         }
         
-        .news-tag.coin { background: rgba(88, 166, 255, 0.15); color: var(--info); }
-        .news-tag.bullish { background: rgba(0, 255, 136, 0.15); color: var(--positive); }
-        .news-tag.bearish { background: rgba(255, 71, 87, 0.15); color: var(--negative); }
-        .news-tag.neutral { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+        .news-tag.coin { background: rgba(88, 166, 255, 0.12); color: var(--info); }
+        .news-tag.bullish { background: rgba(0, 255, 136, 0.12); color: var(--positive); }
+        .news-tag.bearish { background: rgba(255, 71, 87, 0.12); color: var(--negative); }
+        .news-tag.neutral { background: rgba(139, 148, 158, 0.12); color: var(--text-muted); }
         
         .news-impact {
             font-size: 0.6rem;
-            padding: 2px 6px;
+            padding: 3px 8px;
             border-radius: 4px;
             font-weight: 600;
             font-family: 'JetBrains Mono', monospace;
         }
         
-        .news-impact.critical { background: rgba(255, 71, 87, 0.2); color: var(--negative); }
-        .news-impact.high { background: rgba(255, 165, 2, 0.2); color: var(--warning); }
-        .news-impact.medium { background: rgba(88, 166, 255, 0.15); color: var(--info); }
-        .news-impact.low { background: rgba(139, 148, 158, 0.15); color: var(--text-muted); }
+        .news-impact.critical { background: rgba(255, 71, 87, 0.15); color: var(--negative); }
+        .news-impact.high { background: rgba(255, 165, 2, 0.15); color: var(--warning); }
+        .news-impact.medium { background: rgba(88, 166, 255, 0.12); color: var(--info); }
+        .news-impact.low { background: rgba(139, 148, 158, 0.12); color: var(--text-muted); }
         
-        /* Export Dropdown */
-        .export-dropdown {
-            position: relative;
-            display: inline-block;
-        }
-        
-        .export-menu {
-            display: none;
-            position: absolute;
-            right: 0;
-            top: 100%;
-            margin-top: 4px;
-            background: var(--bg-primary);
-            backdrop-filter: blur(20px);
-            border: 1px solid var(--border-color);
-            border-radius: 10px;
-            min-width: 180px;
-            z-index: 1000;
-            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-        }
-        
-        .export-menu.show { display: block; }
-        
-        .export-menu-title {
-            padding: 10px 14px;
+        .sentiment-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
             font-size: 0.7rem;
-            color: var(--text-muted);
-            border-bottom: 1px solid var(--border-color);
-            text-transform: uppercase;
+            padding: 5px 12px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
         }
         
-        .export-menu-item {
-            display: block;
-            padding: 10px 14px;
-            color: var(--text-secondary);
+        .sentiment-badge.bullish { background: rgba(0, 255, 136, 0.12); color: var(--positive); }
+        .sentiment-badge.bearish { background: rgba(255, 71, 87, 0.12); color: var(--negative); }
+        .sentiment-badge.neutral { background: rgba(88, 166, 255, 0.12); color: var(--info); }
+        
+        /* Chart Container */
+        .chart-container {
+            background: var(--bg-card);
+            border: 1px solid rgba(255, 255, 255, 0.03);
+            border-radius: 12px;
+            padding: 16px;
+            height: 200px;
+            position: relative;
+        }
+        
+        /* Streak */
+        .streak-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 8px;
             font-size: 0.8rem;
-            cursor: pointer;
-            transition: all 0.2s;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
         }
         
-        .export-menu-item:hover {
-            background: var(--accent-bg);
-            color: var(--text-primary);
+        .streak-win { background: rgba(0, 255, 136, 0.12); color: var(--positive); }
+        .streak-loss { background: rgba(255, 71, 87, 0.12); color: var(--negative); }
+        
+        /* Loading & Empty */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            padding: 40px;
+            color: var(--text-muted);
         }
         
-        /* Share Card (hidden) */
+        .spinner {
+            width: 20px; height: 20px;
+            border: 2px solid rgba(0, 255, 136, 0.15);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin { to { transform: rotate(360deg); } }
+        
+        .no-data {
+            color: var(--text-muted);
+            font-style: italic;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.2); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb { background: rgba(0, 255, 136, 0.25); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(0, 255, 136, 0.4); }
+        
+        /* Share Card */
         #shareCard {
             position: fixed;
             left: -9999px;
             top: 0;
-            width: 500px;
-            padding: 24px;
-            background: linear-gradient(135deg, #0a0f14 0%, #0f1922 100%);
+            width: 520px;
+            padding: 28px;
+            background: linear-gradient(135deg, #080c10 0%, #0f1922 100%);
             border: 1px solid var(--border-color);
-            border-radius: 12px;
+            border-radius: 16px;
         }
         
         .share-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 20px;
-            padding-bottom: 12px;
+            margin-bottom: 24px;
+            padding-bottom: 14px;
             border-bottom: 1px solid var(--border-color);
         }
         
         .share-title {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 1.2rem;
+            font-size: 1.3rem;
             font-weight: 700;
-            color: var(--accent);
+            background: linear-gradient(135deg, var(--accent), #58a6ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
         
-        .share-date {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-        }
+        .share-date { font-size: 0.75rem; color: var(--text-muted); }
         
         .share-grid {
             display: grid;
@@ -878,8 +1129,8 @@
         
         .share-stat {
             background: var(--bg-card);
-            padding: 14px;
-            border-radius: 8px;
+            padding: 16px;
+            border-radius: 10px;
             border: 1px solid rgba(255, 255, 255, 0.03);
         }
         
@@ -887,126 +1138,75 @@
             font-size: 0.65rem;
             color: var(--text-muted);
             text-transform: uppercase;
-            margin-bottom: 4px;
+            margin-bottom: 6px;
         }
         
         .share-stat-value {
             font-family: 'JetBrains Mono', monospace;
-            font-size: 1.3rem;
+            font-size: 1.4rem;
             font-weight: 700;
         }
         
         .share-footer {
-            margin-top: 16px;
-            padding-top: 12px;
+            margin-top: 18px;
+            padding-top: 14px;
             border-top: 1px solid var(--border-color);
             font-size: 0.65rem;
             color: var(--text-muted);
             text-align: center;
         }
         
-        /* Streak */
-        .streak-badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            font-family: 'JetBrains Mono', monospace;
-        }
-        
-        .streak-win { background: rgba(0, 255, 136, 0.15); color: var(--positive); }
-        .streak-loss { background: rgba(255, 71, 87, 0.15); color: var(--negative); }
-        
-        /* Loading & Empty */
-        .loading {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            padding: 40px;
-            color: var(--text-muted);
-        }
-        
-        .spinner {
-            width: 18px;
-            height: 18px;
-            border: 2px solid rgba(0, 255, 136, 0.2);
-            border-top-color: var(--accent);
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-        }
-        
-        @keyframes spin {
-            to { transform: rotate(360deg); }
-        }
-        
-        .no-data {
-            color: var(--text-muted);
-            font-style: italic;
-            padding: 20px;
-            text-align: center;
-        }
-        
-        /* Scrollbar */
-        ::-webkit-scrollbar {
-            width: 6px;
-            height: 6px;
-        }
-        
-        ::-webkit-scrollbar-track {
-            background: rgba(0, 0, 0, 0.2);
-            border-radius: 3px;
-        }
-        
-        ::-webkit-scrollbar-thumb {
-            background: rgba(0, 255, 136, 0.3);
-            border-radius: 3px;
-        }
-        
-        ::-webkit-scrollbar-thumb:hover {
-            background: rgba(0, 255, 136, 0.5);
-        }
-        
         /* Responsive */
         @media (max-width: 768px) {
             .container { padding: 8px; }
-            .header { padding: 10px 14px; }
-            .logo-text { font-size: 1.1rem; }
-            .grid { grid-template-columns: repeat(2, 1fr); }
-            .card { padding: 12px; }
-            .card-value { font-size: 1.1rem; }
-            .main-tabs { gap: 4px; padding: 4px; }
-            .main-tab { padding: 8px 12px; font-size: 0.75rem; }
+            .header { padding: 12px 16px; }
+            .logo-text { font-size: 1.2rem; }
+            .header-center { display: none; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .stat-card { padding: 14px; }
+            .stat-value { font-size: 1.2rem; }
+            .main-tabs { gap: 2px; padding: 4px; }
+            .main-tab { padding: 10px 14px; font-size: 0.75rem; }
             .data-table { font-size: 0.7rem; }
-            .data-table th, .data-table td { padding: 8px; }
-            .header-stat { padding: 0 8px; }
+            .data-table th, .data-table td { padding: 10px; }
+            .quick-stat { padding: 0 10px; }
             .time-display { display: none; }
         }
     </style>
 </head>
 <body>
     <div class="bg-container"></div>
+    <div class="bg-grid"></div>
     
     <div class="container">
         <!-- Header -->
         <header class="header">
             <div class="logo">
+                <div class="logo-icon">📊</div>
                 <span class="logo-text">YULA</span>
-                <span class="logo-version">v2.0</span>
-                <div class="market-status">
+                <span class="logo-version">v2.1</span>
+                <div class="status-indicator">
                     <span class="status-dot"></span>
                     <span>LIVE</span>
                 </div>
             </div>
             
-            <div class="header-actions">
-                <div class="header-stat">
-                    <div class="header-stat-label">Logs</div>
-                    <div class="header-stat-value" id="logsCount">0</div>
+            <div class="header-center">
+                <div class="quick-stat">
+                    <div class="quick-stat-label">Win Rate</div>
+                    <div class="quick-stat-value positive" id="headerWinRate">-</div>
                 </div>
+                <div class="quick-stat">
+                    <div class="quick-stat-label">Today PnL</div>
+                    <div class="quick-stat-value" id="headerTodayPnl">-</div>
+                </div>
+                <div class="quick-stat">
+                    <div class="quick-stat-label">Open Pos</div>
+                    <div class="quick-stat-value info" id="headerOpenPos">-</div>
+                </div>
+            </div>
+            
+            <div class="header-actions">
                 <span class="time-display" id="lastUpdate">-</span>
                 
                 <button class="btn" onclick="refreshAll()">
@@ -1017,28 +1217,30 @@
                     Refresh
                 </button>
                 
-                <div class="export-dropdown">
-                    <button class="btn" onclick="toggleExportMenu()">
+                <div class="dropdown">
+                    <button class="btn" onclick="toggleDropdown('exportMenu')">
                         <svg viewBox="0 0 16 16" fill="currentColor">
                             <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
                             <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
                         </svg>
                         Export
                     </button>
-                    <div class="export-menu" id="exportMenu">
-                        <div class="export-menu-title">📥 Export Logs</div>
-                        <div class="export-menu-item" onclick="exportLogs(1, 'hours')">🕐 1 hour</div>
-                        <div class="export-menu-item" onclick="exportLogs(6, 'hours')">🕕 6 hours</div>
-                        <div class="export-menu-item" onclick="exportLogs(24, 'hours')">📅 24 hours</div>
-                        <div class="export-menu-item" onclick="exportLogs(7, 'days')">📆 7 days</div>
-                        <div class="export-menu-item" onclick="exportLogs(30, 'days')">📆 30 days</div>
-                        <div class="export-menu-item" onclick="exportLogs(0, 'all')" style="border-top: 1px solid var(--border-color); margin-top: 4px;">📦 ALL logs</div>
+                    <div class="dropdown-menu" id="exportMenu">
+                        <div class="dropdown-title">📥 Export Logs</div>
+                        <div class="dropdown-item" onclick="exportLogs(1, 'hours')"><span>🕐</span> Last 1 hour</div>
+                        <div class="dropdown-item" onclick="exportLogs(6, 'hours')"><span>🕕</span> Last 6 hours</div>
+                        <div class="dropdown-item" onclick="exportLogs(24, 'hours')"><span>📅</span> Last 24 hours</div>
+                        <div class="dropdown-divider"></div>
+                        <div class="dropdown-item" onclick="exportLogs(7, 'days')"><span>📆</span> Last 7 days</div>
+                        <div class="dropdown-item" onclick="exportLogs(30, 'days')"><span>📆</span> Last 30 days</div>
+                        <div class="dropdown-divider"></div>
+                        <div class="dropdown-item" onclick="exportLogs(0, 'all')"><span>📦</span> ALL logs</div>
                     </div>
                 </div>
                 
                 <button class="btn btn-primary" onclick="shareStats()">
                     <svg viewBox="0 0 16 16" fill="currentColor">
-                        <path d="M13.5 1a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM11 2.5a2.5 2.5 0 1 1 .603 1.628l-6.718 3.12a2.499 2.499 0 0 1 0 1.504l6.718 3.12a2.5 2.5 0 1 1-.488.876l-6.718-3.12a2.5 2.5 0 1 1 0-3.256l6.718-3.12A2.5 2.5 0 0 1 11 2.5zm-8.5 4a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm11 5.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
+                        <path d="M13.5 1a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM11 2.5a2.5 2.5 0 1 1 .603 1.628l-6.718 3.12a2.499 2.499 0 0 1 0 1.504l6.718 3.12a2.5 2.5 0 1 1-.488.876l-6.718-3.12a2.5 2.5 0 1 1 0-3.256l6.718-3.12A2.5 2.5 0 0 1 11 2.5z"/>
                     </svg>
                     Share
                 </button>
@@ -1047,8 +1249,18 @@
         
         <!-- Main Tabs -->
         <div class="main-tabs">
-            <button class="main-tab active" onclick="switchTab('dashboard')">📊 Dashboard</button>
-            <button class="main-tab" onclick="switchTab('users')">👥 Users</button>
+            <button class="main-tab active" onclick="switchTab('dashboard')">
+                <span>📊</span> Dashboard
+            </button>
+            <button class="main-tab" onclick="switchTab('analytics')">
+                <span>📈</span> Analytics
+            </button>
+            <button class="main-tab" onclick="switchTab('users')">
+                <span>👥</span> Users
+            </button>
+            <button class="main-tab" onclick="switchTab('logs')">
+                <span>📝</span> Logs
+            </button>
         </div>
         
         <div class="main-layout">
@@ -1057,19 +1269,19 @@
                 <!-- Dashboard Tab -->
                 <div id="tab-dashboard" class="tab-content active">
                     
-                    <!-- Alerts Section -->
-                    <div class="panel alerts-section" id="alertsSection" style="display: none;">
+                    <!-- Alerts -->
+                    <div class="panel alerts-panel" id="alertsSection" style="display: none;">
                         <div class="panel-header">
-                            <span class="panel-title"><span class="panel-title-icon">🚨</span> Alerts</span>
+                            <span class="panel-title"><span class="panel-title-icon">🚨</span> Active Alerts</span>
                             <div style="display: flex; gap: 8px; align-items: center;">
-                                <span class="alert-badge critical" id="criticalCount" style="display: none;">0 CRITICAL</span>
-                                <span class="alert-badge error" id="errorCount" style="display: none;">0 ERROR</span>
-                                <span class="alert-badge warning" id="warningCount" style="display: none;">0 WARNING</span>
+                                <span class="alert-badge critical" id="criticalCount" style="display: none;">0</span>
+                                <span class="alert-badge error" id="errorCount" style="display: none;">0</span>
+                                <span class="alert-badge warning" id="warningCount" style="display: none;">0</span>
                                 <button class="btn" onclick="toggleAlerts()" id="alertsToggle">Hide</button>
                             </div>
                         </div>
                         <div class="panel-content" id="alertsContent">
-                            <div class="alerts-patterns" id="alertPatterns"></div>
+                            <div id="alertPatterns" style="margin-bottom: 12px;"></div>
                             <div class="logs-container" id="alertsContainer" style="max-height: 200px;">
                                 <div class="no-data">Loading...</div>
                             </div>
@@ -1077,140 +1289,125 @@
                     </div>
                     
                     <!-- Current State -->
-                    <div class="section-title"><span class="panel-title-icon">📊</span> Current State</div>
-                    <div class="grid">
-                        <div class="card card-highlight info">
-                            <div class="card-label">🔓 Open Deals</div>
-                            <div class="card-value info" id="openDeals">-</div>
+                    <div class="section-title"><span class="section-icon">📊</span> Current State</div>
+                    <div class="stats-grid">
+                        <div class="stat-card highlight-info">
+                            <div class="stat-label"><span class="stat-label-icon">🔓</span> Open Positions</div>
+                            <div class="stat-value info" id="openDeals">-</div>
+                            <div class="stat-sub" id="openDealsSub">- users</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">💰 Total PnL</div>
-                            <div class="card-value" id="totalPnl">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">📊</span> Long / Short</div>
+                            <div class="stat-value sm">
+                                <span class="pnl-positive" id="posLong">-</span>
+                                <span style="color: var(--text-muted);"> / </span>
+                                <span class="pnl-negative" id="posShort">-</span>
+                            </div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">📈 Today PnL</div>
-                            <div class="card-value" id="todayPnl">-</div>
-                            <div class="card-sub" id="todayTrades">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">💵</span> Positions Value</div>
+                            <div class="stat-value sm" id="positionsValue">-</div>
+                            <div class="stat-sub" id="unrealizedPnl">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">🔥 Streak</div>
-                            <div class="card-value" id="streak">-</div>
+                        <div class="stat-card highlight">
+                            <div class="stat-label"><span class="stat-label-icon">💰</span> Total PnL</div>
+                            <div class="stat-value" id="totalPnl">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">📈</span> Today PnL</div>
+                            <div class="stat-value" id="todayPnl">-</div>
+                            <div class="stat-sub" id="todayTrades">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">🔥</span> Streak</div>
+                            <div class="stat-value" id="streak">-</div>
                         </div>
                     </div>
                     
                     <!-- Signal Analysis -->
-                    <div class="section-title"><span class="panel-title-icon">🤖</span> Signal Analysis</div>
-                    <div class="grid">
-                        <div class="card card-highlight info">
-                            <div class="card-label">🔍 Analyzed</div>
-                            <div class="card-value info" id="analyzed">-</div>
+                    <div class="section-title"><span class="section-icon">🤖</span> Signal Analysis</div>
+                    <div class="stats-grid">
+                        <div class="stat-card highlight-info">
+                            <div class="stat-label"><span class="stat-label-icon">🔍</span> Analyzed</div>
+                            <div class="stat-value info" id="analyzed">-</div>
                         </div>
-                        <div class="card card-highlight">
-                            <div class="card-label">✅ Valid Setups</div>
-                            <div class="card-value positive" id="validSetups">-</div>
-                            <div class="card-sub" id="validSetupsPct">-</div>
+                        <div class="stat-card highlight">
+                            <div class="stat-label"><span class="stat-label-icon">✅</span> Valid Setups</div>
+                            <div class="stat-value positive" id="validSetups">-</div>
+                            <div class="stat-sub" id="validSetupsPct">-</div>
                         </div>
-                        <div class="card card-highlight warning">
-                            <div class="card-label">❌ Rejected</div>
-                            <div class="card-value warning" id="rejected">-</div>
-                            <div class="card-sub" id="rejectedPct">-</div>
+                        <div class="stat-card highlight-warning">
+                            <div class="stat-label"><span class="stat-label-icon">❌</span> Rejected</div>
+                            <div class="stat-value warning" id="rejected">-</div>
+                            <div class="stat-sub" id="rejectedPct">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">📤 Sent to Users</div>
-                            <div class="card-value small info" id="accepted">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">📤</span> Sent to Users</div>
+                            <div class="stat-value sm info" id="accepted">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">📡 On Bybit</div>
-                            <div class="card-value small info" id="bybitOpened">-</div>
+                        <div class="stat-card highlight-purple">
+                            <div class="stat-label"><span class="stat-label-icon">📡</span> On Bybit</div>
+                            <div class="stat-value purple" id="bybitOpened">-</div>
                         </div>
                     </div>
                     
                     <!-- Trading Results -->
-                    <div class="section-title"><span class="panel-title-icon">📈</span> Trading Results</div>
-                    <div class="grid">
-                        <div class="card">
-                            <div class="card-label">🏆 Win Rate</div>
-                            <div class="card-value" id="winRate">-</div>
+                    <div class="section-title"><span class="section-icon">📈</span> Trading Results</div>
+                    <div class="stats-grid">
+                        <div class="stat-card highlight">
+                            <div class="stat-label"><span class="stat-label-icon">🏆</span> Win Rate</div>
+                            <div class="stat-value" id="winRate">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">✅ Profitable</div>
-                            <div class="card-value positive" id="profitable">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">✅</span> Profitable</div>
+                            <div class="stat-value positive" id="profitable">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">❌ Losing</div>
-                            <div class="card-value negative" id="losing">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">❌</span> Losing</div>
+                            <div class="stat-value negative" id="losing">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">📊 Total Closed</div>
-                            <div class="card-value" id="totalClosed">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">📊</span> Total Closed</div>
+                            <div class="stat-value" id="totalClosed">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">💵 Avg Win/Loss</div>
-                            <div class="card-value small">
-                                <span class="pnl-positive" id="avgWin">-</span> / 
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">💵</span> Avg Win / Loss</div>
+                            <div class="stat-value xs">
+                                <span class="pnl-positive" id="avgWin">-</span>
+                                <span style="color: var(--text-muted);"> / </span>
                                 <span class="pnl-negative" id="avgLoss">-</span>
                             </div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">💎 Volume</div>
-                            <div class="card-value small" id="totalVolume">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">💎</span> Volume</div>
+                            <div class="stat-value sm" id="totalVolume">-</div>
                         </div>
                     </div>
                     
                     <!-- Records -->
-                    <div class="section-title"><span class="panel-title-icon">🏅</span> Records</div>
-                    <div class="grid" style="grid-template-columns: repeat(2, 1fr);">
-                        <div class="card">
-                            <div class="card-label">🚀 Best Trade</div>
-                            <div class="card-value small positive" id="bestTrade">-</div>
-                            <div class="card-sub" id="bestTradeInfo">-</div>
+                    <div class="section-title"><span class="section-icon">🏅</span> Records</div>
+                    <div class="stats-grid" style="grid-template-columns: repeat(2, 1fr);">
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">🚀</span> Best Trade</div>
+                            <div class="stat-value sm positive" id="bestTrade">-</div>
+                            <div class="stat-sub" id="bestTradeInfo">-</div>
                         </div>
-                        <div class="card">
-                            <div class="card-label">💀 Worst Trade</div>
-                            <div class="card-value small negative" id="worstTrade">-</div>
-                            <div class="card-sub" id="worstTradeInfo">-</div>
-                        </div>
-                    </div>
-                    
-                    <!-- Winrate Thresholds -->
-                    <div class="section-title"><span class="panel-title-icon">🎯</span> Winrate Thresholds</div>
-                    <div class="grid" style="grid-template-columns: repeat(5, 1fr);">
-                        <div class="card">
-                            <div class="card-label">>60% WR</div>
-                            <div class="card-value small" id="wr60">-</div>
-                            <div class="card-sub" id="wr60trades">-</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">>70% WR</div>
-                            <div class="card-value small" id="wr70">-</div>
-                            <div class="card-sub" id="wr70trades">-</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">>80% WR</div>
-                            <div class="card-value small positive" id="wr80">-</div>
-                            <div class="card-sub" id="wr80trades">-</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">>90% WR</div>
-                            <div class="card-value small positive" id="wr90">-</div>
-                            <div class="card-sub" id="wr90trades">-</div>
-                        </div>
-                        <div class="card">
-                            <div class="card-label">>95% WR</div>
-                            <div class="card-value small positive" id="wr95">-</div>
-                            <div class="card-sub" id="wr95trades">-</div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">💀</span> Worst Trade</div>
+                            <div class="stat-value sm negative" id="worstTrade">-</div>
+                            <div class="stat-sub" id="worstTradeInfo">-</div>
                         </div>
                     </div>
                     
                     <!-- Reasons Analysis -->
-                    <div class="section-title"><span class="panel-title-icon">📋</span> Reasons Analysis</div>
+                    <div class="section-title"><span class="section-icon">📋</span> Reasons Analysis</div>
                     <div class="reasons-grid">
                         <div class="reasons-list">
-                            <h3 class="wins">✅ Winning Reasons</h3>
+                            <h3 class="wins"><span>✅</span> Winning Reasons</h3>
                             <div id="winReasons"><div class="no-data">No data</div></div>
                         </div>
                         <div class="reasons-list">
-                            <h3 class="losses">❌ Losing Reasons</h3>
+                            <h3 class="losses"><span>❌</span> Losing Reasons</h3>
                             <div id="lossReasons"><div class="no-data">No data</div></div>
                         </div>
                     </div>
@@ -1219,6 +1416,7 @@
                     <div class="panel" style="margin-top: 16px;">
                         <div class="panel-header">
                             <span class="panel-title"><span class="panel-title-icon">📜</span> Recent Trades</span>
+                            <span class="panel-badge" id="tradesCount">0 trades</span>
                         </div>
                         <div style="overflow-x: auto;">
                             <table class="data-table">
@@ -1226,31 +1424,63 @@
                                     <tr>
                                         <th>Symbol</th>
                                         <th>Direction</th>
+                                        <th>Amount</th>
                                         <th>PnL</th>
                                         <th>Reason</th>
                                         <th>Time</th>
                                     </tr>
                                 </thead>
                                 <tbody id="tradesBody">
-                                    <tr><td colspan="5" class="loading"><div class="spinner"></div> Loading...</td></tr>
+                                    <tr><td colspan="6" class="loading"><div class="spinner"></div> Loading...</td></tr>
                                 </tbody>
                             </table>
                         </div>
                     </div>
                     
-                    <!-- Bot Logs -->
+                </div>
+                
+                <!-- Analytics Tab -->
+                <div id="tab-analytics" class="tab-content">
+                    
+                    <!-- Winrate Thresholds -->
+                    <div class="section-title"><span class="section-icon">🎯</span> Winrate Thresholds</div>
+                    <div class="stats-grid" style="grid-template-columns: repeat(5, 1fr);">
+                        <div class="stat-card">
+                            <div class="stat-label">>60% WR</div>
+                            <div class="stat-value sm" id="wr60">-</div>
+                            <div class="stat-sub" id="wr60trades">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">>70% WR</div>
+                            <div class="stat-value sm" id="wr70">-</div>
+                            <div class="stat-sub" id="wr70trades">-</div>
+                        </div>
+                        <div class="stat-card highlight">
+                            <div class="stat-label">>80% WR</div>
+                            <div class="stat-value sm positive" id="wr80">-</div>
+                            <div class="stat-sub" id="wr80trades">-</div>
+                        </div>
+                        <div class="stat-card highlight">
+                            <div class="stat-label">>90% WR</div>
+                            <div class="stat-value sm positive" id="wr90">-</div>
+                            <div class="stat-sub" id="wr90trades">-</div>
+                        </div>
+                        <div class="stat-card highlight">
+                            <div class="stat-label">>95% WR</div>
+                            <div class="stat-value sm positive" id="wr95">-</div>
+                            <div class="stat-sub" id="wr95trades">-</div>
+                        </div>
+                    </div>
+                    
+                    <!-- PnL Chart -->
                     <div class="panel">
                         <div class="panel-header">
-                            <span class="panel-title"><span class="panel-title-icon">📝</span> Bot Logs</span>
-                            <div class="log-tabs">
-                                <button class="log-tab active" onclick="filterLogs('all')">All</button>
-                                <button class="log-tab" onclick="filterLogs('INFO')">Info</button>
-                                <button class="log-tab" onclick="filterLogs('WARNING')">Warning</button>
-                                <button class="log-tab" onclick="filterLogs('ERROR')">Error</button>
-                            </div>
+                            <span class="panel-title"><span class="panel-title-icon">📈</span> PnL Over Time</span>
                         </div>
-                        <div class="logs-container" id="logsContainer">
-                            <div class="no-data">Loading logs...</div>
+                        <div class="panel-content">
+                            <div class="chart-container">
+                                <canvas id="pnlChart"></canvas>
+                            </div>
                         </div>
                     </div>
                     
@@ -1260,43 +1490,43 @@
                             <span class="panel-title"><span class="panel-title-icon">🔍</span> User Diagnostics</span>
                             <div style="display: flex; gap: 8px;">
                                 <input type="text" id="userIdInput" placeholder="Enter User ID" class="user-input">
-                                <button class="btn" onclick="lookupUser()">Lookup</button>
+                                <button class="btn btn-primary" onclick="lookupUser()">Lookup</button>
                             </div>
                         </div>
                         <div class="panel-content" id="userInfoContainer" style="display: none;">
-                            <div class="grid" style="grid-template-columns: repeat(4, 1fr);">
-                                <div class="card">
-                                    <div class="card-label">Balance</div>
-                                    <div class="card-value small" id="userBalance">-</div>
+                            <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr);">
+                                <div class="stat-card">
+                                    <div class="stat-label">Balance</div>
+                                    <div class="stat-value sm" id="userBalance">-</div>
                                 </div>
-                                <div class="card">
-                                    <div class="card-label">Total Deposit</div>
-                                    <div class="card-value small" id="userDeposit">-</div>
+                                <div class="stat-card">
+                                    <div class="stat-label">Total Deposit</div>
+                                    <div class="stat-value sm" id="userDeposit">-</div>
                                 </div>
-                                <div class="card">
-                                    <div class="card-label">Total Profit</div>
-                                    <div class="card-value small" id="userProfit">-</div>
+                                <div class="stat-card">
+                                    <div class="stat-label">Total Profit</div>
+                                    <div class="stat-value sm" id="userProfit">-</div>
                                 </div>
-                                <div class="card">
-                                    <div class="card-label">Missing $</div>
-                                    <div class="card-value small negative" id="userMissing">-</div>
+                                <div class="stat-card">
+                                    <div class="stat-label">Missing $</div>
+                                    <div class="stat-value sm negative" id="userMissing">-</div>
                                 </div>
                             </div>
                             <div style="margin-top: 16px;">
-                                <h3 style="font-size: 0.8rem; margin-bottom: 8px; color: var(--text-muted);">Open Positions (<span id="userPosCount">0</span>)</h3>
-                                <div class="logs-container" id="userPositions" style="max-height: 150px;">
+                                <h3 style="font-size: 0.8rem; margin-bottom: 10px; color: var(--text-muted);">Open Positions (<span id="userPosCount">0</span>)</h3>
+                                <div class="logs-container" id="userPositions" style="max-height: 180px;">
                                     <div class="no-data">No positions</div>
                                 </div>
                             </div>
                             <div style="margin-top: 16px;">
-                                <h3 style="font-size: 0.8rem; margin-bottom: 8px; color: var(--text-muted);">Trade History (<span id="userHistCount">0</span>)</h3>
-                                <div class="logs-container" id="userHistory" style="max-height: 200px;">
+                                <h3 style="font-size: 0.8rem; margin-bottom: 10px; color: var(--text-muted);">Trade History (<span id="userHistCount">0</span>)</h3>
+                                <div class="logs-container" id="userHistory" style="max-height: 220px;">
                                     <div class="no-data">No history</div>
                                 </div>
                             </div>
                             <div style="margin-top: 16px;">
-                                <h3 style="font-size: 0.8rem; margin-bottom: 8px; color: var(--text-muted);">User Activity Logs</h3>
-                                <div class="logs-container" id="userLogs" style="max-height: 200px;">
+                                <h3 style="font-size: 0.8rem; margin-bottom: 10px; color: var(--text-muted);">User Activity Logs</h3>
+                                <div class="logs-container" id="userLogs" style="max-height: 220px;">
                                     <div class="no-data">No logs</div>
                                 </div>
                             </div>
@@ -1317,11 +1547,11 @@
                             <div class="summary-value" id="usersBalance">-</div>
                         </div>
                         <div class="summary-card">
-                            <div class="summary-label">Deposits</div>
+                            <div class="summary-label">Total Deposits</div>
                             <div class="summary-value" id="usersDeposits">-</div>
                         </div>
                         <div class="summary-card">
-                            <div class="summary-label">Active</div>
+                            <div class="summary-label">Active Traders</div>
                             <div class="summary-value" id="activeTraders">-</div>
                         </div>
                         <div class="summary-card">
@@ -1331,6 +1561,10 @@
                     </div>
                     
                     <div class="panel">
+                        <div class="panel-header">
+                            <span class="panel-title"><span class="panel-title-icon">👥</span> All Users</span>
+                            <input type="text" id="userSearch" placeholder="Search by ID..." class="user-input" style="width: 150px;" oninput="filterUsers()">
+                        </div>
                         <div class="users-table-container">
                             <table class="data-table">
                                 <thead>
@@ -1342,7 +1576,7 @@
                                         <th class="sortable" onclick="sortUsers('wins')">W/L</th>
                                         <th class="sortable" onclick="sortUsers('winrate')">WR%</th>
                                         <th class="sortable" onclick="sortUsers('total_pnl')">PnL</th>
-                                        <th class="sortable" onclick="sortUsers('open_positions')">Positions</th>
+                                        <th class="sortable" onclick="sortUsers('open_positions')">Pos</th>
                                         <th class="sortable" onclick="sortUsers('trading')">Trading</th>
                                         <th class="sortable" onclick="sortUsers('auto_trade')">Auto</th>
                                     </tr>
@@ -1355,25 +1589,58 @@
                     </div>
                 </div>
                 
+                <!-- Logs Tab -->
+                <div id="tab-logs" class="tab-content">
+                    <div class="panel">
+                        <div class="panel-header">
+                            <span class="panel-title"><span class="panel-title-icon">📝</span> Bot Logs</span>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <span class="panel-badge" id="logsCount">0 logs</span>
+                                <div class="log-tabs">
+                                    <button class="log-tab active" onclick="filterLogs('all')">All</button>
+                                    <button class="log-tab" onclick="filterLogs('INFO')">Info</button>
+                                    <button class="log-tab" onclick="filterLogs('WARNING')">Warning</button>
+                                    <button class="log-tab" onclick="filterLogs('ERROR')">Error</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="logs-container" id="logsContainer" style="max-height: calc(100vh - 300px);">
+                            <div class="no-data">Loading logs...</div>
+                        </div>
+                    </div>
+                </div>
+                
             </div>
             
-            <!-- News Sidebar -->
-            <div class="news-sidebar">
-                <div class="news-panel">
-                    <div class="news-header">
-                        <span class="news-title">📰 News & 🐦 Twitter</span>
-                        <span class="news-sentiment neutral" id="newsSentiment">
+            <!-- Sidebar -->
+            <div class="sidebar">
+                
+                <!-- Live Positions -->
+                <div class="sidebar-panel" style="flex: 0 0 auto; max-height: 45%;">
+                    <div class="sidebar-header">
+                        <span class="sidebar-title">🔓 Live Positions</span>
+                        <span class="panel-badge" id="livePositionsCount">0</span>
+                    </div>
+                    <div class="sidebar-content" id="livePositions">
+                        <div class="no-data">No open positions</div>
+                    </div>
+                </div>
+                
+                <!-- News & Twitter -->
+                <div class="sidebar-panel" style="flex: 1; min-height: 0;">
+                    <div class="sidebar-header">
+                        <span class="sidebar-title">📰 News & 🐦 Twitter</span>
+                        <span class="sentiment-badge neutral" id="newsSentiment">
                             <span id="sentimentIcon">⚖️</span>
                             <span id="sentimentText">NEUTRAL</span>
-                            <span id="sentimentScore">(0)</span>
                         </span>
                     </div>
-                    <div class="news-list" id="newsList">
+                    <div class="sidebar-content" id="newsList">
                         <div class="loading"><div class="spinner"></div> Loading news...</div>
                     </div>
                 </div>
+                
             </div>
-            
         </div>
     </div>
     
@@ -1421,7 +1688,9 @@
         let usersSortField = 'balance';
         let usersSortDir = 'desc';
         let alertsExpanded = true;
+        let pnlChart = null;
         
+        // Utility Functions
         function formatPnl(value) {
             const num = parseFloat(value) || 0;
             const sign = num >= 0 ? '+' : '';
@@ -1451,10 +1720,42 @@
             }) + ' MSK';
         }
         
-        // Export
-        function toggleExportMenu() {
-            document.getElementById('exportMenu').classList.toggle('show');
+        function formatTimeAgo(isoString) {
+            if (!isoString) return '';
+            try {
+                const date = new Date(isoString);
+                const now = new Date();
+                const diffMs = now - date;
+                const diffMins = Math.floor(diffMs / 60000);
+                const diffHours = Math.floor(diffMs / 3600000);
+                if (diffMins < 1) return 'now';
+                if (diffMins < 60) return `${diffMins}m`;
+                if (diffHours < 24) return `${diffHours}h`;
+                return `${Math.floor(diffHours / 24)}d`;
+            } catch { return ''; }
         }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Dropdown
+        function toggleDropdown(id) {
+            const menu = document.getElementById(id);
+            // Close all other dropdowns first
+            document.querySelectorAll('.dropdown-menu').forEach(m => {
+                if (m.id !== id) m.classList.remove('show');
+            });
+            menu.classList.toggle('show');
+        }
+        
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('.dropdown')) {
+                document.querySelectorAll('.dropdown-menu').forEach(m => m.classList.remove('show'));
+            }
+        });
         
         function exportLogs(value, unit) {
             let url = '/api/export_logs?';
@@ -1462,26 +1763,47 @@
             else if (unit === 'days') url += `days=${value}`;
             else if (unit === 'all') url += 'all=1';
             window.location.href = url;
-            document.getElementById('exportMenu').classList.remove('show');
+            document.querySelectorAll('.dropdown-menu').forEach(m => m.classList.remove('show'));
         }
         
-        document.addEventListener('click', function(e) {
-            const dropdown = document.querySelector('.export-dropdown');
-            if (dropdown && !dropdown.contains(e.target)) {
-                document.getElementById('exportMenu').classList.remove('show');
+        // Tabs
+        function switchTab(tabName) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
+            document.getElementById('tab-' + tabName).classList.add('active');
+            event.target.closest('.main-tab').classList.add('active');
+            
+            if (tabName === 'users' && allUsers.length === 0) fetchUsers();
+            if (tabName === 'analytics') {
+                fetchWinrateBreakdown();
+                initPnlChart();
             }
-        });
+        }
         
-        function renderReasons(reasons, containerId) {
+        // Alerts
+        function toggleAlerts() {
+            alertsExpanded = !alertsExpanded;
+            document.getElementById('alertsContent').style.display = alertsExpanded ? 'block' : 'none';
+            document.getElementById('alertsToggle').textContent = alertsExpanded ? 'Hide' : 'Show';
+        }
+        
+        // Render Functions
+        function renderReasons(reasons, containerId, isWin = true) {
             const container = document.getElementById(containerId);
             if (!reasons || Object.keys(reasons).length === 0) {
                 container.innerHTML = '<div class="no-data">No data</div>';
                 return;
             }
+            
+            const maxCount = Math.max(...Object.values(reasons));
             let html = '';
-            for (const [reason, count] of Object.entries(reasons)) {
+            for (const [reason, count] of Object.entries(reasons).slice(0, 6)) {
+                const pct = (count / maxCount * 100).toFixed(0);
                 html += `<div class="reason-item">
                     <span class="reason-name">${reason || 'Unknown'}</span>
+                    <div class="reason-bar">
+                        <div class="reason-bar-fill ${isWin ? 'win' : 'loss'}" style="width: ${pct}%"></div>
+                    </div>
                     <span class="reason-count">${count}</span>
                 </div>`;
             }
@@ -1490,19 +1812,28 @@
         
         function renderTrades(trades) {
             const tbody = document.getElementById('tradesBody');
+            document.getElementById('tradesCount').textContent = (trades?.length || 0) + ' trades';
+            
             if (!trades || trades.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="no-data">No trades yet</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">No trades yet</td></tr>';
                 return;
             }
+            
             let html = '';
-            for (const trade of trades.slice(0, 15)) {
+            for (const trade of trades.slice(0, 20)) {
                 const pnl = parseFloat(trade.pnl || 0);
                 const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
                 const dirClass = trade.direction === 'LONG' ? 'badge-long' : 'badge-short';
                 const symbol = trade.symbol ? trade.symbol.split('/')[0] : '-';
+                const isAuto = trade.is_auto;
+                
                 html += `<tr>
-                    <td style="color: var(--text-primary); font-weight: 500;">${symbol}</td>
+                    <td style="color: var(--text-primary); font-weight: 500;">
+                        ${symbol}
+                        ${isAuto ? '<span class="badge badge-auto" style="margin-left: 6px;">AUTO</span>' : ''}
+                    </td>
                     <td><span class="badge ${dirClass}">${trade.direction || '-'}</span></td>
+                    <td style="font-family: 'JetBrains Mono', monospace;">$${(trade.amount || 0).toFixed(2)}</td>
                     <td class="${pnlClass}">${formatPnl(pnl)}</td>
                     <td>${trade.reason || '-'}</td>
                     <td style="color: var(--text-muted);">${formatTime(trade.closed_at)}</td>
@@ -1517,12 +1848,14 @@
             if (currentLogFilter !== 'all') {
                 filteredLogs = logs.filter(l => l.level === currentLogFilter);
             }
+            
             if (!filteredLogs || filteredLogs.length === 0) {
                 container.innerHTML = '<div class="no-data">No logs</div>';
                 return;
             }
+            
             let html = '';
-            for (const log of filteredLogs.slice(0, 100)) {
+            for (const log of filteredLogs.slice(0, 150)) {
                 html += `<div class="log-entry">
                     <span class="log-time">${log.timestamp || '-'}</span>
                     <span class="log-level ${log.level}">${log.level}</span>
@@ -1539,65 +1872,134 @@
             renderLogs(allLogs);
         }
         
+        function renderLivePositions(positions) {
+            const container = document.getElementById('livePositions');
+            document.getElementById('livePositionsCount').textContent = positions?.length || 0;
+            
+            if (!positions || positions.length === 0) {
+                container.innerHTML = '<div class="no-data">No open positions</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const pos of positions.slice(0, 15)) {
+                const pnl = parseFloat(pos.pnl || 0);
+                const pnlClass = pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
+                const dirClass = pos.direction === 'LONG' ? 'badge-long' : 'badge-short';
+                const symbol = pos.symbol ? pos.symbol.split('/')[0] : '-';
+                
+                html += `<div class="position-card">
+                    <div class="position-header">
+                        <span class="position-symbol">${symbol}</span>
+                        <span class="badge ${dirClass}">${pos.direction}</span>
+                    </div>
+                    <div class="position-details">
+                        <span>$${(pos.amount || 0).toFixed(2)}</span>
+                        <span class="position-pnl ${pnlClass}">${formatPnl(pnl)}</span>
+                    </div>
+                </div>`;
+            }
+            container.innerHTML = html;
+        }
+        
+        function renderNews(news) {
+            const container = document.getElementById('newsList');
+            if (!news || news.length === 0) {
+                container.innerHTML = '<div class="no-data">📭 No news available</div>';
+                return;
+            }
+            
+            let html = '';
+            for (const item of news) {
+                const sentimentClass = item.sentiment_value >= 1 ? 'bullish' : item.sentiment_value <= -1 ? 'bearish' : 'neutral';
+                const impactClass = item.impact?.toLowerCase() || 'low';
+                const timeAgo = formatTimeAgo(item.timestamp);
+                const isTwitter = item.source?.includes('@') || item.source?.includes('🐦');
+                
+                html += `<div class="news-item" onclick="window.open('${item.url || '#'}', '_blank')">
+                    <div class="news-item-header">
+                        <span class="news-source ${isTwitter ? 'twitter' : ''}">${item.source || 'News'}</span>
+                        <span class="news-time">${timeAgo}</span>
+                    </div>
+                    <div class="news-title">${escapeHtml(item.title)}</div>
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div class="news-tags">
+                            ${(item.coins || []).map(c => `<span class="news-tag coin">${c}</span>`).join('')}
+                            <span class="news-tag ${sentimentClass}">${item.sentiment || 'Neutral'}</span>
+                        </div>
+                        <span class="news-impact ${impactClass}">${item.impact || 'LOW'}</span>
+                    </div>
+                </div>`;
+            }
+            container.innerHTML = html;
+        }
+        
+        function updateSentiment(sentiment) {
+            const badge = document.getElementById('newsSentiment');
+            const icon = document.getElementById('sentimentIcon');
+            const text = document.getElementById('sentimentText');
+            
+            const trend = sentiment?.trend || 'NEUTRAL';
+            badge.className = 'sentiment-badge ' + trend.toLowerCase();
+            icon.textContent = trend === 'BULLISH' ? '📈' : trend === 'BEARISH' ? '📉' : '⚖️';
+            text.textContent = trend;
+        }
+        
+        // Fetch Functions
         async function fetchStats() {
             try {
                 const response = await fetch('/api/stats');
                 const data = await response.json();
                 currentStats = data;
                 
-                document.getElementById('openDeals').textContent = data.open_deals ?? 0;
+                // Header stats
+                document.getElementById('headerWinRate').textContent = (data.win_rate ?? 0) + '%';
+                document.getElementById('headerOpenPos').textContent = data.positions_total ?? data.open_deals ?? 0;
+                
+                // Main stats
+                document.getElementById('openDeals').textContent = data.positions_total ?? data.open_deals ?? 0;
+                document.getElementById('openDealsSub').textContent = (data.positions_users ?? 0) + ' users';
+                document.getElementById('posLong').textContent = data.positions_long ?? 0;
+                document.getElementById('posShort').textContent = data.positions_short ?? 0;
+                document.getElementById('positionsValue').textContent = '$' + (data.positions_value ?? 0).toLocaleString();
+                
+                const unrealizedPnl = data.positions_unrealized_pnl ?? 0;
+                const unrealizedEl = document.getElementById('unrealizedPnl');
+                unrealizedEl.textContent = 'Unrealized: ' + formatPnl(unrealizedPnl);
+                unrealizedEl.style.color = unrealizedPnl >= 0 ? 'var(--positive)' : 'var(--negative)';
+                
                 document.getElementById('winRate').textContent = (data.win_rate ?? 0) + '%';
                 document.getElementById('profitable').textContent = data.profitable ?? 0;
                 document.getElementById('losing').textContent = data.losing ?? 0;
                 document.getElementById('totalClosed').textContent = data.total_closed ?? 0;
                 
                 // Signals
+                document.getElementById('analyzed').textContent = (data.analyzed ?? 0).toLocaleString();
+                document.getElementById('validSetups').textContent = (data.valid_setups ?? 0).toLocaleString();
+                document.getElementById('accepted').textContent = (data.accepted ?? 0).toLocaleString();
+                document.getElementById('rejected').textContent = (data.rejected ?? 0).toLocaleString();
+                document.getElementById('bybitOpened').textContent = (data.bybit_opened ?? 0).toLocaleString();
+                
                 const analyzed = data.analyzed ?? 0;
                 const validSetups = data.valid_setups ?? 0;
                 const rejected = data.rejected ?? 0;
-                
-                document.getElementById('analyzed').textContent = analyzed.toLocaleString();
-                document.getElementById('validSetups').textContent = validSetups.toLocaleString();
-                document.getElementById('accepted').textContent = (data.accepted ?? 0).toLocaleString();
-                document.getElementById('rejected').textContent = rejected.toLocaleString();
-                document.getElementById('bybitOpened').textContent = (data.bybit_opened ?? 0).toLocaleString();
-                
-                const validPct = analyzed > 0 ? ((validSetups / analyzed) * 100).toFixed(1) : 0;
-                const rejectedPct = analyzed > 0 ? ((rejected / analyzed) * 100).toFixed(1) : 0;
-                document.getElementById('validSetupsPct').textContent = `${validPct}% conversion`;
-                document.getElementById('rejectedPct').textContent = `${rejectedPct}% rejected`;
+                document.getElementById('validSetupsPct').textContent = analyzed > 0 ? `${((validSetups / analyzed) * 100).toFixed(1)}% conversion` : '-';
+                document.getElementById('rejectedPct').textContent = analyzed > 0 ? `${((rejected / analyzed) * 100).toFixed(1)}% filtered` : '-';
                 
                 const pnl = parseFloat(data.total_pnl || 0);
                 const pnlEl = document.getElementById('totalPnl');
                 pnlEl.textContent = formatPnl(pnl);
-                pnlEl.className = 'card-value ' + (pnl >= 0 ? 'positive' : 'negative');
+                pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'positive' : 'negative');
                 
                 const winRateEl = document.getElementById('winRate');
-                winRateEl.className = 'card-value ' + ((data.win_rate ?? 0) >= 50 ? 'positive' : (data.win_rate ?? 0) > 0 ? 'negative' : '');
+                winRateEl.className = 'stat-value ' + ((data.win_rate ?? 0) >= 50 ? 'positive' : (data.win_rate ?? 0) > 0 ? 'negative' : '');
                 
-                renderReasons(data.win_reasons || {}, 'winReasons');
-                renderReasons(data.loss_reasons || {}, 'lossReasons');
+                renderReasons(data.win_reasons || {}, 'winReasons', true);
+                renderReasons(data.loss_reasons || {}, 'lossReasons', false);
                 
                 document.getElementById('lastUpdate').textContent = formatTime24(new Date());
             } catch (error) {
                 console.error('Error fetching stats:', error);
-            }
-        }
-        
-        async function fetchWinrateBreakdown() {
-            try {
-                const response = await fetch('/api/winrate_breakdown');
-                const data = await response.json();
-                if (data.thresholds) {
-                    const t = data.thresholds;
-                    ['60', '70', '80', '90', '95'].forEach(k => {
-                        const wr = t[k] || {users: 0, trades: 0};
-                        document.getElementById('wr' + k).textContent = (wr.users || 0) + ' users';
-                        document.getElementById('wr' + k + 'trades').textContent = (wr.trades || 0) + ' trades';
-                    });
-                }
-            } catch (error) {
-                console.error('Error fetching winrate breakdown:', error);
             }
         }
         
@@ -1610,11 +2012,16 @@
                 const todayPnl = parseFloat(data.today_pnl || 0);
                 const todayEl = document.getElementById('todayPnl');
                 todayEl.textContent = formatPnl(todayPnl);
-                todayEl.className = 'card-value ' + (todayPnl >= 0 ? 'positive' : 'negative');
-                document.getElementById('todayTrades').textContent = `${data.today_wins || 0}/${data.today_trades || 0} wins today`;
+                todayEl.className = 'stat-value ' + (todayPnl >= 0 ? 'positive' : 'negative');
+                document.getElementById('todayTrades').textContent = `${data.today_wins || 0}/${data.today_trades || 0} wins`;
+                
+                // Header
+                const headerTodayEl = document.getElementById('headerTodayPnl');
+                headerTodayEl.textContent = formatPnl(todayPnl);
+                headerTodayEl.className = 'quick-stat-value ' + (todayPnl >= 0 ? 'positive' : 'negative');
                 
                 document.getElementById('avgWin').textContent = '+$' + (data.avg_win || 0).toFixed(2);
-                document.getElementById('avgLoss').textContent = '$' + (data.avg_loss || 0).toFixed(2);
+                document.getElementById('avgLoss').textContent = '-$' + Math.abs(data.avg_loss || 0).toFixed(2);
                 
                 if (data.best_trade) {
                     document.getElementById('bestTrade').textContent = formatPnl(data.best_trade.pnl);
@@ -1629,7 +2036,7 @@
                 if (data.current_streak && data.streak_type) {
                     const streakClass = data.streak_type === 'win' ? 'streak-win' : 'streak-loss';
                     const streakIcon = data.streak_type === 'win' ? '🔥' : '❄️';
-                    streakEl.innerHTML = `<span class="streak-badge ${streakClass}">${streakIcon} ${data.current_streak} ${data.streak_type}s</span>`;
+                    streakEl.innerHTML = `<span class="streak-badge ${streakClass}">${streakIcon} ${data.current_streak}</span>`;
                 } else {
                     streakEl.textContent = '-';
                 }
@@ -1652,13 +2059,30 @@
         
         async function fetchLogs() {
             try {
-                const response = await fetch('/api/logs?limit=100');
+                const response = await fetch('/api/logs?limit=150');
                 const data = await response.json();
                 allLogs = data.memory_logs || [];
                 renderLogs(allLogs);
-                document.getElementById('logsCount').textContent = (data.total_logs_in_buffer || 0).toLocaleString();
+                document.getElementById('logsCount').textContent = (data.total_logs_in_buffer || 0).toLocaleString() + ' logs';
             } catch (error) {
                 console.error('Error fetching logs:', error);
+            }
+        }
+        
+        async function fetchWinrateBreakdown() {
+            try {
+                const response = await fetch('/api/winrate_breakdown');
+                const data = await response.json();
+                if (data.thresholds) {
+                    const t = data.thresholds;
+                    ['60', '70', '80', '90', '95'].forEach(k => {
+                        const wr = t[k] || {users: 0, trades: 0};
+                        document.getElementById('wr' + k).textContent = (wr.users || 0) + ' users';
+                        document.getElementById('wr' + k + 'trades').textContent = (wr.trades || 0) + ' trades';
+                    });
+                }
+            } catch (error) {
+                console.error('Error fetching winrate breakdown:', error);
             }
         }
         
@@ -1682,25 +2106,22 @@
                         }
                     });
                     
-                    // Patterns
                     const patternsEl = document.getElementById('alertPatterns');
                     let pHtml = '';
                     for (const p of (data.top_patterns || []).slice(0, 5)) {
                         const cls = p.level === 'WARNING' ? 'warning' : '';
-                        pHtml += `<div class="alert-pattern ${cls}">
-                            <span class="alert-pattern-count">${p.count}x</span>
+                        pHtml += `<span class="alert-pattern ${cls}">
+                            <span class="alert-pattern-count">${p.count}×</span>
                             <span>${escapeHtml(p.pattern)}</span>
-                        </div>`;
+                        </span>`;
                     }
                     patternsEl.innerHTML = pHtml;
                     
-                    // Alerts list
                     const container = document.getElementById('alertsContainer');
                     if (data.alerts && data.alerts.length > 0) {
                         let html = '';
                         for (const alert of data.alerts.slice(0, 30)) {
-                            const cls = alert.level === 'WARNING' ? 'warning' : '';
-                            html += `<div class="log-entry ${cls}">
+                            html += `<div class="log-entry">
                                 <span class="log-time">${alert.timestamp || '-'}</span>
                                 <span class="log-level ${alert.level}">${alert.level}</span>
                                 <span class="log-message">${escapeHtml(alert.message || '-')}</span>
@@ -1718,18 +2139,26 @@
             }
         }
         
-        function toggleAlerts() {
-            alertsExpanded = !alertsExpanded;
-            document.getElementById('alertsContent').style.display = alertsExpanded ? 'block' : 'none';
-            document.getElementById('alertsToggle').textContent = alertsExpanded ? 'Hide' : 'Show';
+        async function fetchPositions() {
+            try {
+                const response = await fetch('/api/positions');
+                const data = await response.json();
+                renderLivePositions(data.positions || []);
+            } catch (error) {
+                console.error('Error fetching positions:', error);
+            }
         }
         
-        function switchTab(tabName) {
-            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.main-tab').forEach(t => t.classList.remove('active'));
-            document.getElementById('tab-' + tabName).classList.add('active');
-            event.target.classList.add('active');
-            if (tabName === 'users' && allUsers.length === 0) fetchUsers();
+        async function fetchNews() {
+            try {
+                const response = await fetch('/api/news');
+                const data = await response.json();
+                renderNews(data.news || []);
+                updateSentiment(data.sentiment || {});
+            } catch (error) {
+                console.error('Error fetching news:', error);
+                document.getElementById('newsList').innerHTML = '<div class="no-data">❌ Error loading news</div>';
+            }
         }
         
         async function fetchUsers() {
@@ -1761,14 +2190,25 @@
             renderUsers();
         }
         
+        function filterUsers() {
+            renderUsers();
+        }
+        
         function renderUsers() {
             const tbody = document.getElementById('usersBody');
-            if (!allUsers || allUsers.length === 0) {
+            const searchTerm = document.getElementById('userSearch')?.value || '';
+            
+            let filteredUsers = allUsers;
+            if (searchTerm) {
+                filteredUsers = allUsers.filter(u => u.user_id.toString().includes(searchTerm));
+            }
+            
+            if (!filteredUsers || filteredUsers.length === 0) {
                 tbody.innerHTML = '<tr><td colspan="10" class="no-data">No users found</td></tr>';
                 return;
             }
             
-            const sorted = [...allUsers].sort((a, b) => {
+            const sorted = [...filteredUsers].sort((a, b) => {
                 let aVal = a[usersSortField];
                 let bVal = b[usersSortField];
                 if (typeof aVal === 'boolean') aVal = aVal ? 1 : 0;
@@ -1777,17 +2217,17 @@
             });
             
             let html = '';
-            for (const user of sorted) {
+            for (const user of sorted.slice(0, 100)) {
                 const pnlClass = user.total_pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
                 const tradingBadge = user.trading ? '<span class="badge badge-on">ON</span>' : '<span class="badge badge-off">OFF</span>';
-                const autoBadge = user.auto_trade ? '<span class="badge badge-on">ON</span>' : '<span class="badge badge-off">OFF</span>';
+                const autoBadge = user.auto_trade ? '<span class="badge badge-auto">ON</span>' : '<span class="badge badge-off">OFF</span>';
                 
-                html += `<tr>
+                html += `<tr onclick="document.getElementById('userIdInput').value='${user.user_id}'; switchTab('analytics'); lookupUser();" style="cursor: pointer;">
                     <td><code style="color: var(--accent);">${user.user_id}</code></td>
-                    <td style="font-family: 'JetBrains Mono', monospace;">$${user.balance.toLocaleString()}</td>
-                    <td style="font-family: 'JetBrains Mono', monospace;">$${user.total_deposit.toLocaleString()}</td>
+                    <td style="font-family: 'JetBrains Mono', monospace;">$${user.balance.toFixed(2)}</td>
+                    <td style="font-family: 'JetBrains Mono', monospace;">$${user.total_deposit.toFixed(2)}</td>
                     <td>${user.total_trades}</td>
-                    <td>${user.wins}/${user.total_trades}</td>
+                    <td>${user.wins}/${user.total_trades - user.wins}</td>
                     <td>${user.winrate}%</td>
                     <td class="${pnlClass}">${formatPnl(user.total_pnl)}</td>
                     <td>${user.open_positions}</td>
@@ -1798,64 +2238,55 @@
             tbody.innerHTML = html;
         }
         
-        function refreshAll() {
-            fetchStats();
-            fetchExtended();
-            fetchTrades();
-            fetchLogs();
-            fetchWinrateBreakdown();
-            fetchAlerts();
-            fetchNews();
-        }
-        
-        async function shareStats() {
-            document.getElementById('shareDate').textContent = formatTime24(new Date());
-            document.getElementById('shareWinRate').textContent = (currentStats.win_rate || 0) + '%';
+        // PnL Chart
+        function initPnlChart() {
+            const ctx = document.getElementById('pnlChart');
+            if (!ctx) return;
             
-            const pnl = parseFloat(currentStats.total_pnl || 0);
-            const sharePnlEl = document.getElementById('sharePnl');
-            sharePnlEl.textContent = formatPnl(pnl);
-            sharePnlEl.style.color = pnl >= 0 ? 'var(--positive)' : 'var(--negative)';
-            
-            document.getElementById('shareProfitable').textContent = currentStats.profitable || 0;
-            document.getElementById('shareLosing').textContent = currentStats.losing || 0;
-            
-            const todayPnl = parseFloat(currentExtended.today_pnl || 0);
-            const shareTodayEl = document.getElementById('shareTodayPnl');
-            shareTodayEl.textContent = formatPnl(todayPnl);
-            shareTodayEl.style.color = todayPnl >= 0 ? 'var(--positive)' : 'var(--negative)';
-            
-            document.getElementById('shareOpen').textContent = currentStats.open_deals || 0;
-            
-            const shareCard = document.getElementById('shareCard');
-            shareCard.style.left = '0';
-            shareCard.style.top = '0';
-            shareCard.style.position = 'absolute';
-            shareCard.style.zIndex = '-1';
-            
-            try {
-                const canvas = await html2canvas(shareCard, { backgroundColor: '#0a0f14', scale: 2 });
-                canvas.toBlob(async (blob) => {
-                    try {
-                        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-                        alert('Screenshot copied to clipboard!');
-                    } catch (e) {
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = 'yula-stats-' + new Date().toISOString().slice(0,10) + '.png';
-                        a.click();
-                        URL.revokeObjectURL(url);
-                    }
-                }, 'image/png');
-            } catch (error) {
-                console.error('Error creating screenshot:', error);
-                alert('Error creating screenshot');
+            if (pnlChart) {
+                pnlChart.destroy();
             }
             
-            shareCard.style.left = '-9999px';
+            // Dummy data for now - should be fetched from API
+            pnlChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+                    datasets: [{
+                        label: 'PnL',
+                        data: [10, 25, 15, 40, 35, 55, 70],
+                        borderColor: '#00ff88',
+                        backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 4,
+                        pointBackgroundColor: '#00ff88'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                            ticks: { color: 'rgba(232, 240, 240, 0.4)' }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                            ticks: { 
+                                color: 'rgba(232, 240, 240, 0.4)',
+                                callback: v => '$' + v
+                            }
+                        }
+                    }
+                }
+            });
         }
         
+        // User Lookup
         async function lookupUser() {
             const userId = document.getElementById('userIdInput').value.trim().replace(/\s/g, '');
             if (!userId) { alert('Enter a User ID'); return; }
@@ -1876,7 +2307,7 @@
                 
                 const profitEl = document.getElementById('userProfit');
                 profitEl.textContent = formatPnl(profit);
-                profitEl.className = 'card-value small ' + (profit >= 0 ? 'positive' : 'negative');
+                profitEl.className = 'stat-value sm ' + (profit >= 0 ? 'positive' : 'negative');
                 
                 const openPosAmount = (data.open_positions || []).reduce((sum, p) => sum + (p.amount || 0), 0);
                 const expected = deposit + profit;
@@ -1885,7 +2316,7 @@
                 
                 const missingEl = document.getElementById('userMissing');
                 missingEl.textContent = '$' + missing.toFixed(2);
-                missingEl.className = 'card-value small ' + (Math.abs(missing) > 0.1 ? 'negative' : 'positive');
+                missingEl.className = 'stat-value sm ' + (Math.abs(missing) > 0.1 ? 'negative' : 'positive');
                 
                 // Positions
                 document.getElementById('userPosCount').textContent = data.open_positions_count || 0;
@@ -1952,109 +2383,81 @@
             }
         }
         
-        document.getElementById('userIdInput').addEventListener('keypress', function(e) {
+        document.getElementById('userIdInput')?.addEventListener('keypress', function(e) {
             if (e.key === 'Enter') lookupUser();
         });
         
-        // News
-        async function fetchNews() {
+        // Share
+        async function shareStats() {
+            document.getElementById('shareDate').textContent = formatTime24(new Date());
+            document.getElementById('shareWinRate').textContent = (currentStats.win_rate || 0) + '%';
+            
+            const pnl = parseFloat(currentStats.total_pnl || 0);
+            const sharePnlEl = document.getElementById('sharePnl');
+            sharePnlEl.textContent = formatPnl(pnl);
+            sharePnlEl.style.color = pnl >= 0 ? 'var(--positive)' : 'var(--negative)';
+            
+            document.getElementById('shareProfitable').textContent = currentStats.profitable || 0;
+            document.getElementById('shareLosing').textContent = currentStats.losing || 0;
+            
+            const todayPnl = parseFloat(currentExtended.today_pnl || 0);
+            const shareTodayEl = document.getElementById('shareTodayPnl');
+            shareTodayEl.textContent = formatPnl(todayPnl);
+            shareTodayEl.style.color = todayPnl >= 0 ? 'var(--positive)' : 'var(--negative)';
+            
+            document.getElementById('shareOpen').textContent = currentStats.positions_total || currentStats.open_deals || 0;
+            
+            const shareCard = document.getElementById('shareCard');
+            shareCard.style.left = '0';
+            shareCard.style.top = '0';
+            shareCard.style.position = 'absolute';
+            shareCard.style.zIndex = '-1';
+            
             try {
-                const response = await fetch('/api/news');
-                const data = await response.json();
-                renderNews(data.news || []);
-                updateSentiment(data.sentiment || {});
+                const canvas = await html2canvas(shareCard, { backgroundColor: '#080c10', scale: 2 });
+                canvas.toBlob(async (blob) => {
+                    try {
+                        await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+                        alert('Screenshot copied to clipboard!');
+                    } catch (e) {
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = 'yula-stats-' + new Date().toISOString().slice(0,10) + '.png';
+                        a.click();
+                        URL.revokeObjectURL(url);
+                    }
+                }, 'image/png');
             } catch (error) {
-                console.error('Error fetching news:', error);
-                document.getElementById('newsList').innerHTML = '<div class="no-data">❌ Error loading news</div>';
-            }
-        }
-        
-        function renderNews(news) {
-            const container = document.getElementById('newsList');
-            if (!news || news.length === 0) {
-                container.innerHTML = '<div class="no-data">📭 No news available</div>';
-                return;
+                console.error('Error creating screenshot:', error);
+                alert('Error creating screenshot');
             }
             
-            let html = '';
-            for (const item of news) {
-                const sentimentClass = getSentimentClass(item.sentiment_value);
-                const impactClass = item.impact.toLowerCase();
-                const timeAgo = formatTimeAgo(item.timestamp);
-                const isTwitter = item.source.includes('@') || item.source.includes('🐦');
-                const sourceClass = isTwitter ? 'news-source twitter' : 'news-source';
-                
-                html += `<div class="news-item" onclick="window.open('${item.url || '#'}', '_blank')">
-                    <div class="news-item-header">
-                        <span class="${sourceClass}">${item.source}</span>
-                        <span class="news-time">${timeAgo}</span>
-                    </div>
-                    <div class="news-item-title">${escapeHtml(item.title)}</div>
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <div class="news-tags">
-                            ${item.coins.map(c => `<span class="news-tag coin">${c}</span>`).join('')}
-                            <span class="news-tag ${sentimentClass}">${item.sentiment}</span>
-                        </div>
-                        <span class="news-impact ${impactClass}">${item.impact}</span>
-                    </div>
-                </div>`;
-            }
-            container.innerHTML = html;
+            shareCard.style.left = '-9999px';
         }
         
-        function updateSentiment(sentiment) {
-            const badge = document.getElementById('newsSentiment');
-            const icon = document.getElementById('sentimentIcon');
-            const text = document.getElementById('sentimentText');
-            const score = document.getElementById('sentimentScore');
-            
-            const trend = sentiment.trend || 'NEUTRAL';
-            const scoreVal = sentiment.score || 0;
-            
-            badge.className = 'news-sentiment ' + trend.toLowerCase();
-            icon.textContent = trend === 'BULLISH' ? '📈' : trend === 'BEARISH' ? '📉' : '⚖️';
-            text.textContent = trend;
-            score.textContent = `(${scoreVal > 0 ? '+' : ''}${scoreVal})`;
-        }
-        
-        function getSentimentClass(value) {
-            if (value >= 1) return 'bullish';
-            if (value <= -1) return 'bearish';
-            return 'neutral';
-        }
-        
-        function formatTimeAgo(isoString) {
-            if (!isoString) return '';
-            try {
-                const date = new Date(isoString);
-                const now = new Date();
-                const diffMs = now - date;
-                const diffMins = Math.floor(diffMs / 60000);
-                const diffHours = Math.floor(diffMs / 3600000);
-                if (diffMins < 1) return 'now';
-                if (diffMins < 60) return `${diffMins}m`;
-                if (diffHours < 24) return `${diffHours}h`;
-                return `${Math.floor(diffHours / 24)}d`;
-            } catch { return ''; }
-        }
-        
-        function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+        // Refresh
+        function refreshAll() {
+            fetchStats();
+            fetchExtended();
+            fetchTrades();
+            fetchLogs();
+            fetchAlerts();
+            fetchPositions();
+            fetchNews();
         }
         
         // Initial load
         refreshAll();
         
-        // Auto-refresh
+        // Auto-refresh intervals
         setInterval(fetchStats, 3000);
         setInterval(fetchExtended, 5000);
         setInterval(fetchTrades, 5000);
         setInterval(fetchLogs, 10000);
-        setInterval(fetchWinrateBreakdown, 15000);
-        setInterval(fetchNews, 30000);
         setInterval(fetchAlerts, 15000);
+        setInterval(fetchPositions, 5000);
+        setInterval(fetchNews, 30000);
     </script>
 </body>
 </html>
