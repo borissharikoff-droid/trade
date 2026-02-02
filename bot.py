@@ -4265,13 +4265,24 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE)
             direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
 
             # Handle orphan positions (no bybit_qty)
-            # ВАЖНО: Не закрываем orphan позиции автоматически!
-            # Они нормально работают без Bybit (симуляция на основе цен Binance)
-            # Закрытие orphan было причиной потери баланса для обычных пользователей
+            # Если bybit_qty=0 но позиция ТОЧНО была на Bybit (проверяем по closed trades)
+            # то всё равно синхронизируем
             if expected_qty == 0:
-                # Пропускаем - позиция будет обновляться и закрываться по TP/SL в update_positions
-                logger.debug(f"[SYNC] Skipping orphan position {pos['id']} - managed locally")
-                continue
+                # Проверяем есть ли closed trade для этого символа в последних сделках
+                found_closed_trade = False
+                for closed in closed_pnl:
+                    if closed['symbol'] == bybit_symbol:
+                        # Есть закрытая сделка по этому символу - значит была на Bybit
+                        found_closed_trade = True
+                        break
+                
+                if not found_closed_trade:
+                    # Нет данных о закрытии на Bybit - пропускаем (симуляция)
+                    logger.debug(f"[SYNC] Skipping orphan position {pos['id']} - managed locally")
+                    continue
+                else:
+                    # Нашли закрытую сделку - обрабатываем
+                    logger.info(f"[SYNC] Found closed trade for orphan position {pos['id']} ({bybit_symbol})")
             
             # Position is closed if: size=0, size << expected, or direction mismatch
             is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1) or direction_mismatch
@@ -7300,48 +7311,54 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
             # Проверяем если данные с Bybit получены успешно (даже если там 0 позиций)
             if bybit_sync_available:
                 for pos in user_positions[:]:
-                    # Пропускаем позиции без bybit_qty
-                    if pos.get('bybit_qty', 0) <= 0:
-                        continue
-                    
                     bybit_symbol = pos['symbol'].replace('/', '')
+                    has_bybit_qty = pos.get('bybit_qty', 0) > 0
+                    
+                    # Если нет bybit_qty И позиция в открытых на Bybit - пропускаем
+                    if not has_bybit_qty and bybit_symbol in bybit_open_symbols:
+                        continue
                     
                     # Если позиция была на Bybit но её больше нет - закрылась по TP/SL
                     if bybit_symbol not in bybit_open_symbols:
-                        logger.info(f"[BYBIT_SYNC] Position {bybit_symbol} not found on Bybit! Bot has bybit_qty={pos.get('bybit_qty', 0)}")
                         ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                         
                         # Получаем реальный PnL с Bybit
                         real_pnl = pos['pnl']
                         exit_price = pos['current']
                         reason = "CLOSED"
+                        found_closed_trade = False
                         
                         try:
-                            closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=5)
+                            closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=10)
                             if closed_trades:
                                 bybit_pnl = closed_trades[0]['closed_pnl']
                                 bybit_exit = closed_trades[0]['exit_price']
                                 bybit_time = closed_trades[0].get('updated_time', 0)
                                 
-                                # Валидация: PnL должен быть реалистичным
-                                # Увеличен лимит - P&L может быть большим при высоком плече
-                                max_reasonable_pnl = pos['amount'] * LEVERAGE * 2.0  # 200% от позиции
                                 import time as time_module
                                 current_time_ms = int(time_module.time() * 1000)
                                 time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
                                 
-                                logger.info(f"[BYBIT_SYNC] Bybit data: pnl=${bybit_pnl:.2f}, time_diff={time_diff:.0f}s, max=${max_reasonable_pnl:.2f}")
+                                logger.info(f"[BYBIT_SYNC] Bybit closed trade found: pnl=${bybit_pnl:.2f}, time_diff={time_diff:.0f}s")
                                 
-                                # ВСЕГДА используем Bybit PnL если он есть и время < 10 мин
+                                # Используем Bybit PnL если время < 10 мин
                                 if time_diff < 600:  # 10 мин для sync
                                     real_pnl = bybit_pnl
                                     exit_price = bybit_exit
                                     reason = "TP" if real_pnl > 0 else "SL"
+                                    found_closed_trade = True
                                     logger.info(f"[BYBIT_SYNC] Using Bybit PnL: ${real_pnl:.2f}")
                                 else:
-                                    logger.warning(f"[BYBIT_SYNC] Bybit trade too old ({time_diff:.0f}s), using local ${pos['pnl']:.2f}")
+                                    logger.warning(f"[BYBIT_SYNC] Bybit trade too old ({time_diff:.0f}s)")
                         except Exception as e:
                             logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
+                        
+                        # Если нет bybit_qty и не нашли закрытую сделку - это симуляция, пропускаем
+                        if not has_bybit_qty and not found_closed_trade:
+                            logger.debug(f"[BYBIT_SYNC] Skipping position {pos['id']} - no bybit_qty and no closed trade found")
+                            continue
+                        
+                        logger.info(f"[BYBIT_SYNC] Position {bybit_symbol} closed on Bybit! bybit_qty={pos.get('bybit_qty', 0)}")
                         
                         # Возвращаем деньги пользователю (с локом для защиты от race conditions)
                         returned = pos['amount'] + real_pnl
@@ -10238,7 +10255,7 @@ def main() -> None:
     
     # Jobs
     if app.job_queue:
-        app.job_queue.run_repeating(update_positions, interval=30, first=10)  # 30 секунд - защита от зависаний
+        app.job_queue.run_repeating(update_positions, interval=15, first=5)  # 15 секунд - быстрая синхронизация с Bybit
         
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
             app.job_queue.run_repeating(send_smart_signal, interval=60, first=10)  # 1 минута - чаще сигналы!
