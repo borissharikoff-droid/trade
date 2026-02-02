@@ -103,15 +103,27 @@ def get_open_positions_count() -> int:
 
 def get_positions_stats() -> dict:
     """Get detailed statistics about open positions across all users"""
+    default = {
+        'total_positions': 0,
+        'users_with_positions': 0,
+        'total_value': 0,
+        'total_unrealized_pnl': 0,
+        'by_direction': {'LONG': 0, 'SHORT': 0}
+    }
+    
     if not _run_sql:
-        return {
-            'total_positions': 0,
-            'users_with_positions': 0,
-            'total_value': 0,
-            'total_unrealized_pnl': 0,
-            'by_direction': {'LONG': 0, 'SHORT': 0}
-        }
+        logger.warning("[DASHBOARD] get_positions_stats: _run_sql is None")
+        return default
+    
     try:
+        # Simple count first
+        count_result = _run_sql("SELECT COUNT(*) as cnt FROM positions", fetch="one")
+        total_count = int(count_result.get('cnt', 0) or 0) if count_result else 0
+        logger.info(f"[DASHBOARD] Positions count in DB: {total_count}")
+        
+        if total_count == 0:
+            return default
+        
         # Total positions and users with positions
         stats = _run_sql("""
             SELECT 
@@ -135,35 +147,36 @@ def get_positions_stats() -> dict:
             if d in direction_counts:
                 direction_counts[d] = int(row.get('count', 0))
         
-        return {
+        result = {
             'total_positions': int(stats.get('total_positions', 0) or 0) if stats else 0,
             'users_with_positions': int(stats.get('users_with_positions', 0) or 0) if stats else 0,
             'total_value': round(float(stats.get('total_value', 0) or 0), 2) if stats else 0,
             'total_unrealized_pnl': round(float(stats.get('total_unrealized_pnl', 0) or 0), 2) if stats else 0,
             'by_direction': direction_counts
         }
+        logger.debug(f"[DASHBOARD] Positions stats: {result}")
+        return result
+        
     except Exception as e:
-        logger.error(f"[DASHBOARD] Error getting positions stats: {e}")
-        return {
-            'total_positions': 0,
-            'users_with_positions': 0,
-            'total_value': 0,
-            'total_unrealized_pnl': 0,
-            'by_direction': {'LONG': 0, 'SHORT': 0}
-        }
+        logger.error(f"[DASHBOARD] Error getting positions stats: {e}", exc_info=True)
+        return default
 
 
 def get_open_positions_details() -> list:
     """Get details of all open positions"""
     if not _run_sql:
+        logger.warning("[DASHBOARD] get_open_positions_details: _run_sql is None")
         return []
     try:
+        # Basic query without optional columns that may not exist
         positions = _run_sql("""
-            SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id, is_auto, bybit_qty
+            SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id
             FROM positions
-            ORDER BY ABS(pnl) DESC, opened_at DESC
+            ORDER BY opened_at DESC
             LIMIT 50
         """, fetch="all")
+        
+        logger.debug(f"[DASHBOARD] Raw positions query returned: {len(positions) if positions else 0} rows")
         
         # Format positions for API response
         result = []
@@ -177,12 +190,12 @@ def get_open_positions_details() -> list:
                 'amount': round(float(pos.get('amount', 0) or 0), 2),
                 'opened_at': pos.get('opened_at'),
                 'user_id': pos.get('user_id'),
-                'is_auto': bool(pos.get('is_auto')),
-                'on_bybit': float(pos.get('bybit_qty', 0) or 0) > 0
+                'is_auto': False,
+                'on_bybit': False
             })
         return result
     except Exception as e:
-        logger.error(f"[DASHBOARD] Error getting positions details: {e}")
+        logger.error(f"[DASHBOARD] Error getting positions details: {e}", exc_info=True)
         return []
 
 
@@ -274,36 +287,31 @@ def get_recent_trades(limit: int = 20) -> list:
     if not _run_sql:
         return []
     try:
-        # Try with is_auto first, fallback without it
-        try:
-            trades = _run_sql("""
-                SELECT symbol, direction, entry, exit_price, pnl, reason, amount, closed_at, is_auto
-                FROM history
-                ORDER BY closed_at DESC
-                LIMIT ?
-            """, (limit,), fetch="all")
-        except Exception:
-            # is_auto column might not exist
-            trades = _run_sql("""
-                SELECT symbol, direction, entry, exit_price, pnl, reason, amount, closed_at
-                FROM history
-                ORDER BY closed_at DESC
-                LIMIT ?
-            """, (limit,), fetch="all")
+        # Basic query - is_auto column doesn't exist in history table
+        trades = _run_sql("""
+            SELECT symbol, direction, entry, exit_price, pnl, reason, amount, closed_at
+            FROM history
+            ORDER BY closed_at DESC
+            LIMIT ?
+        """, (limit,), fetch="all")
         
         # Format trades for API response
         result = []
         for trade in (trades or []):
+            # Detect auto trades by reason
+            reason = trade.get('reason', '') or ''
+            is_auto = 'AUTO' in reason.upper() or 'LINKED' in reason.upper()
+            
             result.append({
                 'symbol': trade.get('symbol', ''),
                 'direction': trade.get('direction', ''),
                 'entry': float(trade.get('entry', 0) or 0),
                 'exit_price': float(trade.get('exit_price', 0) or 0),
                 'pnl': round(float(trade.get('pnl', 0) or 0), 2),
-                'reason': trade.get('reason', ''),
+                'reason': reason,
                 'amount': round(float(trade.get('amount', 0) or 0), 2),
                 'closed_at': trade.get('closed_at'),
-                'is_auto': bool(trade.get('is_auto', False))
+                'is_auto': is_auto
             })
         return result
     except Exception as e:
@@ -567,12 +575,22 @@ def api_stats():
 @app.route('/api/positions')
 def api_positions():
     """Open positions endpoint"""
-    positions = get_open_positions_details()
-    return jsonify({
-        'count': len(positions),
-        'positions': positions,
-        'timestamp': to_moscow_time()
-    })
+    try:
+        positions = get_open_positions_details()
+        logger.info(f"[DASHBOARD] /api/positions returning {len(positions)} positions")
+        return jsonify({
+            'count': len(positions),
+            'positions': positions,
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error in /api/positions: {e}", exc_info=True)
+        return jsonify({
+            'count': 0,
+            'positions': [],
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
 
 
 @app.route('/api/trades')
