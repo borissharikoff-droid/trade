@@ -117,6 +117,10 @@ class BybitWebSocket:
             
             # Ждём ответ
             response = await asyncio.wait_for(self.ws.recv(), timeout=10)
+            if response is None:
+                logger.error("[WS] ❌ Authentication: received None response")
+                return False
+            
             data = json.loads(response)
             
             if data.get("success") == True:
@@ -126,7 +130,13 @@ class BybitWebSocket:
             else:
                 logger.error(f"[WS] ❌ Authentication failed: {data}")
                 return False
-                
+        
+        except asyncio.TimeoutError:
+            logger.error("[WS] Authentication timeout")
+            return False
+        except websockets.ConnectionClosed as e:
+            logger.error(f"[WS] Connection closed during authentication: {e}")
+            return False
         except Exception as e:
             logger.error(f"[WS] Authentication error: {e}")
             return False
@@ -153,6 +163,10 @@ class BybitWebSocket:
             
             # Ждём подтверждение
             response = await asyncio.wait_for(self.ws.recv(), timeout=10)
+            if response is None:
+                logger.error("[WS] ❌ Subscription: received None response")
+                return False
+            
             data = json.loads(response)
             
             if data.get("success") == True:
@@ -162,7 +176,13 @@ class BybitWebSocket:
             else:
                 logger.error(f"[WS] ❌ Subscription failed: {data}")
                 return False
-                
+        
+        except asyncio.TimeoutError:
+            logger.error("[WS] Subscription timeout")
+            return False
+        except websockets.ConnectionClosed as e:
+            logger.error(f"[WS] Connection closed during subscription: {e}")
+            return False
         except Exception as e:
             logger.error(f"[WS] Subscription error: {e}")
             return False
@@ -174,6 +194,9 @@ class BybitWebSocket:
                 ping_msg = {"op": "ping"}
                 await self.ws.send(json.dumps(ping_msg))
                 self._last_ping = time.time()
+            except websockets.ConnectionClosed as e:
+                logger.warning(f"[WS] Ping failed - connection closed: {e}")
+                raise  # Re-raise to trigger reconnect
             except Exception as e:
                 logger.warning(f"[WS] Ping failed: {e}")
     
@@ -368,13 +391,23 @@ class BybitWebSocket:
                     
                     # Получаем сообщение с таймаутом
                     message = await asyncio.wait_for(self.ws.recv(), timeout=30)
+                    
+                    # Проверка на None или пустое сообщение
+                    if message is None:
+                        logger.warning("[WS] Received None message, continuing...")
+                        continue
+                    
                     await self._handle_message(message)
                     
                 except asyncio.TimeoutError:
                     # Таймаут - отправляем ping
                     await self._send_ping()
-                except websockets.ConnectionClosed:
-                    logger.warning("[WS] Connection closed, reconnecting...")
+                except websockets.ConnectionClosed as e:
+                    logger.warning(f"[WS] Connection closed ({e.code}): {e.reason}, reconnecting...")
+                    await self.disconnect()
+                    await asyncio.sleep(self._reconnect_delay)
+                except websockets.ConnectionClosedError as e:
+                    logger.warning(f"[WS] Connection closed with error ({e.code}): {e.reason}, reconnecting...")
                     await self.disconnect()
                     await asyncio.sleep(self._reconnect_delay)
                     
@@ -391,9 +424,10 @@ class BybitWebSocket:
         if self.ws:
             try:
                 await self.ws.close()
-            except:
-                pass
-            self.ws = None
+            except Exception as e:
+                logger.debug(f"[WS] Error during disconnect: {e}")
+            finally:
+                self.ws = None
         
         logger.info("[WS] Disconnected")
     

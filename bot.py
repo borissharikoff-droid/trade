@@ -2555,7 +2555,8 @@ async def withdraw_commission():
     logger.info(f"[COMMISSION] Попытка вывода ${amount:.2f} на ID {ADMIN_CRYPTO_ID} (testnet={testnet})")
     
     try:
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             # Сначала проверим баланс бота
             async with session.get(
                 f"{base_url}/api/getBalance",
@@ -3260,7 +3261,8 @@ async def handle_crypto_custom_amount(update: Update, context: ContextTypes.DEFA
             is_testnet = os.getenv("CRYPTO_TESTNET", "").lower() in ("true", "1", "yes")
             base_url = "https://testnet-pay.crypt.bot/api" if is_testnet else "https://pay.crypt.bot/api"
             
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 headers = {"Crypto-Pay-API-Token": crypto_token}
                 payload = {
                     "asset": "USDT",
@@ -3332,7 +3334,8 @@ async def create_crypto_invoice(update: Update, context: ContextTypes.DEFAULT_TY
         logger.info(f"[CRYPTO] Using API: {base_url}")
         
         # Прямой запрос к CryptoBot API
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             headers = {"Crypto-Pay-API-Token": crypto_token}
             payload = {
                 "asset": "USDT",
@@ -3411,7 +3414,8 @@ async def check_crypto_payment(update: Update, context: ContextTypes.DEFAULT_TYP
         base_url = "https://testnet-pay.crypt.bot/api" if is_testnet else "https://pay.crypt.bot/api"
         
         # Прямой запрос к CryptoBot API
-        async with aiohttp.ClientSession() as session:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             headers = {"Crypto-Pay-API-Token": crypto_token}
             params = {"invoice_ids": invoice_id}
             
@@ -4620,10 +4624,11 @@ async def close_symbol_trades(update: Update, context: ContextTypes.DEFAULT_TYPE
         close_price = real_price if real_price else pos['current']
         
         # Пересчитываем PnL с реальной ценой
+        entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else close_price
         if pos['direction'] == "LONG":
-            pnl = (close_price - pos['entry']) / pos['entry'] * pos['amount'] * LEVERAGE
+            pnl = (close_price - entry_price) / entry_price * pos['amount'] * LEVERAGE if entry_price > 0 else 0
         else:
-            pnl = (pos['entry'] - close_price) / pos['entry'] * pos['amount'] * LEVERAGE
+            pnl = (entry_price - close_price) / entry_price * pos['amount'] * LEVERAGE if entry_price > 0 else 0
         
         pnl -= pos.get('commission', 0)
         
@@ -4810,10 +4815,11 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
             
             # Calculate PnL with real price
+            entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else close_price
             if pos['direction'] == "LONG":
-                pnl_percent = (close_price - pos['entry']) / pos['entry']
+                pnl_percent = (close_price - entry_price) / entry_price if entry_price > 0 else 0
             else:
-                pnl_percent = (pos['entry'] - close_price) / pos['entry']
+                pnl_percent = (entry_price - close_price) / entry_price if entry_price > 0 else 0
             pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
             
             returned = pos['amount'] + pnl
@@ -5015,10 +5021,11 @@ Winrate: <b>{winrate}%</b>
             current = pos.get('current', pos['entry'])
             
             # Расчёт PnL в процентах
+            entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else current
             if pos['direction'] == "LONG":
-                pnl_percent = (current - pos['entry']) / pos['entry'] * 100 * LEVERAGE
+                pnl_percent = (current - entry_price) / entry_price * 100 * LEVERAGE if entry_price > 0 else 0
             else:
-                pnl_percent = (pos['entry'] - current) / pos['entry'] * 100 * LEVERAGE
+                pnl_percent = (entry_price - current) / entry_price * 100 * LEVERAGE if entry_price > 0 else 0
             pnl_pct_str = f"+{pnl_percent:.0f}%" if pnl_percent >= 0 else f"{pnl_percent:.0f}%"
             
             # Показываем количество стакнутых позиций
@@ -5428,10 +5435,10 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         tp3 = setup.take_profit_3
         
         # Процентные уровни
-        tp1_percent = abs(tp1 - entry) / entry * 100
-        tp2_percent = abs(tp2 - entry) / entry * 100
-        tp3_percent = abs(tp3 - entry) / entry * 100
-        sl_percent = abs(sl - entry) / entry * 100
+        tp1_percent = abs(tp1 - entry) / entry * 100 if entry > 0 else 0
+        tp2_percent = abs(tp2 - entry) / entry * 100 if entry > 0 else 0
+        tp3_percent = abs(tp3 - entry) / entry * 100 if entry > 0 else 0
+        sl_percent = abs(sl - entry) / entry * 100 if entry > 0 else 0
         
         # Confidence = качество сетапа
         confidence_percent = int(setup.confidence * 100)
@@ -6238,10 +6245,10 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
     
     dir_text = "LONG" if direction == "LONG" else "SHORT"
-    tp1_percent = abs(tp1 - entry) / entry * 100
-    tp2_percent = abs(tp2 - entry) / entry * 100
-    tp3_percent = abs(tp3 - entry) / entry * 100
-    sl_percent = abs(sl - entry) / entry * 100
+    tp1_percent = abs(tp1 - entry) / entry * 100 if entry > 0 else 0
+    tp2_percent = abs(tp2 - entry) / entry * 100 if entry > 0 else 0
+    tp3_percent = abs(tp3 - entry) / entry * 100 if entry > 0 else 0
+    sl_percent = abs(sl - entry) / entry * 100 if entry > 0 else 0
     
     # Показываем информацию о динамическом плече
     leverage_info = get_leverage_info(user['balance'])
@@ -6593,10 +6600,11 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
         
         # Пересчитываем PnL с реальной ценой
+        entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else close_price
         if pos['direction'] == "LONG":
-            pnl_percent = (close_price - pos['entry']) / pos['entry']
+            pnl_percent = (close_price - entry_price) / entry_price if entry_price > 0 else 0
         else:
-            pnl_percent = (pos['entry'] - close_price) / pos['entry']
+            pnl_percent = (entry_price - close_price) / entry_price if entry_price > 0 else 0
         pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
         
         returned = pos['amount'] + pnl
@@ -7095,10 +7103,10 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
     
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_text = "LONG" if direction == "LONG" else "SHORT"
-    tp1_percent = abs(tp1 - entry) / entry * 100
-    tp2_percent = abs(tp2 - entry) / entry * 100
-    tp3_percent = abs(tp3 - entry) / entry * 100
-    sl_percent = abs(sl - entry) / entry * 100
+    tp1_percent = abs(tp1 - entry) / entry * 100 if entry > 0 else 0
+    tp2_percent = abs(tp2 - entry) / entry * 100 if entry > 0 else 0
+    tp3_percent = abs(tp3 - entry) / entry * 100 if entry > 0 else 0
+    sl_percent = abs(sl - entry) / entry * 100 if entry > 0 else 0
     
     text = f"""<b>✅ {winrate}%</b> | {ticker} | {dir_text} | x{LEVERAGE}
 
@@ -7633,10 +7641,11 @@ Bybit синхронизация
                             original_amount = pos.get('original_amount', pos['amount'])
                             partial_commission = pos.get('commission', 0) * (partial_close_amount / original_amount)
                             
+                            entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else pos['current']
                             if pos['direction'] == "LONG":
-                                partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * partial_close_amount * LEVERAGE - partial_commission
+                                partial_pnl = (pos['current'] - entry_price) / entry_price * partial_close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                             else:
-                                partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * partial_close_amount * LEVERAGE - partial_commission
+                                partial_pnl = (entry_price - pos['current']) / entry_price * partial_close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                             
                             returned = partial_close_amount + partial_pnl
                             
@@ -7808,12 +7817,13 @@ Bybit синхронизация
                                     
                                     # PnL с учетом пропорциональной комиссии
                                     original_amount = pos.get('original_amount', pos['amount'])
-                                    partial_commission = pos.get('commission', 0) * (close_amount / original_amount)
+                                    partial_commission = pos.get('commission', 0) * (close_amount / original_amount) if original_amount > 0 else 0
                                     
+                                    entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else pos['current']
                                     if pos['direction'] == "LONG":
-                                        exit_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
+                                        exit_pnl = (pos['current'] - entry_price) / entry_price * close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                                     else:
-                                        exit_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
+                                        exit_pnl = (entry_price - pos['current']) / entry_price * close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                                     
                                     returned = close_amount + exit_pnl
                                     
@@ -7903,12 +7913,13 @@ Bybit синхронизация
                 
                 # PnL от частичного закрытия с учетом пропорциональной комиссии
                 original_amount = pos.get('original_amount', pos['amount'] + close_amount)
-                partial_commission = pos.get('commission', 0) * (close_amount / original_amount)
+                partial_commission = pos.get('commission', 0) * (close_amount / original_amount) if original_amount > 0 else 0
                 
+                entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else pos['current']
                 if pos['direction'] == "LONG":
-                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
+                    partial_pnl = (pos['current'] - entry_price) / entry_price * close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                 else:
-                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
+                    partial_pnl = (entry_price - pos['current']) / entry_price * close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                 
                 # Возвращаем часть и профит (с локом для защиты от race conditions)
                 returned = close_amount + partial_pnl
@@ -7983,12 +7994,13 @@ Bybit синхронизация
                 
                 # PnL с учетом пропорциональной комиссии
                 original_amount = pos.get('original_amount', pos['amount'] + close_amount)
-                partial_commission = pos.get('commission', 0) * (close_amount / original_amount)
+                partial_commission = pos.get('commission', 0) * (close_amount / original_amount) if original_amount > 0 else 0
                 
+                entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else pos['current']
                 if pos['direction'] == "LONG":
-                    partial_pnl = (pos['current'] - pos['entry']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
+                    partial_pnl = (pos['current'] - entry_price) / entry_price * close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                 else:
-                    partial_pnl = (pos['entry'] - pos['current']) / pos['entry'] * close_amount * LEVERAGE - partial_commission
+                    partial_pnl = (entry_price - pos['current']) / entry_price * close_amount * LEVERAGE - partial_commission if entry_price > 0 else -partial_commission
                 
                 returned = close_amount + partial_pnl
                 

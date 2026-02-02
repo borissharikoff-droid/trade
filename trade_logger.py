@@ -234,31 +234,45 @@ class TradeLogger:
         if not self._buffer or not self._run_sql:
             return
         
+        failed_entries = []
         try:
             for entry in self._buffer:
-                self._run_sql(
-                    """INSERT INTO trading_logs 
-                    (timestamp, category, level, user_id, symbol, direction, message, data, error_traceback, session_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        entry.get('timestamp', datetime.now(timezone.utc).isoformat()),
-                        entry.get('category', 'SYSTEM'),
-                        entry.get('level', 'INFO'),
-                        entry.get('user_id'),
-                        entry.get('symbol'),
-                        entry.get('direction'),
-                        entry.get('message'),
-                        entry.get('data'),
-                        entry.get('error_traceback'),
-                        entry.get('session_id')
+                try:
+                    self._run_sql(
+                        """INSERT INTO trading_logs 
+                        (timestamp, category, level, user_id, symbol, direction, message, data, error_traceback, session_id)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            entry.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                            entry.get('category', 'SYSTEM'),
+                            entry.get('level', 'INFO'),
+                            entry.get('user_id'),
+                            entry.get('symbol'),
+                            entry.get('direction'),
+                            entry.get('message'),
+                            entry.get('data'),
+                            entry.get('error_traceback'),
+                            entry.get('session_id')
+                        )
                     )
-                )
+                except Exception as entry_error:
+                    # Log individual entry errors but continue
+                    logger.debug(f"[TRADE_LOGGER] Failed to insert entry: {entry_error}")
+                    failed_entries.append(entry)
             
-            self._buffer.clear()
             self._last_flush = datetime.now(timezone.utc)
             
         except Exception as e:
             logger.error(f"[TRADE_LOGGER] Flush error: {e}")
+        finally:
+            # Always clear buffer to prevent infinite retries
+            # Keep only a limited number of failed entries for retry
+            self._buffer.clear()
+            if failed_entries:
+                # Keep max 10 failed entries for retry, discard the rest
+                self._buffer.extend(failed_entries[:10])
+                if len(failed_entries) > 10:
+                    logger.warning(f"[TRADE_LOGGER] Discarded {len(failed_entries) - 10} entries due to persistent failures")
     
     def log(self, category: LogCategory, message: str, 
             level: LogLevel = LogLevel.INFO,

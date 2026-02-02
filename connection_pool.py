@@ -95,15 +95,29 @@ class ConnectionPool:
                 conn = self._pool.get_nowait()
                 # Check if connection is still valid
                 try:
-                    conn.execute("SELECT 1")
-                except:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+                    cursor.close()
+                except Exception as e:
                     # Connection is dead, create new one
-                    conn.close()
+                    logger.debug(f"[POOL] SQLite connection invalid, creating new: {e}")
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
                     conn = sqlite3.connect(self.db_path, check_same_thread=False)
                     conn.row_factory = sqlite3.Row
                 return conn
             except Empty:
                 # Queue is empty, create new connection
+                logger.debug("[POOL] SQLite queue empty, creating new connection")
+                conn = sqlite3.connect(self.db_path, check_same_thread=False)
+                conn.row_factory = sqlite3.Row
+                return conn
+            except Exception as e:
+                # Unexpected error, create fresh connection
+                logger.warning(f"[POOL] Error getting SQLite connection: {e}")
                 conn = sqlite3.connect(self.db_path, check_same_thread=False)
                 conn.row_factory = sqlite3.Row
                 return conn
@@ -120,9 +134,12 @@ class ConnectionPool:
             # SQLite - return to queue if not full
             try:
                 self._pool.put_nowait(conn)
-            except:
+            except Exception:
                 # Queue is full, close connection
-                conn.close()
+                try:
+                    conn.close()
+                except Exception as e:
+                    logger.debug(f"[POOL] Error closing overflow connection: {e}")
     
     def close_all(self):
         """Close all connections in the pool"""

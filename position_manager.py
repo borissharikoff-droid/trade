@@ -33,6 +33,10 @@ def calculate_volatility_based_size(balance: float, atr: float, entry: float,
     sl_distance = atr * 1.5
     
     # Размер позиции = риск / расстояние до SL
+    if sl_distance <= 0 or entry <= 0:
+        logger.warning(f"[SIZE] Invalid sl_distance ({sl_distance}) or entry ({entry}), using min size")
+        return 10.0  # Минимальный размер
+    
     position_size = risk_amount / sl_distance * entry
     
     # Ограничение: не более 15% баланса
@@ -40,7 +44,7 @@ def calculate_volatility_based_size(balance: float, atr: float, entry: float,
     position_size = min(position_size, max_size)
     
     # В высоковолатильных условиях уменьшаем размер
-    volatility_ratio = atr / entry
+    volatility_ratio = atr / entry if entry > 0 else 0
     if volatility_ratio > 0.03:  # >3% волатильность
         position_size *= 0.7  # Уменьшаем на 30%
         logger.info(f"[SIZE] High volatility ({volatility_ratio:.2%}), reducing size by 30%")
@@ -196,6 +200,9 @@ def should_scale_in(entry: float, current: float, direction: str,
     Returns:
         True если можно добавлять
     """
+    if entry <= 0:
+        return False
+    
     if direction == "LONG":
         pnl_percent = (current - entry) / entry * 100
         # Можно добавлять если:

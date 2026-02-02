@@ -73,17 +73,17 @@ def detect_reversal_signals(
     
     # 4. Пробой ключевого уровня против нас (25 баллов)
     max_score += 25
-    if direction == "LONG":
-        # Ищем пробой поддержки
-        supports = [l for l in key_levels if l.type == 'support' and l.price < current_price]
+    if key_levels and direction == "LONG":
+        # Ищем пробой поддержки - безопасный доступ к атрибутам
+        supports = [l for l in key_levels if hasattr(l, 'type') and hasattr(l, 'price') and l.type == 'support' and l.price < current_price]
         if supports:
             closest_support = max(supports, key=lambda x: x.price)
             if current_price < closest_support.price * 0.998:  # Пробой на 0.2%
                 score += 25
                 signals.append(f"Пробой поддержки {closest_support.price:.4f}")
-    else:  # SHORT
-        # Ищем пробой сопротивления
-        resistances = [l for l in key_levels if l.type == 'resistance' and l.price > current_price]
+    elif key_levels and direction == "SHORT":
+        # Ищем пробой сопротивления - безопасный доступ к атрибутам
+        resistances = [l for l in key_levels if hasattr(l, 'type') and hasattr(l, 'price') and l.type == 'resistance' and l.price > current_price]
         if resistances:
             closest_resistance = min(resistances, key=lambda x: x.price)
             if current_price > closest_resistance.price * 1.002:  # Пробой на 0.2%

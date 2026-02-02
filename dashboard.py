@@ -1060,6 +1060,14 @@ def api_news():
     
     try:
         # Get recent news events from analyzer cache
+        if not hasattr(_news_analyzer, 'recent_events') or _news_analyzer.recent_events is None:
+            return jsonify({
+                'news': [],
+                'sentiment': {'score': 0, 'trend': 'NEUTRAL'},
+                'error': 'News events not available',
+                'timestamp': to_moscow_time()
+            })
+        
         recent_events = list(_news_analyzer.recent_events)[-30:]  # Last 30 events
         recent_events.reverse()  # Newest first
         
