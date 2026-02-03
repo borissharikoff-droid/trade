@@ -1,6 +1,8 @@
 """
 AI Trading Analyzer powered by DeepSeek
 Анализирует сделки, учится на истории, понимает влияние новостей
+
+ВАЖНО: Данные теперь хранятся в PostgreSQL для сохранения между деплоями!
 """
 
 import os
@@ -24,7 +26,11 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-b2c365a48862461fb4f9ea74887
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"  # или deepseek-coder для технического анализа
 
-# Memory storage path
+# Memory storage - теперь используем PostgreSQL если доступен
+DATABASE_URL = os.getenv("DATABASE_URL")
+USE_POSTGRES_MEMORY = DATABASE_URL is not None
+
+# Fallback to local files only if no PostgreSQL
 MEMORY_PATH = "ai_memory.json"
 INSIGHTS_PATH = "ai_insights.json"
 
@@ -78,7 +84,12 @@ class NewsImpact:
 
 
 class AIMemory:
-    """Долгосрочная память AI - хранит знания и инсайты"""
+    """
+    Долгосрочная память AI - хранит знания и инсайты.
+    
+    ВАЖНО: Теперь использует PostgreSQL для сохранения между деплоями!
+    При первом запуске создаёт таблицу ai_memory.
+    """
     
     def __init__(self):
         self.trade_patterns: Dict[str, Dict] = {}  # Паттерны успешных/неуспешных сделок
@@ -93,10 +104,100 @@ class AIMemory:
         self.total_news_analyzed: int = 0
         self.prediction_accuracy: float = 0.5
         
+        self._db_initialized = False
+        self._init_db()
         self._load()
     
+    def _get_db_connection(self):
+        """Получить подключение к PostgreSQL"""
+        if not USE_POSTGRES_MEMORY:
+            return None
+        try:
+            import psycopg2
+            from psycopg2.extras import RealDictCursor
+            conn = psycopg2.connect(DATABASE_URL)
+            return conn
+        except Exception as e:
+            logger.error(f"[AI_MEMORY] DB connection error: {e}")
+            return None
+    
+    def _init_db(self):
+        """Создать таблицу для AI памяти если не существует"""
+        if not USE_POSTGRES_MEMORY:
+            logger.info("[AI_MEMORY] Using local file storage (no PostgreSQL)")
+            return
+        
+        conn = self._get_db_connection()
+        if not conn:
+            return
+        
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ai_memory (
+                        id SERIAL PRIMARY KEY,
+                        key VARCHAR(100) UNIQUE NOT NULL,
+                        data JSONB NOT NULL,
+                        updated_at TIMESTAMP DEFAULT NOW()
+                    )
+                """)
+                conn.commit()
+            self._db_initialized = True
+            logger.info("[AI_MEMORY] ✓ PostgreSQL table initialized")
+        except Exception as e:
+            logger.error(f"[AI_MEMORY] DB init error: {e}")
+        finally:
+            conn.close()
+    
     def _load(self):
-        """Загрузить память из файла"""
+        """Загрузить память из PostgreSQL или файла"""
+        # Сначала пробуем PostgreSQL
+        if USE_POSTGRES_MEMORY and self._db_initialized:
+            if self._load_from_db():
+                return
+        
+        # Fallback: загрузка из файла
+        self._load_from_file()
+    
+    def _load_from_db(self) -> bool:
+        """Загрузить из PostgreSQL"""
+        conn = self._get_db_connection()
+        if not conn:
+            return False
+        
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT key, data FROM ai_memory")
+                rows = cur.fetchall()
+                
+                for key, data in rows:
+                    if key == 'trade_patterns':
+                        self.trade_patterns = data or {}
+                    elif key == 'news_patterns':
+                        self.news_patterns = data or {}
+                    elif key == 'market_insights':
+                        self.market_insights = data or []
+                    elif key == 'symbol_knowledge':
+                        self.symbol_knowledge = data or {}
+                    elif key == 'learned_rules':
+                        self.learned_rules = data or []
+                    elif key == 'performance_history':
+                        self.performance_history = data or []
+                    elif key == 'stats':
+                        self.total_trades_analyzed = data.get('total_trades_analyzed', 0)
+                        self.total_news_analyzed = data.get('total_news_analyzed', 0)
+                        self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
+                
+                logger.info(f"[AI_MEMORY] ✓ Loaded from PostgreSQL: {self.total_trades_analyzed} trades, {self.total_news_analyzed} news")
+                return True
+        except Exception as e:
+            logger.error(f"[AI_MEMORY] DB load error: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    def _load_from_file(self):
+        """Загрузить из локального файла (fallback)"""
         try:
             if os.path.exists(MEMORY_PATH):
                 with open(MEMORY_PATH, 'r', encoding='utf-8') as f:
@@ -110,19 +211,77 @@ class AIMemory:
                     self.total_trades_analyzed = data.get('total_trades_analyzed', 0)
                     self.total_news_analyzed = data.get('total_news_analyzed', 0)
                     self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
-                logger.info(f"[AI_MEMORY] Loaded: {self.total_trades_analyzed} trades, {self.total_news_analyzed} news analyzed")
+                logger.info(f"[AI_MEMORY] Loaded from file: {self.total_trades_analyzed} trades, {self.total_news_analyzed} news")
+                
+                # Мигрируем в PostgreSQL если доступен
+                if USE_POSTGRES_MEMORY and self._db_initialized:
+                    logger.info("[AI_MEMORY] Migrating file data to PostgreSQL...")
+                    self.save()
         except Exception as e:
-            logger.error(f"[AI_MEMORY] Error loading: {e}")
+            logger.error(f"[AI_MEMORY] File load error: {e}")
     
     def save(self):
-        """Сохранить память в файл"""
+        """Сохранить память в PostgreSQL (с fallback на файл)"""
+        # Сначала пробуем PostgreSQL
+        if USE_POSTGRES_MEMORY and self._db_initialized:
+            if self._save_to_db():
+                return
+        
+        # Fallback: сохранение в файл
+        self._save_to_file()
+    
+    def _save_to_db(self) -> bool:
+        """Сохранить в PostgreSQL"""
+        conn = self._get_db_connection()
+        if not conn:
+            return False
+        
+        try:
+            with conn.cursor() as cur:
+                # Используем UPSERT для каждого ключа
+                data_items = [
+                    ('trade_patterns', self.trade_patterns),
+                    ('news_patterns', self.news_patterns),
+                    ('market_insights', self.market_insights[-1000:]),
+                    ('symbol_knowledge', self.symbol_knowledge),
+                    ('learned_rules', self.learned_rules[-500:]),
+                    ('performance_history', self.performance_history[-100:]),
+                    ('stats', {
+                        'total_trades_analyzed': self.total_trades_analyzed,
+                        'total_news_analyzed': self.total_news_analyzed,
+                        'prediction_accuracy': self.prediction_accuracy,
+                        'last_saved': datetime.now().isoformat()
+                    })
+                ]
+                
+                for key, data in data_items:
+                    cur.execute("""
+                        INSERT INTO ai_memory (key, data, updated_at)
+                        VALUES (%s, %s, NOW())
+                        ON CONFLICT (key) DO UPDATE SET
+                            data = EXCLUDED.data,
+                            updated_at = NOW()
+                    """, (key, json.dumps(data, default=str)))
+                
+                conn.commit()
+                logger.debug("[AI_MEMORY] ✓ Saved to PostgreSQL")
+                return True
+        except Exception as e:
+            logger.error(f"[AI_MEMORY] DB save error: {e}")
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
+    
+    def _save_to_file(self):
+        """Сохранить в локальный файл (fallback)"""
         try:
             data = {
                 'trade_patterns': self.trade_patterns,
                 'news_patterns': self.news_patterns,
-                'market_insights': self.market_insights[-1000:],  # Последние 1000
+                'market_insights': self.market_insights[-1000:],
                 'symbol_knowledge': self.symbol_knowledge,
-                'learned_rules': self.learned_rules[-500:],  # Последние 500 правил
+                'learned_rules': self.learned_rules[-500:],
                 'performance_history': self.performance_history[-100:],
                 'total_trades_analyzed': self.total_trades_analyzed,
                 'total_news_analyzed': self.total_news_analyzed,
@@ -132,7 +291,7 @@ class AIMemory:
             with open(MEMORY_PATH, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2, default=str)
         except Exception as e:
-            logger.error(f"[AI_MEMORY] Error saving: {e}")
+            logger.error(f"[AI_MEMORY] File save error: {e}")
     
     def add_trade_pattern(self, symbol: str, pattern: Dict):
         """Добавить паттерн сделки"""

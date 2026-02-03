@@ -5580,6 +5580,9 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error("[AUTO_TRADE] ❌ Хедж не открылся - пропускаем создание позиций для предотвращения фантомов")
             return
         
+        # Флаг: была ли создана позиция для АДМИНА (который владеет хеджем)
+        admin_hedge_position_created = False
+        
         # Проверяем каждого пользователя с auto_trade
         for auto_user_row in all_auto_trade_users:
             auto_user_id = auto_user_row['user_id']
@@ -5794,6 +5797,11 @@ R/R: 1:{setup.risk_reward:.1f}
                     logger.error(f"[AUTO_TRADE] ❌ User {auto_user_id}: ошибка отправки: {e}")
                     auto_trade_executed_users.add(auto_user_id)  # Всё равно помечаем
                 
+                # Отмечаем что позиция для админа (владельца хеджа) создана
+                if auto_user_id == AUTO_TRADE_USER_ID and bybit_qty > 0:
+                    admin_hedge_position_created = True
+                    logger.info(f"[AUTO_TRADE] ✓ Позиция админа с хеджем создана: bybit_qty={bybit_qty}")
+                
                 # Обновляем счётчик сделок
                 auto_user['auto_trade_today'] = user_today_count + 1
                 db_update_user(auto_user_id, auto_trade_today=user_today_count + 1)
@@ -5804,6 +5812,35 @@ R/R: 1:{setup.risk_reward:.1f}
                 continue
         
         logger.info(f"[AUTO_TRADE] Выполнено для {len(auto_trade_executed_users)} пользователей")
+        
+        # === КРИТИЧНО: Если хедж открыт, но позиция админа НЕ создана - закрываем хедж! ===
+        # Это предотвращает "висячие" позиции на Bybit без соответствующих позиций в боте
+        if hedge_opened_successfully and not admin_hedge_position_created:
+            logger.error(f"[AUTO_TRADE] ⚠️ ORPHAN HEDGE DETECTED: хедж открыт, но позиция админа НЕ создана!")
+            logger.info(f"[AUTO_TRADE] Закрываем orphan хедж для {symbol} {direction}...")
+            try:
+                # Закрываем хедж на Bybit
+                closed = await hedge_close(0, symbol, direction, global_bybit_qty)
+                if closed:
+                    logger.info(f"[AUTO_TRADE] ✓ Orphan хедж закрыт успешно")
+                else:
+                    logger.error(f"[AUTO_TRADE] ❌ Не удалось закрыть orphan хедж!")
+                    # Отправляем уведомление админу
+                    try:
+                        await context.bot.send_message(
+                            AUTO_TRADE_USER_ID,
+                            f"⚠️ <b>ВНИМАНИЕ: Orphan хедж!</b>\n\n"
+                            f"Символ: {symbol}\n"
+                            f"Направление: {direction}\n"
+                            f"Qty: {global_bybit_qty}\n\n"
+                            f"Позиция открыта на Bybit, но НЕ создана в боте.\n"
+                            f"Закройте вручную!",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+            except Exception as close_err:
+                logger.error(f"[AUTO_TRADE] ❌ Ошибка закрытия orphan хеджа: {close_err}")
         
         # === ОТПРАВКА СИГНАЛОВ ОСТАЛЬНЫМ ЮЗЕРАМ ===
         signal_sent_to_users = False
@@ -7130,6 +7167,16 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
             user['balance'] += amount  # Возвращаем деньги
             user['balance'] = sanitize_balance(user['balance'])
             save_user(user_id)
+        
+        # === ЗАКРЫВАЕМ ORPHAN ХЕДЖ ===
+        if hedging_enabled and bybit_qty > 0:
+            logger.error(f"[TRADE] ⚠️ Closing orphan hedge: {symbol} {direction} qty={bybit_qty}")
+            try:
+                await hedge_close(0, symbol, direction, bybit_qty)
+                logger.info(f"[TRADE] ✓ Orphan hedge closed")
+            except Exception as close_err:
+                logger.error(f"[TRADE] ❌ Failed to close orphan hedge: {close_err}")
+        
         trade_logger.log_error(f"Position creation failed (custom), restored ${amount} to user {user_id}", error=e, user_id=user_id)
         await update.message.reply_text(
             f"<b>❌ Ошибка создания позиции</b>\n\n"
@@ -10183,6 +10230,268 @@ async def sync_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TY
             parse_mode="HTML"
         )
 
+# ==================== ОЧИСТКА ORPHAN ХЕДЖЕЙ ====================
+async def cleanup_orphan_hedges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Находит и закрывает orphan хеджи на Bybit (позиции на Bybit без соответствующих позиций в боте).
+    Только для админа!
+    """
+    user_id = update.effective_user.id
+    
+    # Проверка админа
+    if user_id != AUTO_TRADE_USER_ID:
+        await update.message.reply_text("❌ Эта команда только для админа")
+        return
+    
+    await update.message.reply_text("⏳ Анализирую позиции Bybit и бота...")
+    
+    try:
+        # 1. Получаем ВСЕ позиции с Bybit
+        if not await is_hedging_enabled():
+            await update.message.reply_text("❌ Хеджирование не включено")
+            return
+        
+        bybit_positions = await hedger.get_all_positions()
+        
+        if not bybit_positions:
+            await update.message.reply_text("✅ На Bybit нет открытых позиций")
+            return
+        
+        # 2. Получаем ВСЕ позиции из бота с bybit_qty > 0
+        bot_positions = run_sql(
+            "SELECT symbol, direction, bybit_qty, user_id FROM positions WHERE bybit_qty > 0",
+            fetch="all"
+        ) or []
+        
+        # Создаём set символов с хеджами в боте
+        bot_hedged_symbols = set()
+        for bp in bot_positions:
+            # Конвертируем BTC/USDT -> BTCUSDT
+            symbol = bp['symbol'].replace('/', '') if '/' in bp['symbol'] else bp['symbol']
+            bot_hedged_symbols.add(symbol)
+        
+        # 3. Находим orphan хеджи (на Bybit, но НЕ в боте)
+        orphan_hedges = []
+        matched_hedges = []
+        
+        for bybit_pos in bybit_positions:
+            bybit_symbol = bybit_pos['symbol']
+            
+            if bybit_symbol in bot_hedged_symbols:
+                matched_hedges.append(bybit_pos)
+            else:
+                orphan_hedges.append(bybit_pos)
+        
+        # 4. Формируем отчёт
+        text = f"<b>🔍 Анализ хеджей Bybit</b>\n\n"
+        text += f"<b>На Bybit:</b> {len(bybit_positions)} позиций\n"
+        text += f"<b>В боте:</b> {len(bot_positions)} с хеджем\n\n"
+        
+        if matched_hedges:
+            text += f"<b>✅ Синхронизированы ({len(matched_hedges)}):</b>\n"
+            for h in matched_hedges[:5]:
+                pnl = h.get('pnl', 0)
+                pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                text += f"├ {h['symbol']} | {h['side']} | {pnl_str}\n"
+            if len(matched_hedges) > 5:
+                text += f"└ ... и ещё {len(matched_hedges) - 5}\n"
+            text += "\n"
+        
+        if orphan_hedges:
+            text += f"<b>⚠️ ORPHAN ХЕДЖИ ({len(orphan_hedges)}):</b>\n"
+            total_orphan_pnl = 0
+            for h in orphan_hedges:
+                pnl = h.get('pnl', 0)
+                total_orphan_pnl += pnl
+                pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                side = "LONG" if h['side'] == 'Buy' else "SHORT"
+                text += f"├ {h['symbol']} | {side} | size={h['size']} | PnL: {pnl_str}\n"
+            
+            text += f"\n<b>Общий PnL orphan:</b> "
+            text += f"+${total_orphan_pnl:.2f}" if total_orphan_pnl >= 0 else f"-${abs(total_orphan_pnl):.2f}"
+            text += "\n\n⚠️ Эти позиции на Bybit НЕ связаны с позициями в боте!"
+        else:
+            text += "✅ Orphan хеджей не найдено!"
+        
+        # 5. Кнопки действий
+        keyboard = []
+        if orphan_hedges:
+            keyboard.append([InlineKeyboardButton(
+                f"🗑 Закрыть orphan ({len(orphan_hedges)})", 
+                callback_data="close_orphan_hedges"
+            )])
+        keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_orphan_check")])
+        keyboard.append([InlineKeyboardButton("🏠 Назад", callback_data="back_main")])
+        
+        await update.message.reply_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        logger.info(f"[ORPHAN_CHECK] Found {len(orphan_hedges)} orphan hedges, {len(matched_hedges)} matched")
+        
+    except Exception as e:
+        logger.error(f"[ORPHAN_CHECK] Error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
+
+
+async def close_orphan_hedges_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Закрыть все orphan хеджи"""
+    query = update.callback_query
+    await query.answer("⏳ Закрываю...")
+    
+    user_id = update.effective_user.id
+    
+    if user_id != AUTO_TRADE_USER_ID:
+        await query.edit_message_text("❌ Только для админа")
+        return
+    
+    try:
+        # Получаем позиции
+        bybit_positions = await hedger.get_all_positions()
+        bot_positions = run_sql(
+            "SELECT symbol, direction, bybit_qty FROM positions WHERE bybit_qty > 0",
+            fetch="all"
+        ) or []
+        
+        bot_hedged_symbols = {bp['symbol'].replace('/', '') for bp in bot_positions}
+        
+        closed_count = 0
+        total_pnl = 0
+        errors = []
+        
+        for bybit_pos in bybit_positions:
+            if bybit_pos['symbol'] not in bot_hedged_symbols:
+                # Это orphan - закрываем
+                symbol = bybit_pos['symbol']
+                side = bybit_pos['side']  # Buy or Sell
+                direction = "LONG" if side == "Buy" else "SHORT"
+                size = bybit_pos['size']
+                pnl = bybit_pos.get('pnl', 0)
+                
+                logger.info(f"[ORPHAN_CLOSE] Closing orphan: {symbol} {direction} size={size}")
+                
+                try:
+                    # Конвертируем символ обратно: BTCUSDT -> BTC/USDT
+                    bot_symbol = symbol
+                    if symbol.endswith('USDT'):
+                        base = symbol[:-4]
+                        bot_symbol = f"{base}/USDT"
+                    
+                    closed = await hedge_close(0, bot_symbol, direction, size)
+                    if closed:
+                        closed_count += 1
+                        total_pnl += pnl
+                        logger.info(f"[ORPHAN_CLOSE] ✓ Closed {symbol}")
+                    else:
+                        errors.append(f"{symbol}: hedge_close returned False")
+                except Exception as close_err:
+                    errors.append(f"{symbol}: {str(close_err)[:50]}")
+                    logger.error(f"[ORPHAN_CLOSE] Error closing {symbol}: {close_err}")
+        
+        # Формируем отчёт
+        text = f"<b>🗑 Очистка orphan хеджей</b>\n\n"
+        text += f"<b>Закрыто:</b> {closed_count}\n"
+        pnl_str = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+        text += f"<b>Реализованный PnL:</b> {pnl_str}\n"
+        
+        if errors:
+            text += f"\n<b>⚠️ Ошибки ({len(errors)}):</b>\n"
+            for err in errors[:5]:
+                text += f"├ {err}\n"
+        
+        keyboard = [[InlineKeyboardButton("🏠 Назад", callback_data="back_main")]]
+        
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"[ORPHAN_CLOSE] Error: {e}", exc_info=True)
+        await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+
+
+async def refresh_orphan_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обновить проверку orphan хеджей"""
+    query = update.callback_query
+    await query.answer("🔄 Обновляю...")
+    
+    # Просто пересоздаём сообщение с обновлёнными данными
+    user_id = update.effective_user.id
+    
+    if user_id != AUTO_TRADE_USER_ID:
+        await query.edit_message_text("❌ Только для админа")
+        return
+    
+    try:
+        bybit_positions = await hedger.get_all_positions()
+        
+        if not bybit_positions:
+            await query.edit_message_text("✅ На Bybit нет открытых позиций")
+            return
+        
+        bot_positions = run_sql(
+            "SELECT symbol, direction, bybit_qty FROM positions WHERE bybit_qty > 0",
+            fetch="all"
+        ) or []
+        
+        bot_hedged_symbols = {bp['symbol'].replace('/', '') for bp in bot_positions}
+        
+        orphan_hedges = [p for p in bybit_positions if p['symbol'] not in bot_hedged_symbols]
+        matched_hedges = [p for p in bybit_positions if p['symbol'] in bot_hedged_symbols]
+        
+        text = f"<b>🔍 Анализ хеджей Bybit</b>\n\n"
+        text += f"<b>На Bybit:</b> {len(bybit_positions)} позиций\n"
+        text += f"<b>В боте:</b> {len(bot_positions)} с хеджем\n\n"
+        
+        if matched_hedges:
+            text += f"<b>✅ Синхронизированы ({len(matched_hedges)}):</b>\n"
+            for h in matched_hedges[:5]:
+                pnl = h.get('pnl', 0)
+                pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                text += f"├ {h['symbol']} | {h['side']} | {pnl_str}\n"
+            if len(matched_hedges) > 5:
+                text += f"└ ... и ещё {len(matched_hedges) - 5}\n"
+            text += "\n"
+        
+        if orphan_hedges:
+            text += f"<b>⚠️ ORPHAN ХЕДЖИ ({len(orphan_hedges)}):</b>\n"
+            total_orphan_pnl = 0
+            for h in orphan_hedges:
+                pnl = h.get('pnl', 0)
+                total_orphan_pnl += pnl
+                pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+                side = "LONG" if h['side'] == 'Buy' else "SHORT"
+                text += f"├ {h['symbol']} | {side} | size={h['size']} | PnL: {pnl_str}\n"
+            
+            text += f"\n<b>Общий PnL orphan:</b> "
+            text += f"+${total_orphan_pnl:.2f}" if total_orphan_pnl >= 0 else f"-${abs(total_orphan_pnl):.2f}"
+        else:
+            text += "✅ Orphan хеджей не найдено!"
+        
+        keyboard = []
+        if orphan_hedges:
+            keyboard.append([InlineKeyboardButton(
+                f"🗑 Закрыть orphan ({len(orphan_hedges)})", 
+                callback_data="close_orphan_hedges"
+            )])
+        keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="refresh_orphan_check")])
+        keyboard.append([InlineKeyboardButton("🏠 Назад", callback_data="back_main")])
+        
+        await query.edit_message_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+    except Exception as e:
+        logger.error(f"[ORPHAN_REFRESH] Error: {e}", exc_info=True)
+        await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
+
+
 # ==================== РЕФЕРАЛЬНАЯ КОМАНДА ====================
 async def referral_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Реферальная ссылка"""
@@ -10415,6 +10724,7 @@ def main() -> None:
     app.add_handler(CommandHandler("balance", balance_cmd))  # Диагностика баланса
     app.add_handler(CommandHandler("sync", sync_cmd))  # Синхронизация позиций с Bybit
     app.add_handler(CommandHandler("import_bybit", import_bybit_cmd))  # Импорт позиций с Bybit
+    app.add_handler(CommandHandler("orphans", cleanup_orphan_hedges_cmd))  # Очистка orphan хеджей (админ)
     
     # Оплата Stars
     app.add_handler(PreCheckoutQueryHandler(precheckout))
@@ -10460,6 +10770,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(start, pattern="^back$"))
     app.add_handler(CallbackQueryHandler(sync_cleanup_callback, pattern="^sync_cleanup_"))
     app.add_handler(CallbackQueryHandler(sync_refresh_callback, pattern="^sync_refresh$"))
+    app.add_handler(CallbackQueryHandler(close_orphan_hedges_callback, pattern="^close_orphan_hedges$"))
+    app.add_handler(CallbackQueryHandler(refresh_orphan_check_callback, pattern="^refresh_orphan_check$"))
     
     # Обработка текста для своей суммы и адреса вывода
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_custom_amount))
