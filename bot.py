@@ -976,22 +976,31 @@ async def close_linked_auto_positions(symbol: str, direction: str, exit_price: f
                 
                 closed_count += 1
                 
-                # Уведомляем пользователя
-                if context:
-                    try:
-                        ticker = symbol.split("/")[0] if "/" in symbol else symbol
-                        pnl_sign = "+" if local_pnl >= 0 else ""
-                        pnl_emoji = "✅" if local_pnl >= 0 else "📉"
-                        await context.bot.send_message(
-                            user_id,
-                            f"<b>📡 Авто-трейд закрыт</b>\n\n"
-                            f"{ticker} | {direction}\n"
-                            f"{pnl_emoji} {pnl_sign}${local_pnl:.2f}\n\n"
-                            f"💰 Баланс: ${user['balance']:.2f}",
-                            parse_mode="HTML"
-                        )
-                    except Exception as e:
-                        logger.debug(f"[LINKED_CLOSE] Notify error for {user_id}: {e}")
+                # Уведомляем пользователя - ВСЕГДА отправляем уведомление для авто-трейдов
+                try:
+                    ticker = symbol.split("/")[0] if "/" in symbol else symbol
+                    pnl_sign = "+" if local_pnl >= 0 else ""
+                    pnl_emoji = "✅" if local_pnl >= 0 else "📉"
+                    pnl_abs = abs(local_pnl)
+                    
+                    text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+
+<b>{pnl_sign}${pnl_abs:.2f}</b> | {reason} {pnl_emoji}
+
+{ticker} | {direction}
+Связанная позиция закрыта
+
+💰 Баланс: ${user['balance']:.2f}"""
+                    
+                    # Используем context если есть, иначе get_bot_instance()
+                    if context:
+                        await context.bot.send_message(user_id, text, parse_mode="HTML")
+                    else:
+                        bot = get_bot_instance()
+                        if bot:
+                            asyncio.create_task(bot.send_message(user_id, text, parse_mode="HTML"))
+                except Exception as e:
+                    logger.debug(f"[LINKED_CLOSE] Notify error for {user_id}: {e}")
                 
                 logger.info(f"[LINKED_CLOSE] Closed linked position {pos['id']} for user {user_id}: {symbol} PnL=${local_pnl:.2f}")
                 
@@ -1881,8 +1890,8 @@ async def get_recent_audit_logs(limit: int = 20) -> list:
     return logs
 
 # ==================== SECURITY LIMITS ====================
-# Базовое значение - увеличено с 5 до 8
-MAX_POSITIONS_PER_USER = 8  # Maximum open positions per user (увеличено для большего количества возможностей)
+# Базовое значение - увеличено для большего темпа торговли
+MAX_POSITIONS_PER_USER = 15  # Maximum open positions per user (увеличено для большего количества возможностей)
 MIN_BALANCE_RESERVE = 5.0    # Minimum balance to keep after trade
 MAX_SINGLE_TRADE = 10000.0   # Maximum single trade amount
 MAX_BALANCE = 1000000.0      # Maximum user balance (sanity check)
@@ -1891,27 +1900,28 @@ def get_max_positions_for_user(balance: float) -> int:
     """
     Динамическое определение максимального количества позиций на основе баланса
     
-    Логика:
-    - Баланс < $100: максимум 3 позиции (меньше риска при малом капитале)
-    - Баланс $100-500: максимум 5 позиций
-    - Баланс $500-1000: максимум 8 позиций
-    - Баланс $1000-5000: максимум 10 позиций
-    - Баланс > $5000: максимум 12 позиций
+    Логика (УВЕЛИЧЕНО для большего темпа торговли):
+    - Баланс < $100: максимум 8 позиций
+    - Баланс $100-500: максимум 10 позиций
+    - Баланс $500-1000: максимум 12 позиций
+    - Баланс $1000-5000: максимум 15 позиций
+    - Баланс > $5000: максимум 20 позиций
     
     Это позволяет:
-    - Защитить мелкие аккаунты от чрезмерной диверсификации
-    - Дать крупным аккаунтам больше возможностей
+    - Больше сделок одновременно для повышения темпа
+    - AI анализирует много данных - нужно больше позиций
+    - Диверсификация по разным инструментам
     """
     if balance < 100:
-        return 5  # Увеличено с 3 до 5 для большего количества сделок
+        return 8   # Увеличено с 5 до 8 для большего темпа
     elif balance < 500:
-        return 6  # Увеличено с 5 до 6
+        return 10  # Увеличено с 6 до 10
     elif balance < 1000:
-        return 8
+        return 12  # Увеличено с 8 до 12
     elif balance < 5000:
-        return 10
+        return 15  # Увеличено с 10 до 15
     else:
-        return 12  # Максимум для крупных аккаунтов
+        return 20  # Максимум для крупных аккаунтов (было 12)
 
 
 # === УМНОЕ РАСПРЕДЕЛЕНИЕ КАПИТАЛА v2.0 ===
@@ -7306,14 +7316,19 @@ async def handle_websocket_sync(event_type: str, data: dict):
                         logger.info(f"[WS_SYNC] ✅ Position {pos['id']} closed via WebSocket, PnL=${real_pnl:.2f}")
                         
                         # ВАЖНО: Отправляем уведомление пользователю СРАЗУ
-                        # НО: Подавляем если пользователь только что нажал на кнопку (смотрит сделки)
-                        if should_suppress_notification(user_id):
-                            logger.debug(f"[WS_SYNC] Suppressing notification for user {user_id} - recent interaction")
+                        # Для авто-трейдов ВСЕГДА отправляем уведомления (без подавления)
+                        # Для обычных сделок - подавляем если пользователь только что нажал кнопку
+                        is_auto = pos.get('is_auto', False)
+                        
+                        # Авто-трейды всегда получают уведомления, обычные - с проверкой подавления
+                        should_notify = is_auto or not should_suppress_notification(user_id)
+                        
+                        if not should_notify:
+                            logger.debug(f"[WS_SYNC] Suppressing notification for user {user_id} - recent interaction (manual trade)")
                         else:
                             try:
                                 ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
                                 pnl_abs = abs(real_pnl)
-                                is_auto = pos.get('is_auto', False)
                                 
                                 if is_auto:
                                     # Уведомление для авто-трейда
