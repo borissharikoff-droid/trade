@@ -1477,13 +1477,23 @@
                         </div>
                     </div>
                     
+                    <!-- Performance Summary -->
+                    <div class="section-title"><span class="section-icon">📊</span> Performance Summary</div>
+                    <div class="stats-grid" id="analyticsSummary" style="grid-template-columns: repeat(4, 1fr);">
+                        <div class="stat-card"><div class="stat-label">Loading...</div></div>
+                    </div>
+                    
+                    <!-- Top/Worst Symbols -->
+                    <div id="topSymbols" style="margin-top: 16px;"></div>
+                    <div id="worstSymbols"></div>
+                    
                     <!-- PnL Chart -->
-                    <div class="panel">
+                    <div class="panel" style="margin-top: 20px;">
                         <div class="panel-header">
-                            <span class="panel-title"><span class="panel-title-icon">📈</span> PnL Over Time</span>
+                            <span class="panel-title"><span class="panel-title-icon">📈</span> PnL Over Time (30 days)</span>
                         </div>
                         <div class="panel-content">
-                            <div class="chart-container">
+                            <div class="chart-container" style="height: 300px;">
                                 <canvas id="pnlChart"></canvas>
                             </div>
                         </div>
@@ -1548,12 +1558,17 @@
                             <div class="summary-value" id="totalUsers">-</div>
                         </div>
                         <div class="summary-card">
-                            <div class="summary-label">Total Balance</div>
-                            <div class="summary-value" id="usersBalance">-</div>
+                            <div class="summary-label">Total Equity</div>
+                            <div class="summary-value" id="usersEquity">-</div>
+                            <div class="summary-sub" id="usersEquitySub" style="font-size: 0.65rem; color: var(--text-muted);"></div>
                         </div>
                         <div class="summary-card">
                             <div class="summary-label">Total Deposits</div>
                             <div class="summary-value" id="usersDeposits">-</div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="summary-label">Total PnL</div>
+                            <div class="summary-value" id="usersTotalPnl">-</div>
                         </div>
                         <div class="summary-card">
                             <div class="summary-label">Active Traders</div>
@@ -2286,8 +2301,21 @@
                 allUsers = data.users || [];
                 
                 document.getElementById('totalUsers').textContent = data.count || 0;
-                document.getElementById('usersBalance').textContent = '$' + (data.totals?.total_balance || 0).toLocaleString();
+                
+                // Total Equity = Balance + Positions Value
+                const totalBalance = data.totals?.total_balance || 0;
+                const totalPositions = data.totals?.total_positions_value || 0;
+                const totalEquity = data.totals?.total_equity || (totalBalance + totalPositions);
+                const totalPnl = data.totals?.total_pnl || 0;
+                
+                document.getElementById('usersEquity').textContent = '$' + totalEquity.toLocaleString(undefined, {maximumFractionDigits: 2});
+                document.getElementById('usersEquitySub').textContent = `($${totalBalance.toLocaleString()} bal + $${totalPositions.toLocaleString()} pos)`;
                 document.getElementById('usersDeposits').textContent = '$' + (data.totals?.total_deposits || 0).toLocaleString();
+                
+                const pnlEl = document.getElementById('usersTotalPnl');
+                pnlEl.textContent = (totalPnl >= 0 ? '+' : '') + '$' + totalPnl.toLocaleString(undefined, {maximumFractionDigits: 2});
+                pnlEl.className = 'summary-value ' + (totalPnl >= 0 ? 'positive' : 'negative');
+                
                 document.getElementById('activeTraders').textContent = data.totals?.active_traders || 0;
                 document.getElementById('autoTraders').textContent = data.totals?.auto_traders || 0;
                 
@@ -2622,8 +2650,8 @@
             container.innerHTML = html;
         }
         
-        // PnL Chart
-        function initPnlChart() {
+        // PnL Chart - загружаем реальные данные
+        async function initPnlChart() {
             const ctx = document.getElementById('pnlChart');
             if (!ctx) return;
             
@@ -2631,43 +2659,193 @@
                 pnlChart.destroy();
             }
             
-            // Dummy data for now - should be fetched from API
-            pnlChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
-                    datasets: [{
-                        label: 'PnL',
-                        data: [10, 25, 15, 40, 35, 55, 70],
-                        borderColor: '#00ff88',
-                        backgroundColor: 'rgba(0, 255, 136, 0.1)',
-                        fill: true,
-                        tension: 0.4,
-                        pointRadius: 4,
-                        pointBackgroundColor: '#00ff88'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false }
+            try {
+                // Загружаем реальные данные из API
+                const response = await fetch('/api/pnl_history');
+                const result = await response.json();
+                
+                if (result.error || !result.data || result.data.length === 0) {
+                    // Показываем пустой график если нет данных
+                    ctx.parentElement.innerHTML = '<div class="no-data" style="padding: 40px;">No trade history yet</div>';
+                    return;
+                }
+                
+                const labels = result.data.map(d => {
+                    const date = new Date(d.date);
+                    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+                });
+                const dailyPnl = result.data.map(d => d.daily_pnl);
+                const cumulativePnl = result.data.map(d => d.cumulative_pnl);
+                const winrates = result.data.map(d => d.winrate);
+                
+                pnlChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            {
+                                label: 'Cumulative PnL',
+                                data: cumulativePnl,
+                                borderColor: '#00ff88',
+                                backgroundColor: 'rgba(0, 255, 136, 0.1)',
+                                fill: true,
+                                tension: 0.4,
+                                pointRadius: 3,
+                                pointBackgroundColor: '#00ff88',
+                                yAxisID: 'y'
+                            },
+                            {
+                                label: 'Daily PnL',
+                                data: dailyPnl,
+                                borderColor: '#4a9eff',
+                                backgroundColor: 'transparent',
+                                borderDash: [5, 5],
+                                tension: 0.4,
+                                pointRadius: 2,
+                                yAxisID: 'y'
+                            }
+                        ]
                     },
-                    scales: {
-                        x: {
-                            grid: { color: 'rgba(255, 255, 255, 0.03)' },
-                            ticks: { color: 'rgba(232, 240, 240, 0.4)' }
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        interaction: {
+                            mode: 'index',
+                            intersect: false
                         },
-                        y: {
-                            grid: { color: 'rgba(255, 255, 255, 0.03)' },
-                            ticks: { 
-                                color: 'rgba(232, 240, 240, 0.4)',
-                                callback: v => '$' + v
+                        plugins: {
+                            legend: { 
+                                display: true,
+                                labels: { color: 'rgba(232, 240, 240, 0.6)', font: { size: 10 } }
+                            },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const idx = context.dataIndex;
+                                        const item = result.data[idx];
+                                        if (context.datasetIndex === 0) {
+                                            return `Cumulative: $${item.cumulative_pnl.toFixed(2)}`;
+                                        } else {
+                                            return `Daily: $${item.daily_pnl.toFixed(2)} (${item.trades} trades, ${item.winrate}% WR)`;
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        scales: {
+                            x: {
+                                grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                                ticks: { color: 'rgba(232, 240, 240, 0.4)', maxRotation: 45 }
+                            },
+                            y: {
+                                grid: { color: 'rgba(255, 255, 255, 0.03)' },
+                                ticks: { 
+                                    color: 'rgba(232, 240, 240, 0.4)',
+                                    callback: v => '$' + v.toFixed(0)
+                                }
                             }
                         }
                     }
+                });
+                
+                // Также загружаем сводную аналитику
+                fetchAnalyticsSummary();
+                
+            } catch (error) {
+                console.error('Error loading PnL chart:', error);
+                ctx.parentElement.innerHTML = '<div class="no-data" style="padding: 40px;">Error loading chart data</div>';
+            }
+        }
+        
+        // Загрузка сводной аналитики
+        async function fetchAnalyticsSummary() {
+            try {
+                const response = await fetch('/api/analytics_summary');
+                const data = await response.json();
+                
+                if (data.error) return;
+                
+                // Обновляем summary карточки если они есть
+                const summaryContainer = document.getElementById('analyticsSummary');
+                if (summaryContainer && data) {
+                    let html = '';
+                    
+                    // Last 24h stats
+                    if (data.last_24h) {
+                        html += `<div class="stat-card">
+                            <div class="stat-label">Last 24h</div>
+                            <div class="stat-value sm ${data.last_24h.pnl >= 0 ? 'positive' : 'negative'}">
+                                ${data.last_24h.pnl >= 0 ? '+' : ''}$${data.last_24h.pnl.toFixed(2)}
+                            </div>
+                            <div class="stat-sub">${data.last_24h.trades} trades, ${data.last_24h.winrate}% WR</div>
+                        </div>`;
+                    }
+                    
+                    // Last 7d stats
+                    if (data.last_7d) {
+                        html += `<div class="stat-card">
+                            <div class="stat-label">Last 7 Days</div>
+                            <div class="stat-value sm ${data.last_7d.pnl >= 0 ? 'positive' : 'negative'}">
+                                ${data.last_7d.pnl >= 0 ? '+' : ''}$${data.last_7d.pnl.toFixed(2)}
+                            </div>
+                            <div class="stat-sub">${data.last_7d.trades} trades, ${data.last_7d.winrate}% WR</div>
+                        </div>`;
+                    }
+                    
+                    // Direction performance
+                    if (data.by_direction) {
+                        const long = data.by_direction.LONG || { trades: 0, winrate: 0, pnl: 0 };
+                        const short = data.by_direction.SHORT || { trades: 0, winrate: 0, pnl: 0 };
+                        html += `<div class="stat-card">
+                            <div class="stat-label">LONG Performance</div>
+                            <div class="stat-value sm ${long.pnl >= 0 ? 'positive' : 'negative'}">
+                                ${long.winrate}% WR
+                            </div>
+                            <div class="stat-sub">${long.trades} trades, ${long.pnl >= 0 ? '+' : ''}$${long.pnl.toFixed(2)}</div>
+                        </div>`;
+                        html += `<div class="stat-card">
+                            <div class="stat-label">SHORT Performance</div>
+                            <div class="stat-value sm ${short.pnl >= 0 ? 'positive' : 'negative'}">
+                                ${short.winrate}% WR
+                            </div>
+                            <div class="stat-sub">${short.trades} trades, ${short.pnl >= 0 ? '+' : ''}$${short.pnl.toFixed(2)}</div>
+                        </div>`;
+                    }
+                    
+                    summaryContainer.innerHTML = html;
                 }
-            });
+                
+                // Top symbols
+                const topContainer = document.getElementById('topSymbols');
+                if (topContainer && data.top_symbols) {
+                    let html = '<div class="section-title" style="font-size: 0.75rem;"><span class="section-icon">🏆</span> Top Performing Symbols (30d)</div>';
+                    html += '<div style="display: flex; flex-wrap: wrap; gap: 8px;">';
+                    for (const sym of data.top_symbols.slice(0, 5)) {
+                        html += `<div class="badge" style="padding: 6px 10px; background: rgba(0, 255, 136, 0.1); border: 1px solid rgba(0, 255, 136, 0.3);">
+                            <strong>${sym.symbol.replace('/USDT', '')}</strong>: +$${sym.pnl.toFixed(2)} (${sym.winrate}% WR, ${sym.trades} trades)
+                        </div>`;
+                    }
+                    html += '</div>';
+                    topContainer.innerHTML = html;
+                }
+                
+                // Worst symbols
+                const worstContainer = document.getElementById('worstSymbols');
+                if (worstContainer && data.worst_symbols) {
+                    let html = '<div class="section-title" style="font-size: 0.75rem; margin-top: 12px;"><span class="section-icon">⚠️</span> Worst Performing Symbols (30d)</div>';
+                    html += '<div style="display: flex; flex-wrap: wrap; gap: 8px;">';
+                    for (const sym of data.worst_symbols.slice(0, 5)) {
+                        html += `<div class="badge" style="padding: 6px 10px; background: rgba(255, 92, 92, 0.1); border: 1px solid rgba(255, 92, 92, 0.3);">
+                            <strong>${sym.symbol.replace('/USDT', '')}</strong>: $${sym.pnl.toFixed(2)} (${sym.winrate}% WR, ${sym.trades} trades)
+                        </div>`;
+                    }
+                    html += '</div>';
+                    worstContainer.innerHTML = html;
+                }
+                
+            } catch (error) {
+                console.error('Error fetching analytics summary:', error);
+            }
         }
         
         // User Lookup

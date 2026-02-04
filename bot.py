@@ -4352,81 +4352,115 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE,
             bybit_side = bybit_info['side']
             expected_qty = pos.get('bybit_qty', 0)
             
-            # Direction mismatch check
-            direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
-
-            # Handle orphan positions (no bybit_qty)
-            # Если bybit_qty=0 но позиция ТОЧНО была на Bybit (проверяем по closed trades)
-            # то всё равно синхронизируем
-            if expected_qty == 0:
-                # Проверяем есть ли closed trade для этого символа в последних сделках
-                found_closed_trade = False
-                for closed in closed_pnl:
-                    if closed['symbol'] == bybit_symbol:
-                        # Есть закрытая сделка по этому символу - значит была на Bybit
-                        found_closed_trade = True
-                        break
-                
-                if not found_closed_trade:
-                    # Нет данных о закрытии на Bybit - пропускаем (симуляция)
-                    logger.debug(f"[SYNC] Skipping orphan position {pos['id']} - managed locally")
-                    continue
-                else:
-                    # Нашли закрытую сделку - обрабатываем
-                    logger.info(f"[SYNC] Found closed trade for orphan position {pos['id']} ({bybit_symbol})")
+            # === АГРЕССИВНАЯ ОЧИСТКА ФАНТОМНЫХ ПОЗИЦИЙ ===
             
-            # Position is closed if: size=0, size << expected, or direction mismatch
-            is_closed = bybit_size == 0 or (expected_qty > 0 and bybit_size < expected_qty * 0.1) or direction_mismatch
+            # Проверяем возраст позиции
+            pos_age_minutes = 0
+            try:
+                opened_at = pos.get('opened_at')
+                if opened_at:
+                    from datetime import datetime, timezone
+                    if isinstance(opened_at, str):
+                        opened_dt = datetime.fromisoformat(opened_at.replace('Z', '+00:00'))
+                    else:
+                        opened_dt = opened_at
+                    now = datetime.now(timezone.utc)
+                    if opened_dt.tzinfo is None:
+                        opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+                    pos_age_minutes = (now - opened_dt).total_seconds() / 60
+            except Exception:
+                pos_age_minutes = 999  # Если не можем определить - считаем старой
+            
+            # Позиция должна быть закрыта если:
+            # 1. bybit_qty > 0 и позиции нет на Bybit (size=0) - закрылась по TP/SL
+            # 2. bybit_qty > 0 и размер сильно меньше ожидаемого
+            # 3. Направление не совпадает
+            # 4. bybit_qty=0 НО позиция старше 30 минут и её нет на Bybit - фантомная
+            
+            direction_mismatch = bybit_side is not None and bybit_side != pos['direction']
+            position_missing_on_bybit = bybit_size == 0
+            size_too_small = expected_qty > 0 and bybit_size < expected_qty * 0.1
+            
+            # Определяем нужно ли закрывать
+            should_close = False
+            close_reason = ""
+            
+            if expected_qty > 0:
+                # Позиция была на Bybit
+                if position_missing_on_bybit:
+                    should_close = True
+                    close_reason = "BYBIT_CLOSED"
+                elif size_too_small:
+                    should_close = True
+                    close_reason = "SIZE_MISMATCH"
+                elif direction_mismatch:
+                    should_close = True
+                    close_reason = "DIRECTION_MISMATCH"
+            else:
+                # bybit_qty = 0 - проверяем не фантомная ли
+                # Если позиция старше 30 минут и её нет на Bybit - закрываем
+                if pos_age_minutes > 30 and position_missing_on_bybit:
+                    should_close = True
+                    close_reason = "PHANTOM_OLD"
+                    logger.info(f"[SYNC] Found phantom position {pos['id']}: {bybit_symbol}, age={pos_age_minutes:.0f}min")
+            
+            if not should_close:
+                continue
+            
+            logger.info(f"[SYNC] Closing position {pos['id']}: {bybit_symbol}, reason={close_reason}, bybit_qty={expected_qty}, bybit_size={bybit_size}")
+            
+            # Ищем реальный PnL из закрытых сделок Bybit
+            real_pnl = pos.get('pnl', 0)
+            for closed in closed_pnl:
+                if closed['symbol'] == bybit_symbol:
+                    bybit_pnl = closed['closed_pnl']
+                    bybit_qty = closed.get('qty', 0)
+                    bybit_time = closed.get('updated_time', 0)
+                    closed_side = closed.get('side', '')
+                    
+                    time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
+                    qty_ratio = bybit_qty / expected_qty if expected_qty > 0 else 0
+                    expected_side = "Sell" if pos['direction'] == "LONG" else "Buy"
+                    side_match = closed_side == expected_side or not closed_side
+                    
+                    # Используем Bybit PnL если данные свежие
+                    if time_diff < 600 and (qty_ratio > 0.5 or expected_qty == 0) and side_match:
+                        real_pnl = bybit_pnl
+                        logger.info(f"[SYNC] Using Bybit PnL: ${real_pnl:.2f}")
+                        break
 
-            if is_closed:
-                real_pnl = pos.get('pnl', 0)
-                
-                # Find real PnL from Bybit closed trades
-                for closed in closed_pnl:
-                    if closed['symbol'] == bybit_symbol:
-                        bybit_pnl = closed['closed_pnl']
-                        bybit_qty = closed.get('qty', 0)
-                        bybit_time = closed.get('updated_time', 0)
-                        closed_side = closed.get('side', '')
-                        
-                        time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
-                        qty_ratio = bybit_qty / expected_qty if expected_qty > 0 else 0
-                        expected_side = "Sell" if pos['direction'] == "LONG" else "Buy"
-                        side_match = closed_side == expected_side or not closed_side
-                        
-                        # Use Bybit PnL if validation passes
-                        if time_diff < 600 and qty_ratio > 0.5 and side_match:
-                            real_pnl = bybit_pnl
-                            break
+            # Для фантомных позиций без реального PnL - используем 0
+            if close_reason == "PHANTOM_OLD" and real_pnl == pos.get('pnl', 0):
+                real_pnl = 0  # Не было реальной сделки на Bybit
+                logger.info(f"[SYNC] Phantom position - using PnL=0")
 
-                # Sanitize and calculate return
-                real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)
-                returned = sanitize_amount(pos['amount']) + real_pnl
-                
-                # Update balance with lock
-                async with get_user_lock(user_id):
-                    user = get_user(user_id)
-                    user['balance'] = sanitize_balance(user['balance'] + returned)
-                    user['total_profit'] += real_pnl
-                    save_user(user_id)
+            # Sanitize and calculate return
+            real_pnl = sanitize_pnl(real_pnl, max_pnl=pos['amount'] * LEVERAGE * 2)
+            returned = sanitize_amount(pos['amount']) + real_pnl
+            
+            # Update balance with lock
+            async with get_user_lock(user_id):
+                user = get_user(user_id)
+                user['balance'] = sanitize_balance(user['balance'] + returned)
+                user['total_profit'] += real_pnl
+                save_user(user_id)
 
-                # Close in DB - включаем accumulated realized_pnl от TP1/TP2
-                accumulated_pnl = pos.get('realized_pnl', 0) or 0
-                total_pnl_for_history = real_pnl + accumulated_pnl
-                db_close_position(pos['id'], pos.get('current', pos['entry']), total_pnl_for_history, 'BYBIT_SYNC')
-                closed_pos_ids.append(pos['id'])
-                synced += 1
+            # Close in DB
+            accumulated_pnl = pos.get('realized_pnl', 0) or 0
+            total_pnl_for_history = real_pnl + accumulated_pnl
+            db_close_position(pos['id'], pos.get('current', pos['entry']), total_pnl_for_history, close_reason)
+            closed_pos_ids.append(pos['id'])
+            synced += 1
 
-                # Non-blocking notification - с учётом авто-трейда
-                # Не отправляем уведомления если notify=False (пользователь смотрит сделки)
-                if notify:
-                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
-                    is_auto = pos.get('is_auto', False)
-                    direction = pos.get('direction', '')
-                    asyncio.create_task(_send_sync_notification(
-                        context, user_id, ticker, real_pnl, user['balance'],
-                        is_auto=is_auto, direction=direction
-                    ))
+            # Notification
+            if notify:
+                ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                is_auto = pos.get('is_auto', False)
+                direction = pos.get('direction', '')
+                asyncio.create_task(_send_sync_notification(
+                    context, user_id, ticker, real_pnl, user['balance'],
+                    is_auto=is_auto, direction=direction
+                ))
                 
         except Exception as e:
             logger.error(f"[SYNC] Error processing position {pos.get('id')}: {e}")
@@ -4949,7 +4983,11 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     logger.info(f"[CLOSE_ALL] User {user_id}: closed {closed_count} positions, total PnL: ${total_pnl:.2f}")
 
 
-@rate_limit(max_requests=30, window_seconds=60, action_type="show_trades")
+# Кулдаун для кнопки сделок (защита от спама)
+_trades_cooldown: Dict[int, float] = {}
+TRADES_COOLDOWN_SECONDS = 3.0  # Минимум 3 секунды между нажатиями
+
+@rate_limit(max_requests=20, window_seconds=60, action_type="show_trades")
 async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         query = update.callback_query
@@ -4960,19 +4998,36 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not user_id:
             return
         
+        # === АНТИ-СПАМ: Проверяем кулдаун ===
+        import time as time_module
+        now = time_module.time()
+        last_click = _trades_cooldown.get(user_id, 0)
+        if now - last_click < TRADES_COOLDOWN_SECONDS:
+            remaining = TRADES_COOLDOWN_SECONDS - (now - last_click)
+            try:
+                await query.answer(f"⏳ Подождите {remaining:.0f} сек...", show_alert=False)
+            except Exception:
+                pass
+            return
+        _trades_cooldown[user_id] = now
+        
         # Отмечаем взаимодействие пользователя - подавляем фоновые уведомления
         mark_user_interaction(user_id)
         
-        # Answer callback immediately to prevent Telegram timeout
+        # Answer callback immediately
         try:
-            await query.answer("⏳ Синхронизация...")
+            await query.answer()
         except Exception:
             pass
         
-        user = get_user(user_id)
+        # === СНАЧАЛА показываем сообщение "Загрузка", ПОТОМ синхронизируем ===
+        loading_text = "<b>⏳ Загрузка позиций...</b>\n\nСинхронизация с Bybit..."
+        try:
+            await query.edit_message_text(loading_text, parse_mode="HTML")
+        except Exception:
+            pass
         
-        # === ВАЖНО: СНАЧАЛА синхронизируем с Bybit, ПОТОМ показываем ===
-        # Это исправляет баг когда закрытые позиции висят в списке
+        # === Синхронизируем с Bybit ===
         try:
             synced = await asyncio.wait_for(sync_bybit_positions(user_id, context, notify=False), timeout=5.0)
             if synced > 0:
@@ -4988,10 +5043,62 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Теперь загружаем актуальные позиции из БД (после синхронизации)
         try:
             user_positions = db_get_positions(user_id)
-            positions_cache.set(user_id, user_positions)  # Обновляем кэш
         except Exception as e:
             logger.error(f"[TRADES] Error getting positions: {e}")
             user_positions = []
+        
+        # === ПРИНУДИТЕЛЬНАЯ ОЧИСТКА ФАНТОМНЫХ ПОЗИЦИЙ ===
+        # Проверяем что позиции с bybit_qty > 0 реально есть на Bybit
+        has_bybit_positions = any(pos.get('bybit_qty', 0) > 0 for pos in user_positions)
+        
+        if has_bybit_positions:
+            try:
+                bybit_positions = await asyncio.wait_for(hedger.get_all_positions(), timeout=3.0)
+                bybit_symbols = {p['symbol'] for p in bybit_positions}
+                logger.info(f"[TRADES] Bybit has {len(bybit_symbols)} positions: {bybit_symbols}")
+                
+                cleaned_positions = []
+                for pos in user_positions:
+                    bybit_symbol = pos['symbol'].replace("/", "")
+                    has_bybit_qty = pos.get('bybit_qty', 0) > 0
+                    
+                    # Если позиция была на Bybit (bybit_qty > 0) но её там нет - удаляем
+                    if has_bybit_qty and bybit_symbol not in bybit_symbols:
+                        logger.warning(f"[TRADES] 🗑️ Force-closing phantom position {pos['id']}: {pos['symbol']} not on Bybit!")
+                        
+                        # Пытаемся найти реальный PnL из закрытых сделок
+                        real_pnl = 0
+                        try:
+                            closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=10)
+                            if closed_trades:
+                                real_pnl = closed_trades[0].get('closed_pnl', 0)
+                                logger.info(f"[TRADES] Found closed PnL: ${real_pnl:.2f}")
+                        except Exception:
+                            pass
+                        
+                        # Возвращаем деньги
+                        returned = pos['amount'] + real_pnl
+                        async with get_user_lock(user_id):
+                            user = get_user(user_id)
+                            user['balance'] = sanitize_balance(user['balance'] + returned)
+                            user['total_profit'] += real_pnl
+                            save_user(user_id)
+                        
+                        accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                        db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl + accumulated_pnl, 'FORCE_CLEANUP')
+                        continue
+                    
+                    cleaned_positions.append(pos)
+                
+                user_positions = cleaned_positions
+            except Exception as e:
+                logger.warning(f"[TRADES] Error during force cleanup: {e}")
+        
+        # Обновляем user после возможной очистки
+        user = get_user(user_id)
+        
+        # Обновляем кэш с очищенными позициями
+        positions_cache.set(user_id, user_positions)
         
         # Clean up zero-amount positions
         zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]

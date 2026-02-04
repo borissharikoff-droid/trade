@@ -889,23 +889,322 @@ def api_users():
     """Users statistics endpoint"""
     users = get_all_users_stats()
     
-    # Calculate totals
+    # Calculate totals - включаем стоимость позиций
     total_balance = sum(u['balance'] for u in users)
+    total_positions_value = sum(u.get('positions_amount', 0) for u in users)
+    total_equity = total_balance + total_positions_value  # Полная стоимость
     total_deposits = sum(u['total_deposit'] for u in users)
     active_traders = sum(1 for u in users if u['trading'])
     auto_traders = sum(1 for u in users if u['auto_trade'])
+    total_pnl = sum(u.get('total_pnl', 0) for u in users)
     
     return jsonify({
         'count': len(users),
         'users': users,
         'totals': {
             'total_balance': round(total_balance, 2),
+            'total_positions_value': round(total_positions_value, 2),
+            'total_equity': round(total_equity, 2),
             'total_deposits': round(total_deposits, 2),
+            'total_pnl': round(total_pnl, 2),
             'active_traders': active_traders,
             'auto_traders': auto_traders
         },
         'timestamp': to_moscow_time()
     })
+
+
+@app.route('/api/pnl_history')
+def api_pnl_history():
+    """Get PnL history for chart (last 30 days)"""
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected', 'data': []})
+    
+    try:
+        # Get daily PnL for last 30 days
+        if _use_postgres:
+            daily_pnl = _run_sql("""
+                SELECT 
+                    DATE(closed_at) as date,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as daily_pnl,
+                    SUM(amount) as volume
+                FROM history
+                WHERE closed_at >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY DATE(closed_at)
+                ORDER BY DATE(closed_at) ASC
+            """, fetch="all")
+        else:
+            daily_pnl = _run_sql("""
+                SELECT 
+                    DATE(closed_at) as date,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as daily_pnl,
+                    SUM(amount) as volume
+                FROM history
+                WHERE closed_at >= DATE('now', '-30 days')
+                GROUP BY DATE(closed_at)
+                ORDER BY DATE(closed_at) ASC
+            """, fetch="all")
+        
+        # Calculate cumulative PnL
+        cumulative = 0
+        data = []
+        for row in (daily_pnl or []):
+            daily = float(row.get('daily_pnl', 0) or 0)
+            cumulative += daily
+            trades = int(row.get('trades', 0) or 0)
+            wins = int(row.get('wins', 0) or 0)
+            
+            data.append({
+                'date': str(row.get('date', '')),
+                'daily_pnl': round(daily, 2),
+                'cumulative_pnl': round(cumulative, 2),
+                'trades': trades,
+                'wins': wins,
+                'winrate': round(wins / trades * 100, 1) if trades > 0 else 0,
+                'volume': round(float(row.get('volume', 0) or 0), 2)
+            })
+        
+        return jsonify({
+            'data': data,
+            'total_days': len(data),
+            'total_pnl': round(cumulative, 2),
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting PnL history: {e}")
+        return jsonify({'error': str(e), 'data': []})
+
+
+@app.route('/api/analytics_summary')
+def api_analytics_summary():
+    """Get comprehensive analytics summary"""
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected'})
+    
+    try:
+        # Get last 7 days stats
+        if _use_postgres:
+            last_7d = _run_sql("""
+                SELECT 
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as pnl,
+                    SUM(amount) as volume
+                FROM history
+                WHERE closed_at >= CURRENT_DATE - INTERVAL '7 days'
+            """, fetch="one")
+            
+            last_24h = _run_sql("""
+                SELECT 
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as pnl
+                FROM history
+                WHERE closed_at >= NOW() - INTERVAL '24 hours'
+            """, fetch="one")
+            
+            # Top performing symbols
+            top_symbols = _run_sql("""
+                SELECT 
+                    symbol,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl
+                FROM history
+                WHERE closed_at >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY symbol
+                HAVING COUNT(*) >= 3
+                ORDER BY SUM(pnl) DESC
+                LIMIT 10
+            """, fetch="all")
+            
+            # Worst performing symbols
+            worst_symbols = _run_sql("""
+                SELECT 
+                    symbol,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl
+                FROM history
+                WHERE closed_at >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY symbol
+                HAVING COUNT(*) >= 3
+                ORDER BY SUM(pnl) ASC
+                LIMIT 5
+            """, fetch="all")
+            
+            # Performance by direction
+            by_direction = _run_sql("""
+                SELECT 
+                    direction,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl
+                FROM history
+                WHERE closed_at >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY direction
+            """, fetch="all")
+            
+            # Hourly performance (what hours are most profitable)
+            hourly_perf = _run_sql("""
+                SELECT 
+                    EXTRACT(HOUR FROM closed_at) as hour,
+                    COUNT(*) as trades,
+                    SUM(pnl) as total_pnl,
+                    AVG(pnl) as avg_pnl
+                FROM history
+                WHERE closed_at >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY EXTRACT(HOUR FROM closed_at)
+                ORDER BY SUM(pnl) DESC
+            """, fetch="all")
+        else:
+            last_7d = _run_sql("""
+                SELECT 
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as pnl,
+                    SUM(amount) as volume
+                FROM history
+                WHERE closed_at >= DATE('now', '-7 days')
+            """, fetch="one")
+            
+            last_24h = _run_sql("""
+                SELECT 
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as pnl
+                FROM history
+                WHERE closed_at >= DATETIME('now', '-24 hours')
+            """, fetch="one")
+            
+            top_symbols = _run_sql("""
+                SELECT 
+                    symbol,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl
+                FROM history
+                WHERE closed_at >= DATE('now', '-30 days')
+                GROUP BY symbol
+                HAVING COUNT(*) >= 3
+                ORDER BY SUM(pnl) DESC
+                LIMIT 10
+            """, fetch="all")
+            
+            worst_symbols = _run_sql("""
+                SELECT 
+                    symbol,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl
+                FROM history
+                WHERE closed_at >= DATE('now', '-30 days')
+                GROUP BY symbol
+                HAVING COUNT(*) >= 3
+                ORDER BY SUM(pnl) ASC
+                LIMIT 5
+            """, fetch="all")
+            
+            by_direction = _run_sql("""
+                SELECT 
+                    direction,
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as total_pnl
+                FROM history
+                WHERE closed_at >= DATE('now', '-30 days')
+                GROUP BY direction
+            """, fetch="all")
+            
+            hourly_perf = _run_sql("""
+                SELECT 
+                    CAST(strftime('%H', closed_at) AS INTEGER) as hour,
+                    COUNT(*) as trades,
+                    SUM(pnl) as total_pnl,
+                    AVG(pnl) as avg_pnl
+                FROM history
+                WHERE closed_at >= DATE('now', '-30 days')
+                GROUP BY strftime('%H', closed_at)
+                ORDER BY SUM(pnl) DESC
+            """, fetch="all")
+        
+        # Format results
+        def format_symbol_stats(rows):
+            result = []
+            for row in (rows or []):
+                trades = int(row.get('trades', 0) or 0)
+                wins = int(row.get('wins', 0) or 0)
+                result.append({
+                    'symbol': row.get('symbol', ''),
+                    'trades': trades,
+                    'wins': wins,
+                    'winrate': round(wins / trades * 100, 1) if trades > 0 else 0,
+                    'pnl': round(float(row.get('total_pnl', 0) or 0), 2)
+                })
+            return result
+        
+        def format_direction_stats(rows):
+            result = {}
+            for row in (rows or []):
+                direction = row.get('direction', 'UNKNOWN')
+                trades = int(row.get('trades', 0) or 0)
+                wins = int(row.get('wins', 0) or 0)
+                result[direction] = {
+                    'trades': trades,
+                    'wins': wins,
+                    'winrate': round(wins / trades * 100, 1) if trades > 0 else 0,
+                    'pnl': round(float(row.get('total_pnl', 0) or 0), 2)
+                }
+            return result
+        
+        def format_hourly_stats(rows):
+            result = []
+            for row in (rows or []):
+                result.append({
+                    'hour': int(row.get('hour', 0) or 0),
+                    'trades': int(row.get('trades', 0) or 0),
+                    'pnl': round(float(row.get('total_pnl', 0) or 0), 2),
+                    'avg_pnl': round(float(row.get('avg_pnl', 0) or 0), 2)
+                })
+            return result
+        
+        # Calculate 7d stats
+        trades_7d = int(last_7d.get('trades', 0) or 0) if last_7d else 0
+        wins_7d = int(last_7d.get('wins', 0) or 0) if last_7d else 0
+        pnl_7d = float(last_7d.get('pnl', 0) or 0) if last_7d else 0
+        
+        # Calculate 24h stats
+        trades_24h = int(last_24h.get('trades', 0) or 0) if last_24h else 0
+        wins_24h = int(last_24h.get('wins', 0) or 0) if last_24h else 0
+        pnl_24h = float(last_24h.get('pnl', 0) or 0) if last_24h else 0
+        
+        return jsonify({
+            'last_7d': {
+                'trades': trades_7d,
+                'wins': wins_7d,
+                'winrate': round(wins_7d / trades_7d * 100, 1) if trades_7d > 0 else 0,
+                'pnl': round(pnl_7d, 2),
+                'volume': round(float(last_7d.get('volume', 0) or 0), 2) if last_7d else 0
+            },
+            'last_24h': {
+                'trades': trades_24h,
+                'wins': wins_24h,
+                'winrate': round(wins_24h / trades_24h * 100, 1) if trades_24h > 0 else 0,
+                'pnl': round(pnl_24h, 2)
+            },
+            'top_symbols': format_symbol_stats(top_symbols),
+            'worst_symbols': format_symbol_stats(worst_symbols),
+            'by_direction': format_direction_stats(by_direction),
+            'best_hours': format_hourly_stats(hourly_perf)[:5],  # Top 5 hours
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error getting analytics summary: {e}", exc_info=True)
+        return jsonify({'error': str(e)})
 
 
 @app.route('/')
