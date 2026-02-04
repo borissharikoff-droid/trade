@@ -4965,51 +4965,49 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         
         # Answer callback immediately to prevent Telegram timeout
         try:
-            await query.answer()
+            await query.answer("⏳ Синхронизация...")
         except Exception:
             pass
         
         user = get_user(user_id)
         
-        # Load positions from cache first (fast response)
+        # === ВАЖНО: СНАЧАЛА синхронизируем с Bybit, ПОТОМ показываем ===
+        # Это исправляет баг когда закрытые позиции висят в списке
         try:
-            user_positions = get_positions(user_id)
+            synced = await asyncio.wait_for(sync_bybit_positions(user_id, context, notify=False), timeout=5.0)
+            if synced > 0:
+                logger.info(f"[TRADES] Synced {synced} positions for user {user_id}")
+        except asyncio.TimeoutError:
+            logger.warning(f"[TRADES] Sync timeout for user {user_id}")
+        except Exception as e:
+            logger.warning(f"[TRADES] Sync error for user {user_id}: {e}")
+        
+        # Обновляем данные пользователя (баланс мог измениться после синхронизации)
+        user = get_user(user_id)
+        
+        # Теперь загружаем актуальные позиции из БД (после синхронизации)
+        try:
+            user_positions = db_get_positions(user_id)
+            positions_cache.set(user_id, user_positions)  # Обновляем кэш
         except Exception as e:
             logger.error(f"[TRADES] Error getting positions: {e}")
             user_positions = []
         
-        # Background sync - truly non-blocking with fire-and-forget
-        # ВАЖНО: notify=False чтобы не показывать уведомления о закрытии когда пользователь смотрит сделки
-        async def background_sync():
-            """Background sync - doesn't block user response"""
-            try:
-                synced = await asyncio.wait_for(sync_bybit_positions(user_id, context, notify=False), timeout=3.0)
-                if synced > 0:
-                    positions_cache.set(user_id, db_get_positions(user_id))
-            except (asyncio.TimeoutError, Exception):
-                pass  # Non-critical, silently ignore
-        
-        # Fire and forget - don't await
-        asyncio.create_task(background_sync())
-        
-        # Clean up zero-amount positions in background (don't block UI)
+        # Clean up zero-amount positions
         zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
         if zero_amount:
-            async def cleanup_zero_positions():
-                for zero_pos in zero_amount:
-                    try:
-                        realized_pnl = zero_pos.get('realized_pnl', 0) or 0
-                        db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
-                    except Exception:
-                        pass
-            asyncio.create_task(cleanup_zero_positions())
+            for zero_pos in zero_amount:
+                try:
+                    realized_pnl = zero_pos.get('realized_pnl', 0) or 0
+                    db_close_position(zero_pos['id'], zero_pos.get('current', zero_pos['entry']), realized_pnl, 'FULLY_CLOSED')
+                except Exception:
+                    pass
         
         # Filter positions for display
         user_positions = [p for p in user_positions if p.get('amount', 0) > 0]
         
-        # Update cache if we filtered any
-        if zero_amount:
-            positions_cache.set(user_id, user_positions)
+        # Update cache with filtered positions
+        positions_cache.set(user_id, user_positions)
         
         # Get stats (now cached with 30s TTL - fast)
         stats = db_get_user_stats(user_id)
