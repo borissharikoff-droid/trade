@@ -98,6 +98,7 @@ class AIMemory:
         self.symbol_knowledge: Dict[str, Dict] = {}  # Знания о конкретных монетах
         self.learned_rules: List[str] = []  # Выученные правила
         self.performance_history: List[Dict] = []  # История performance
+        self.recent_analyses: List[Dict] = []  # Последние анализы сделок (для дашборда)
         
         # Статистика
         self.total_trades_analyzed: int = 0
@@ -183,12 +184,14 @@ class AIMemory:
                         self.learned_rules = data or []
                     elif key == 'performance_history':
                         self.performance_history = data or []
+                    elif key == 'recent_analyses':
+                        self.recent_analyses = data or []
                     elif key == 'stats':
                         self.total_trades_analyzed = data.get('total_trades_analyzed', 0)
                         self.total_news_analyzed = data.get('total_news_analyzed', 0)
                         self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
                 
-                logger.info(f"[AI_MEMORY] ✓ Loaded from PostgreSQL: {self.total_trades_analyzed} trades, {self.total_news_analyzed} news")
+                logger.info(f"[AI_MEMORY] ✓ Loaded from PostgreSQL: {self.total_trades_analyzed} trades, {len(self.recent_analyses)} recent analyses")
                 return True
         except Exception as e:
             logger.error(f"[AI_MEMORY] DB load error: {e}")
@@ -208,10 +211,11 @@ class AIMemory:
                     self.symbol_knowledge = data.get('symbol_knowledge', {})
                     self.learned_rules = data.get('learned_rules', [])
                     self.performance_history = data.get('performance_history', [])
+                    self.recent_analyses = data.get('recent_analyses', [])
                     self.total_trades_analyzed = data.get('total_trades_analyzed', 0)
                     self.total_news_analyzed = data.get('total_news_analyzed', 0)
                     self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
-                logger.info(f"[AI_MEMORY] Loaded from file: {self.total_trades_analyzed} trades, {self.total_news_analyzed} news")
+                logger.info(f"[AI_MEMORY] Loaded from file: {self.total_trades_analyzed} trades, {len(self.recent_analyses)} recent analyses")
                 
                 # Мигрируем в PostgreSQL если доступен
                 if USE_POSTGRES_MEMORY and self._db_initialized:
@@ -246,6 +250,7 @@ class AIMemory:
                     ('symbol_knowledge', self.symbol_knowledge),
                     ('learned_rules', self.learned_rules[-500:]),
                     ('performance_history', self.performance_history[-100:]),
+                    ('recent_analyses', self.recent_analyses[-100:]),  # Последние 100 анализов
                     ('stats', {
                         'total_trades_analyzed': self.total_trades_analyzed,
                         'total_news_analyzed': self.total_news_analyzed,
@@ -283,6 +288,7 @@ class AIMemory:
                 'symbol_knowledge': self.symbol_knowledge,
                 'learned_rules': self.learned_rules[-500:],
                 'performance_history': self.performance_history[-100:],
+                'recent_analyses': self.recent_analyses[-100:],
                 'total_trades_analyzed': self.total_trades_analyzed,
                 'total_news_analyzed': self.total_news_analyzed,
                 'prediction_accuracy': self.prediction_accuracy,
@@ -379,13 +385,18 @@ class DeepSeekAnalyzer:
     def __init__(self):
         self.memory = AIMemory()
         self.client = None
-        self.recent_analyses = deque(maxlen=100)  # Последние анализы
+        # recent_analyses теперь хранится в memory для персистентности
         self.pending_trades = {}  # Сделки ожидающие анализа
         self._initialized = False
         
         # Rate limiting
         self._last_request = datetime.min
         self._min_interval = 1.0  # Минимум 1 секунда между запросами
+    
+    @property
+    def recent_analyses(self):
+        """Последние анализы - теперь из персистентной памяти"""
+        return self.memory.recent_analyses
         
     async def initialize(self):
         """Инициализация клиента"""
@@ -556,10 +567,14 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
             if analysis_data.get('new_rule'):
                 self.memory.add_rule(analysis_data['new_rule'])
             
-            # Сохраняем память
+            # Добавляем в recent_analyses (с лимитом 100)
+            self.memory.recent_analyses.append(asdict(analysis))
+            if len(self.memory.recent_analyses) > 100:
+                self.memory.recent_analyses = self.memory.recent_analyses[-100:]
+            
+            # Сохраняем память (включая recent_analyses)
             self.memory.save()
             
-            self.recent_analyses.append(asdict(analysis))
             logger.info(f"[AI] Analyzed trade {symbol}: {'WIN' if is_win else 'LOSS'}, quality={analysis.entry_quality}/{analysis.exit_quality}")
             
             return analysis

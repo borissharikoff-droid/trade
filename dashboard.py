@@ -1517,6 +1517,88 @@ def api_ai():
         })
 
 
+# ==================== LEARNING ANALYTICS API ====================
+@app.route('/api/learning')
+def api_learning():
+    """Получить данные о прогрессе обучения AI"""
+    try:
+        from learning_tracker import get_learning_summary, get_learning_tracker
+        
+        tracker = get_learning_tracker()
+        summary = tracker.get_learning_summary()
+        
+        return jsonify({
+            'success': True,
+            'data': summary,
+            'timestamp': to_moscow_time()
+        })
+    except ImportError:
+        return jsonify({
+            'success': False,
+            'error': 'Learning tracker not available',
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Learning API error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
+
+
+@app.route('/api/learning/report/<period>')
+def api_learning_report(period: str):
+    """Получить детальный отчёт за период (daily/weekly/monthly)"""
+    try:
+        from learning_tracker import get_learning_tracker
+        from dataclasses import asdict
+        
+        if period not in ['daily', 'weekly', 'monthly']:
+            return jsonify({'success': False, 'error': 'Invalid period'})
+        
+        tracker = get_learning_tracker()
+        report = tracker.generate_report(period)
+        
+        return jsonify({
+            'success': True,
+            'report': asdict(report),
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Learning report error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
+
+
+@app.route('/api/learning/snapshots')
+def api_learning_snapshots():
+    """Получить исторические снимки для графиков"""
+    try:
+        from learning_tracker import get_learning_tracker
+        from dataclasses import asdict
+        
+        tracker = get_learning_tracker()
+        snapshots = [asdict(s) for s in tracker.snapshots[-30:]]  # Последние 30 дней
+        
+        return jsonify({
+            'success': True,
+            'snapshots': snapshots,
+            'count': len(snapshots),
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Learning snapshots error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
+
+
 def run_dashboard(port: int = 5000, host: str = '0.0.0.0'):
     """Run Flask server (called in thread)"""
     # Disable Flask's default logging for cleaner output

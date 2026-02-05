@@ -9023,6 +9023,40 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
 
 
+async def learning_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Learning analytics report: /learning [daily|weekly|monthly]"""
+    user_id = update.effective_user.id
+    
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    
+    try:
+        from learning_tracker import get_learning_tracker, collect_daily_snapshot
+        
+        await update.message.reply_text("📊 <b>Генерирую Learning Report...</b>", parse_mode="HTML")
+        
+        tracker = get_learning_tracker()
+        
+        # Собираем свежие данные
+        snapshot = collect_daily_snapshot(run_sql)
+        
+        # Генерируем отчёт
+        report_text = tracker.format_telegram_report()
+        
+        await update.message.reply_text(report_text, parse_mode="HTML")
+        
+    except ImportError as e:
+        await update.message.reply_text(
+            "<b>❌ Learning Tracker не загружен</b>\n\n"
+            f"Ошибка: {e}",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"[LEARNING] Command error: {e}", exc_info=True)
+        await update.message.reply_text(f"<b>❌ Ошибка</b>\n\n{e}", parse_mode="HTML")
+
+
 async def whale_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Анализ китов на Hyperliquid: /whale [COIN]"""
     user_id = update.effective_user.id
@@ -10862,6 +10896,7 @@ def main() -> None:
     app.add_handler(CommandHandler("testsignal", test_signal))
     app.add_handler(CommandHandler("signalstats", signal_stats_cmd))
     app.add_handler(CommandHandler("ai", ai_cmd))
+    app.add_handler(CommandHandler("learning", learning_cmd))  # Learning analytics
     app.add_handler(CommandHandler("whale", whale_cmd))
     app.add_handler(CommandHandler("memes", memes_cmd))
     app.add_handler(CommandHandler("market", market_cmd))
@@ -11069,6 +11104,29 @@ def main() -> None:
             #     ...
             # app.job_queue.run_repeating(ai_daily_insights_job, interval=86400, first=3600)
             logger.info("[AI] Daily insights job DISABLED (можно вызвать вручную: /ai insights)")
+        
+        # === LEARNING ANALYTICS JOB ===
+        try:
+            from learning_tracker import get_learning_tracker, collect_daily_snapshot
+            
+            async def learning_snapshot_job(context):
+                """Collect daily learning metrics snapshot"""
+                try:
+                    snapshot = collect_daily_snapshot(run_sql)
+                    logger.info(
+                        f"[LEARNING] 📊 Daily snapshot: "
+                        f"{snapshot.total_trades} trades, "
+                        f"{snapshot.winrate}% winrate, "
+                        f"${snapshot.total_pnl:.2f} PnL"
+                    )
+                except Exception as e:
+                    logger.error(f"[LEARNING] Snapshot error: {e}")
+            
+            # Собираем снимок каждый час (для более точных данных)
+            app.job_queue.run_repeating(learning_snapshot_job, interval=3600, first=120)  # Каждый час, старт через 2 мин
+            logger.info("[LEARNING] ✓ Learning analytics tracker enabled")
+        except ImportError:
+            logger.info("[LEARNING] Learning tracker not available")
         
         # === AUTO OPTIMIZER JOB ===
         async def auto_optimizer_job(context):
