@@ -826,21 +826,13 @@ def api_export_logs():
         period_str = "24h"
     
     try:
-        # Get logs from database
-        if _use_postgres:
-            db_logs = _run_sql("""
-                SELECT timestamp, category, level, user_id, message, symbol, direction, data
-                FROM trading_logs
-                WHERE timestamp > %s
-                ORDER BY timestamp DESC
-            """.replace('%s', '?'), (cutoff.isoformat(),), fetch="all")
-        else:
-            db_logs = _run_sql("""
-                SELECT timestamp, category, level, user_id, message, symbol, direction, data
-                FROM trading_logs
-                WHERE timestamp > ?
-                ORDER BY timestamp DESC
-            """, (cutoff.isoformat(),), fetch="all")
+        # Get logs from database (? placeholders auto-converted to %s for PostgreSQL by run_sql)
+        db_logs = _run_sql("""
+            SELECT timestamp, category, level, user_id, message, symbol, direction, data
+            FROM trading_logs
+            WHERE timestamp > ?
+            ORDER BY timestamp DESC
+        """, (cutoff.isoformat(),), fetch="all")
         
         # Get in-memory logs
         memory_logs = list(_log_buffer)
@@ -1592,6 +1584,75 @@ def api_learning_snapshots():
         })
     except Exception as e:
         logger.error(f"[DASHBOARD] Learning snapshots error: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
+
+
+# ==================== PHANTOM CLEANUP API ====================
+@app.route('/api/cleanup_phantoms', methods=['POST'])
+def api_cleanup_phantoms():
+    """Очистить phantom позиции (в боте, но не на Bybit)"""
+    try:
+        # Получаем все позиции из БД
+        all_positions = _run_sql("SELECT * FROM positions", fetch="all") or []
+        
+        if not all_positions:
+            return jsonify({
+                'success': True,
+                'message': 'No positions in database',
+                'closed': 0,
+                'timestamp': to_moscow_time()
+            })
+        
+        # Для простоты - закрываем ВСЕ позиции с нулевым PnL (возвращаем amount)
+        # Так как у пользователя 0 позиций на Bybit
+        closed_count = 0
+        total_returned = 0
+        
+        for pos in all_positions:
+            try:
+                pos_user_id = pos['user_id']
+                amount = float(pos.get('amount', 0))
+                
+                # Возвращаем amount пользователю
+                user = _run_sql("SELECT * FROM users WHERE user_id = ?", (pos_user_id,), fetch="one")
+                if user:
+                    new_balance = float(user.get('balance', 0)) + amount
+                    _run_sql("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, pos_user_id))
+                
+                # Удаляем позицию
+                _run_sql("DELETE FROM positions WHERE id = ?", (pos['id'],))
+                
+                # Добавляем в history
+                _run_sql("""
+                    INSERT INTO history (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at, closed_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'PHANTOM_CLEANUP', ?, CURRENT_TIMESTAMP)
+                """, (
+                    pos_user_id, pos['symbol'], pos['direction'],
+                    pos.get('entry', 0), pos.get('current', pos.get('entry', 0)),
+                    pos.get('sl', 0), pos.get('tp', 0), amount, pos.get('commission', 0),
+                    pos.get('opened_at')
+                ))
+                
+                closed_count += 1
+                total_returned += amount
+                logger.info(f"[PHANTOM_CLEANUP] API: Closed position {pos['id']}: {pos['symbol']}")
+            except Exception as e:
+                logger.error(f"[PHANTOM_CLEANUP] Error closing {pos.get('id')}: {e}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Cleaned up {closed_count} phantom positions',
+            'closed': closed_count,
+            'returned': round(total_returned, 2),
+            'timestamp': to_moscow_time()
+        })
+        
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Phantom cleanup error: {e}")
         return jsonify({
             'success': False,
             'error': str(e),

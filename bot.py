@@ -7678,10 +7678,30 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                         except Exception as e:
                             logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
                         
-                        # Если нет bybit_qty и не нашли закрытую сделку - это симуляция, пропускаем
+                        # Если нет bybit_qty и не нашли закрытую сделку - проверяем возраст позиции
                         if not has_bybit_qty and not found_closed_trade:
-                            logger.debug(f"[BYBIT_SYNC] Skipping position {pos['id']} - no bybit_qty and no closed trade found")
-                            continue
+                            # Проверяем возраст позиции
+                            pos_opened = pos.get('opened_at')
+                            pos_age_minutes = 0
+                            if pos_opened:
+                                try:
+                                    if isinstance(pos_opened, str):
+                                        from datetime import datetime
+                                        pos_time = datetime.fromisoformat(pos_opened.replace('Z', '+00:00'))
+                                    else:
+                                        pos_time = pos_opened
+                                    pos_age_minutes = (datetime.now(pos_time.tzinfo) - pos_time).total_seconds() / 60 if pos_time.tzinfo else (datetime.now() - pos_time).total_seconds() / 60
+                                except:
+                                    pos_age_minutes = 60  # Assume old if can't parse
+                            
+                            # Если позиция старше 15 минут и её нет на Bybit - это фантом, закрываем с нулевым PnL
+                            if pos_age_minutes > 15:
+                                logger.warning(f"[BYBIT_SYNC] PHANTOM position {pos['id']} detected: {bybit_symbol}, age={pos_age_minutes:.0f}min, no bybit_qty, not on Bybit - FORCE CLOSING")
+                                real_pnl = 0  # Нулевой PnL для фантома
+                                reason = "PHANTOM_CLEANUP"
+                            else:
+                                logger.debug(f"[BYBIT_SYNC] Skipping young position {pos['id']} - no bybit_qty, age={pos_age_minutes:.0f}min")
+                                continue
                         
                         logger.info(f"[BYBIT_SYNC] Position {bybit_symbol} closed on Bybit! bybit_qty={pos.get('bybit_qty', 0)}")
                         
@@ -10401,6 +10421,90 @@ async def sync_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
 # ==================== ОЧИСТКА ORPHAN ХЕДЖЕЙ ====================
+async def cleanup_phantom_positions_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Находит и удаляет phantom позиции из БД (позиции в боте без соответствующих на Bybit).
+    Только для админа!
+    """
+    user_id = update.effective_user.id
+    
+    if user_id != AUTO_TRADE_USER_ID:
+        await update.message.reply_text("❌ Эта команда только для админа")
+        return
+    
+    await update.message.reply_text("⏳ Анализирую phantom позиции...")
+    
+    try:
+        # 1. Получаем ВСЕ позиции с Bybit
+        bybit_open_symbols = set()
+        try:
+            bybit_positions = await hedger.get_all_positions()
+            for p in bybit_positions:
+                bybit_open_symbols.add(p['symbol'])
+            logger.info(f"[PHANTOM_CLEANUP] Bybit positions: {bybit_open_symbols}")
+        except:
+            pass
+        
+        # 2. Получаем ВСЕ позиции из бота
+        all_positions = run_sql("SELECT * FROM positions", fetch="all") or []
+        
+        if not all_positions:
+            await update.message.reply_text("✅ В боте нет открытых позиций")
+            return
+        
+        # 3. Находим phantom позиции (в боте, но НЕ на Bybit)
+        phantom_positions = []
+        for pos in all_positions:
+            bybit_symbol = pos['symbol'].replace('/', '')
+            if bybit_symbol not in bybit_open_symbols:
+                phantom_positions.append(pos)
+        
+        if not phantom_positions:
+            await update.message.reply_text(f"✅ Нет phantom позиций\n\nВ боте: {len(all_positions)}\nНа Bybit: {len(bybit_open_symbols)}")
+            return
+        
+        # 4. Закрываем phantom позиции
+        closed_count = 0
+        total_returned = 0
+        
+        for pos in phantom_positions:
+            try:
+                pos_user_id = pos['user_id']
+                amount = pos.get('amount', 0)
+                
+                # Возвращаем деньги пользователю (без PnL - фантом)
+                user = get_user(pos_user_id)
+                user['balance'] = sanitize_balance(user['balance'] + amount)
+                save_user(pos_user_id)
+                
+                # Удаляем позицию из БД
+                db_close_position(pos['id'], pos.get('current', pos.get('entry', 0)), 0, 'PHANTOM_CLEANUP')
+                
+                # Очищаем кэш
+                user_positions = get_positions(pos_user_id)
+                updated = [p for p in user_positions if p.get('id') != pos['id']]
+                update_positions_cache(pos_user_id, updated)
+                
+                closed_count += 1
+                total_returned += amount
+                
+                logger.info(f"[PHANTOM_CLEANUP] Closed phantom position {pos['id']}: {pos['symbol']} user={pos_user_id}")
+            except Exception as e:
+                logger.error(f"[PHANTOM_CLEANUP] Error closing {pos['id']}: {e}")
+        
+        await update.message.reply_text(
+            f"✅ <b>Phantom Cleanup завершён</b>\n\n"
+            f"Закрыто: {closed_count} позиций\n"
+            f"Возвращено: ${total_returned:.2f}\n\n"
+            f"Осталось в боте: {len(all_positions) - closed_count}",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"[PHANTOM_CLEANUP] Error: {e}", exc_info=True)
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
 async def cleanup_orphan_hedges_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Находит и закрывает orphan хеджи на Bybit (позиции на Bybit без соответствующих позиций в боте).
