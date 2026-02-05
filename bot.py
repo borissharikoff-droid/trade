@@ -10827,6 +10827,22 @@ def main() -> None:
     load_pending_commission()
     load_pending_invoices()
     
+    # === STARTUP DATA CHECK - показывает что данные сохранились ===
+    try:
+        users_count = run_sql("SELECT COUNT(*) as cnt FROM users", fetch="one")
+        positions_count = run_sql("SELECT COUNT(*) as cnt FROM positions", fetch="one")
+        history_count = run_sql("SELECT COUNT(*) as cnt FROM history", fetch="one")
+        
+        logger.info("=" * 50)
+        logger.info("[STARTUP] 📊 DATABASE STATUS (данные сохранены!):")
+        logger.info(f"[STARTUP]   👥 Users: {users_count['cnt'] if users_count else 0}")
+        logger.info(f"[STARTUP]   📈 Open positions: {positions_count['cnt'] if positions_count else 0}")
+        logger.info(f"[STARTUP]   📜 History records: {history_count['cnt'] if history_count else 0}")
+        logger.info(f"[STARTUP]   💾 Database: {'PostgreSQL' if USE_POSTGRES else 'SQLite'}")
+        logger.info("=" * 50)
+    except Exception as e:
+        logger.warning(f"[STARTUP] Could not check DB status: {e}")
+    
     app = Application.builder().token(token).build()
     
     # Сохраняем глобальную ссылку на бот для WebSocket уведомлений
@@ -11046,47 +11062,13 @@ def main() -> None:
             
             app.job_queue.run_once(init_ai_job, when=5)  # Через 5 секунд после старта
             
-            # Daily AI Insights - каждый день в 23:55 MSK
-            async def ai_daily_insights_job(context):
-                """Generate daily AI insights"""
-                try:
-                    # Получаем сделки и новости за последние 24 часа
-                    date_filter = sql_interval('closed_at', '1 day')
-                    trades = run_sql(f"""
-                        SELECT * FROM history 
-                        WHERE {date_filter}
-                        ORDER BY closed_at DESC
-                    """, fetch="all") or []
-                    
-                    # Получаем новости из news_analyzer если есть
-                    news = []
-                    if NEWS_FEATURES:
-                        try:
-                            news = list(news_analyzer.recent_events)[-50:]
-                            news = [{'title': n.title, 'source': n.source} for n in news]
-                        except:
-                            pass
-                    
-                    insights = await ai_daily_insights(trades, news)
-                    
-                    # Отправляем админу
-                    if AUTO_TRADE_USER_ID:
-                        try:
-                            await context.bot.send_message(
-                                AUTO_TRADE_USER_ID,
-                                f"<b>🤖 AI Daily Insights</b>\n\n{insights[:3500]}",
-                                parse_mode="HTML"
-                            )
-                        except:
-                            pass
-                    
-                    logger.info(f"[AI] Daily insights generated, {len(trades)} trades analyzed")
-                except Exception as e:
-                    logger.error(f"[AI] Daily insights error: {e}")
-            
-            # Запускаем ежедневно (86400 секунд = 24 часа)
-            app.job_queue.run_repeating(ai_daily_insights_job, interval=86400, first=3600)  # Первый через час
-            logger.info("[AI] Daily insights job scheduled")
+            # Daily AI Insights - ОТКЛЮЧЕНО по запросу пользователя
+            # Можно вызвать вручную через /ai insights
+            # async def ai_daily_insights_job(context):
+            #     """Generate daily AI insights"""
+            #     ...
+            # app.job_queue.run_repeating(ai_daily_insights_job, interval=86400, first=3600)
+            logger.info("[AI] Daily insights job DISABLED (можно вызвать вручную: /ai insights)")
         
         # === AUTO OPTIMIZER JOB ===
         async def auto_optimizer_job(context):
