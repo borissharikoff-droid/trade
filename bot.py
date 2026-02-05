@@ -125,6 +125,20 @@ else:
     import sqlite3
     logger.info("[DB] Using SQLite")
 
+def sql_now() -> str:
+    """Возвращает SQL выражение для текущего времени (PostgreSQL/SQLite совместимо)"""
+    return "CURRENT_TIMESTAMP" if USE_POSTGRES else "datetime('now')"
+
+def sql_interval(field: str, interval: str) -> str:
+    """Возвращает SQL выражение для интервала (PostgreSQL/SQLite совместимо)
+    interval: '1 hour', '24 hours', '1 day', '30 days' etc.
+    """
+    if USE_POSTGRES:
+        return f"{field} > NOW() - INTERVAL '{interval}'"
+    else:
+        # SQLite: datetime('now', '-1 hour'), datetime('now', '-24 hours')
+        return f"{field} > datetime('now', '-{interval}')"
+
 def get_connection():
     """Получить подключение к БД (legacy - use get_pooled_connection instead)"""
     # Try to use pool first
@@ -1137,10 +1151,11 @@ def auto_fix_profit_discrepancies() -> int:
             
             if abs(diff) > 0.01:
                 # Добавляем корректирующую запись
-                run_sql("""
+                now_expr = sql_now()
+                run_sql(f"""
                     INSERT INTO history 
                     (user_id, symbol, direction, entry, exit_price, sl, tp, amount, commission, pnl, reason, opened_at, closed_at)
-                    VALUES (?, 'CORRECTION', 'NONE', 0, 0, 0, 0, 0, 0, ?, 'AUTO_PROFIT_CORRECTION', datetime('now'), datetime('now'))
+                    VALUES (?, 'CORRECTION', 'NONE', 0, 0, 0, 0, 0, 0, ?, 'AUTO_PROFIT_CORRECTION', {now_expr}, {now_expr})
                 """, (uid, diff))
                 
                 invalidate_stats_cache(uid)
@@ -8952,9 +8967,10 @@ async def ai_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("🤖 Генерирую AI инсайты...")
         
         try:
-            trades = run_sql("""
+            date_filter = sql_interval('closed_at', '1 day')
+            trades = run_sql(f"""
                 SELECT * FROM history 
-                WHERE closed_at > datetime('now', '-1 day')
+                WHERE {date_filter}
                 ORDER BY closed_at DESC
             """, fetch="all") or []
             
@@ -11035,9 +11051,10 @@ def main() -> None:
                 """Generate daily AI insights"""
                 try:
                     # Получаем сделки и новости за последние 24 часа
-                    trades = run_sql("""
+                    date_filter = sql_interval('closed_at', '1 day')
+                    trades = run_sql(f"""
                         SELECT * FROM history 
-                        WHERE closed_at > datetime('now', '-1 day')
+                        WHERE {date_filter}
                         ORDER BY closed_at DESC
                     """, fetch="all") or []
                     
