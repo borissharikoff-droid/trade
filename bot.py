@@ -7598,7 +7598,7 @@ async def _update_positions_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             try:
                 results = await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=10.0  # 10 секунд на batch
+                    timeout=30.0  # 30 секунд на batch (phantom cleanup может быть медленным)
                 )
                 
                 # Log any exceptions that occurred
@@ -7643,16 +7643,40 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     if not has_bybit_qty and bybit_symbol in bybit_open_symbols:
                         continue
                     
-                    # Если позиция была на Bybit но её больше нет - закрылась по TP/SL
-                    if bybit_symbol not in bybit_open_symbols:
-                        ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    # Если позиция ещё на Bybit - всё ок, пропускаем
+                    if bybit_symbol in bybit_open_symbols:
+                        continue
+                    
+                    # === Позиция НЕ на Bybit - нужно закрыть ===
+                    ticker = pos['symbol'].split("/")[0] if "/" in pos['symbol'] else pos['symbol']
+                    
+                    real_pnl = pos.get('pnl', 0) or 0
+                    exit_price = pos.get('current', pos.get('entry', 0))
+                    reason = "CLOSED"
+                    
+                    # БЫСТРЫЙ ПУТЬ: phantom позиции (bybit_qty=0) - закрываем СРАЗУ без API
+                    if not has_bybit_qty:
+                        pos_opened = pos.get('opened_at')
+                        pos_age_minutes = 0
+                        if pos_opened:
+                            try:
+                                if isinstance(pos_opened, str):
+                                    pos_time = datetime.fromisoformat(pos_opened.replace('Z', '+00:00'))
+                                else:
+                                    pos_time = pos_opened
+                                pos_age_minutes = (datetime.now(pos_time.tzinfo) - pos_time).total_seconds() / 60 if pos_time.tzinfo else (datetime.now() - pos_time).total_seconds() / 60
+                            except:
+                                pos_age_minutes = 60  # Assume old if can't parse
                         
-                        # Получаем реальный PnL с Bybit
-                        real_pnl = pos['pnl']
-                        exit_price = pos['current']
-                        reason = "CLOSED"
-                        found_closed_trade = False
-                        
+                        if pos_age_minutes > 5:
+                            # Phantom позиция - закрываем МГНОВЕННО, без API запроса к Bybit
+                            real_pnl = 0
+                            reason = "PHANTOM_CLEANUP"
+                            logger.info(f"[BYBIT_SYNC] PHANTOM {pos['id']}: {bybit_symbol}, age={pos_age_minutes:.0f}min - INSTANT CLOSE (no API call)")
+                        else:
+                            continue  # Слишком молодая, подождём
+                    else:
+                        # МЕДЛЕННЫЙ ПУТЬ: позиция БЫЛА на Bybit (bybit_qty>0) - запрашиваем PnL
                         try:
                             closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=10)
                             if closed_trades:
@@ -7666,42 +7690,15 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                                 
                                 logger.info(f"[BYBIT_SYNC] Bybit closed trade found: pnl=${bybit_pnl:.2f}, time_diff={time_diff:.0f}s")
                                 
-                                # Используем Bybit PnL если время < 10 мин
                                 if time_diff < 600:  # 10 мин для sync
                                     real_pnl = bybit_pnl
                                     exit_price = bybit_exit
                                     reason = "TP" if real_pnl > 0 else "SL"
-                                    found_closed_trade = True
                                     logger.info(f"[BYBIT_SYNC] Using Bybit PnL: ${real_pnl:.2f}")
                                 else:
-                                    logger.warning(f"[BYBIT_SYNC] Bybit trade too old ({time_diff:.0f}s)")
+                                    logger.warning(f"[BYBIT_SYNC] Bybit trade too old ({time_diff:.0f}s), using local PnL")
                         except Exception as e:
                             logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
-                        
-                        # Если нет bybit_qty и не нашли закрытую сделку - проверяем возраст позиции
-                        if not has_bybit_qty and not found_closed_trade:
-                            # Проверяем возраст позиции
-                            pos_opened = pos.get('opened_at')
-                            pos_age_minutes = 0
-                            if pos_opened:
-                                try:
-                                    if isinstance(pos_opened, str):
-                                        from datetime import datetime
-                                        pos_time = datetime.fromisoformat(pos_opened.replace('Z', '+00:00'))
-                                    else:
-                                        pos_time = pos_opened
-                                    pos_age_minutes = (datetime.now(pos_time.tzinfo) - pos_time).total_seconds() / 60 if pos_time.tzinfo else (datetime.now() - pos_time).total_seconds() / 60
-                                except:
-                                    pos_age_minutes = 60  # Assume old if can't parse
-                            
-                            # Если позиция старше 15 минут и её нет на Bybit - это фантом, закрываем с нулевым PnL
-                            if pos_age_minutes > 15:
-                                logger.warning(f"[BYBIT_SYNC] PHANTOM position {pos['id']} detected: {bybit_symbol}, age={pos_age_minutes:.0f}min, no bybit_qty, not on Bybit - FORCE CLOSING")
-                                real_pnl = 0  # Нулевой PnL для фантома
-                                reason = "PHANTOM_CLEANUP"
-                            else:
-                                logger.debug(f"[BYBIT_SYNC] Skipping young position {pos['id']} - no bybit_qty, age={pos_age_minutes:.0f}min")
-                                continue
                         
                         logger.info(f"[BYBIT_SYNC] Position {bybit_symbol} closed on Bybit! bybit_qty={pos.get('bybit_qty', 0)}")
                         
@@ -11185,6 +11182,70 @@ def main() -> None:
         # Запускаем при старте (через 30 сек) и каждый час
         app.job_queue.run_once(auto_profit_sync_job, when=30)
         app.job_queue.run_repeating(auto_profit_sync_job, interval=3600, first=3630)  # Каждый час
+        
+        # === PHANTOM CLEANUP JOB (быстрая SQL-очистка без Bybit API) ===
+        async def phantom_cleanup_job(context):
+            """Быстрая очистка phantom позиций прямо в БД - без API запросов к Bybit"""
+            try:
+                # Получаем реальные позиции с Bybit
+                bybit_open_symbols = set()
+                try:
+                    if await is_hedging_enabled():
+                        bybit_positions = await hedger.get_all_positions()
+                        for p in bybit_positions:
+                            bybit_open_symbols.add(p['symbol'])
+                except:
+                    return  # Если Bybit недоступен - не чистим
+                
+                # Получаем ВСЕ позиции из БД
+                all_positions = run_sql("SELECT id, user_id, symbol, amount, entry, current, direction, sl, tp, commission, opened_at, bybit_qty, pnl FROM positions", fetch="all") or []
+                
+                if not all_positions:
+                    return
+                
+                cleaned = 0
+                for pos in all_positions:
+                    bybit_symbol = pos['symbol'].replace('/', '')
+                    has_bybit_qty = pos.get('bybit_qty', 0) > 0
+                    
+                    # Пропускаем позиции которые есть на Bybit
+                    if bybit_symbol in bybit_open_symbols:
+                        continue
+                    
+                    # Пропускаем позиции с bybit_qty > 0 (их закроет основной sync с PnL)
+                    if has_bybit_qty:
+                        continue
+                    
+                    # Phantom: bybit_qty=0, нет на Bybit - удаляем мгновенно
+                    try:
+                        amount = float(pos.get('amount', 0))
+                        user_id = pos['user_id']
+                        
+                        # Возвращаем amount пользователю
+                        user = get_user(user_id)
+                        user['balance'] = sanitize_balance(user['balance'] + amount)
+                        save_user(user_id)
+                        
+                        # Закрываем в БД
+                        db_close_position(pos['id'], pos.get('current', pos.get('entry', 0)), 0, 'PHANTOM_CLEANUP')
+                        
+                        # Обновляем кэш
+                        cached = get_positions(user_id)
+                        updated = [p for p in cached if p.get('id') != pos['id']]
+                        update_positions_cache(user_id, updated)
+                        
+                        cleaned += 1
+                    except Exception as e:
+                        logger.error(f"[PHANTOM_JOB] Error cleaning {pos['id']}: {e}")
+                
+                if cleaned > 0:
+                    logger.info(f"[PHANTOM_JOB] Cleaned {cleaned} phantom positions (Bybit has {len(bybit_open_symbols)} open)")
+            except Exception as e:
+                logger.error(f"[PHANTOM_JOB] Error: {e}")
+        
+        # Запускаем phantom cleanup каждые 60 секунд, старт через 45 сек
+        app.job_queue.run_repeating(phantom_cleanup_job, interval=60, first=45)
+        logger.info("[JOBS] Phantom cleanup job registered (every 60s)")
         
         # === AI ANALYZER INITIALIZATION ===
         if AI_FEATURES:
