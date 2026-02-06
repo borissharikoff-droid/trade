@@ -169,12 +169,9 @@ class TradingState:
         self.pause_until: Optional[datetime] = None
         self.recent_trades: List[float] = []  # Последние 10 сделок для расчёта winrate
         
-        # === УЛУЧШЕННЫЕ настройки защиты ===
-        self.MAX_CONSECUTIVE_LOSSES = 5      # Увеличено с 4 до 5
-        self.MAX_DAILY_TRADES = 20           # УВЕЛИЧЕНО с 10 до 20 (больше возможностей)
-        self.MAX_DAILY_LOSS_PERCENT = 12     # Увеличено с 10% до 12%
-        self.MIN_TIME_BETWEEN_TRADES = 5     # СНИЖЕНО с 10 до 5 минут (быстрее реакция)
-        self.PAUSE_AFTER_LOSSES_HOURS = 1.5  # Снижено с 2 до 1.5 часов
+        # Настройки потока (без бана на убытки - торгуем всегда)
+        self.MAX_DAILY_TRADES = 20
+        self.MIN_TIME_BETWEEN_TRADES = 5     # минут между сделками
         
         # Адаптивные настройки
         self.ADAPTIVE_DAILY_TRADES = {
@@ -217,14 +214,6 @@ class TradingState:
             self.consecutive_losses = 0
         else:
             self.consecutive_losses += 1
-            if self.consecutive_losses >= self.MAX_CONSECUTIVE_LOSSES:
-                self.pause_trading(self.PAUSE_AFTER_LOSSES_HOURS)
-    
-    def pause_trading(self, hours: float):
-        """Поставить торговлю на паузу"""
-        self.is_paused = True
-        self.pause_until = datetime.now(timezone.utc) + timedelta(hours=hours)
-        logger.warning(f"[STATE] Trading paused for {hours} hours after {self.consecutive_losses} consecutive losses")
     
     def get_adaptive_max_trades(self, market_regime: str = 'trend') -> int:
         """Получить адаптивный лимит сделок на основе режима рынка"""
@@ -240,46 +229,21 @@ class TradingState:
         return self.ADAPTIVE_DAILY_TRADES.get(regime_key, self.MAX_DAILY_TRADES)
     
     def can_trade(self, balance: float, market_regime: str = None) -> Tuple[bool, str]:
-        """Можно ли открывать новую сделку"""
+        """Можно ли открывать новую сделку (без бана на убытки - торгуем всегда)."""
         self.reset_daily()
         
         now = datetime.now(timezone.utc)
-        
-        # Проверка паузы
-        if self.is_paused:
-            if self.pause_until and now < self.pause_until:
-                remaining = (self.pause_until - now).seconds // 60
-                return False, f"Пауза после убытков ({remaining} мин осталось)"
-            else:
-                self.is_paused = False
-                self.consecutive_losses = 0
         
         # Проверка лимита сделок (адаптивный)
         max_trades = self.get_adaptive_max_trades(market_regime) if market_regime else self.MAX_DAILY_TRADES
         if self.daily_trades >= max_trades:
             return False, f"Лимит сделок в день ({self.daily_trades}/{max_trades})"
         
-        # Проверка дневного убытка
-        if balance > 0:
-            daily_loss_percent = abs(min(0, self.daily_pnl)) / balance * 100
-            if daily_loss_percent >= self.MAX_DAILY_LOSS_PERCENT:
-                return False, f"Дневной лимит убытков ({self.MAX_DAILY_LOSS_PERCENT}%)"
-        
         # Проверка времени между сделками
         if self.last_trade_time:
             minutes_since_last = (now - self.last_trade_time).seconds // 60
             if minutes_since_last < self.MIN_TIME_BETWEEN_TRADES:
                 return False, f"Cooldown ({self.MIN_TIME_BETWEEN_TRADES - minutes_since_last} мин)"
-        
-        # Дополнительная проверка: если winrate < 50% и > 5 сделок - замедляемся
-        recent_winrate = self.get_recent_winrate()
-        if self.daily_trades >= 5 and recent_winrate < 0.5:
-            # Увеличиваем время между сделками при плохом winrate
-            extended_cooldown = self.MIN_TIME_BETWEEN_TRADES * 2
-            if self.last_trade_time:
-                minutes_since_last = (now - self.last_trade_time).seconds // 60
-                if minutes_since_last < extended_cooldown:
-                    return False, f"Extended cooldown ({extended_cooldown - minutes_since_last} мин) - низкий winrate ({recent_winrate:.0%})"
         
         return True, "OK"
 

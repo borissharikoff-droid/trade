@@ -1865,14 +1865,8 @@ def calculate_smart_bet_size(balance: float, symbol: str, quality: 'SetupQuality
         SetupQuality.D: 0.30        # 30% от макс. процента
     }.get(quality, 0.60)
     
-    # Множитель по серии убытков
+    # Торгуем всегда — без снижения из-за серии убытков
     loss_mult = 1.0
-    if loss_streak >= 4:
-        loss_mult = 0.40  # -60% после 4+ убытков
-    elif loss_streak >= 3:
-        loss_mult = 0.50  # -50% после 3 убытков
-    elif loss_streak >= 2:
-        loss_mult = 0.75  # -25% после 2 убытков
     
     # Рассчитываем размер ставки
     bet_size = balance * max_percent * quality_mult * loss_mult
@@ -5255,18 +5249,8 @@ def calculate_auto_bet(confidence: float, balance: float, atr_percent: float = 0
     elif balance < 300:
         small_deposit_multiplier = 1.25  # +25%
     
-    # === ДИНАМИЧЕСКИЙ РАЗМЕР ПОСЛЕ УБЫТКОВ ===
+    # Торгуем всегда — без снижения ставки из-за серии убытков
     loss_streak_multiplier = 1.0
-    if user_id:
-        loss_streak = db_get_loss_streak(user_id)
-        if loss_streak >= 3:
-            # После 3+ убытков подряд: -50% от ставки
-            loss_streak_multiplier = 0.5
-            logger.info(f"[BET] User {user_id}: {loss_streak} losses in a row - reducing bet by 50%")
-        elif loss_streak >= 2:
-            # После 2 убытков подряд: -25% от ставки
-            loss_streak_multiplier = 0.75
-            logger.info(f"[BET] User {user_id}: {loss_streak} losses in a row - reducing bet by 25%")
     
     # Уверенность от 28% до 95% (после фильтров)
     # Чем выше уверенность - тем больше ставка
@@ -5379,12 +5363,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info("[SMART] Нет активных юзеров и авто-трейд юзеров")
         return
     
-    # Проверяем состояние торговли
     trading_state = get_trading_state()
-    if trading_state['is_paused']:
-        logger.info(f"[SMART] Торговля на паузе до {trading_state['pause_until']}")
-        return
-    
     logger.info(f"[SMART] Активных юзеров: {len(active_users)}, Авто-трейд юзеров: {auto_trade_users_count}")
     if active_users:
         logger.info(f"[SMART] Активные юзеры: {active_users}")

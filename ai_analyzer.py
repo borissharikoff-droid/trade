@@ -10,7 +10,7 @@ import json
 import logging
 import asyncio
 import aiohttp
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 from collections import deque
@@ -100,10 +100,20 @@ class AIMemory:
         self.performance_history: List[Dict] = []  # История performance
         self.recent_analyses: List[Dict] = []  # Последние анализы сделок (для дашборда)
         
+        # Расширенные паттерны для глубокого обучения
+        self.time_patterns: Dict[str, Dict[str, int]] = {}  # hour_utc -> {"wins": n, "losses": n}
+        self.regime_patterns: Dict[str, Dict[str, int]] = {}  # regime -> {"wins": n, "losses": n}
+        self.correlation_patterns: Dict[str, Dict[str, int]] = {}  # symbol -> btc_correlation outcomes
+        
+        # Обратная связь: точность решений AI по символу и последнее решение до закрытия
+        self.symbol_accuracy: Dict[str, float] = {}  # symbol -> EMA accuracy 0-1
+        self.last_signal_decisions: Dict[str, Dict] = {}  # symbol -> {confidence, should_trade, timestamp}
+        
         # Статистика
         self.total_trades_analyzed: int = 0
         self.total_news_analyzed: int = 0
         self.prediction_accuracy: float = 0.5
+        self._prediction_accuracy_ema_n: int = 0  # для EMA
         
         self._db_initialized = False
         self._init_db()
@@ -186,10 +196,19 @@ class AIMemory:
                         self.performance_history = data or []
                     elif key == 'recent_analyses':
                         self.recent_analyses = data or []
+                    elif key == 'time_patterns':
+                        self.time_patterns = data or {}
+                    elif key == 'regime_patterns':
+                        self.regime_patterns = data or {}
+                    elif key == 'correlation_patterns':
+                        self.correlation_patterns = data or {}
+                    elif key == 'symbol_accuracy':
+                        self.symbol_accuracy = data or {}
                     elif key == 'stats':
                         self.total_trades_analyzed = data.get('total_trades_analyzed', 0)
                         self.total_news_analyzed = data.get('total_news_analyzed', 0)
                         self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
+                        self._prediction_accuracy_ema_n = data.get('prediction_accuracy_ema_n', 0)
                 
                 logger.info(f"[AI_MEMORY] ✓ Loaded from PostgreSQL: {self.total_trades_analyzed} trades, {len(self.recent_analyses)} recent analyses")
                 return True
@@ -212,9 +231,14 @@ class AIMemory:
                     self.learned_rules = data.get('learned_rules', [])
                     self.performance_history = data.get('performance_history', [])
                     self.recent_analyses = data.get('recent_analyses', [])
+                    self.time_patterns = data.get('time_patterns', {})
+                    self.regime_patterns = data.get('regime_patterns', {})
+                    self.correlation_patterns = data.get('correlation_patterns', {})
+                    self.symbol_accuracy = data.get('symbol_accuracy', {})
                     self.total_trades_analyzed = data.get('total_trades_analyzed', 0)
                     self.total_news_analyzed = data.get('total_news_analyzed', 0)
                     self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
+                    self._prediction_accuracy_ema_n = data.get('prediction_accuracy_ema_n', 0)
                 logger.info(f"[AI_MEMORY] Loaded from file: {self.total_trades_analyzed} trades, {len(self.recent_analyses)} recent analyses")
                 
                 # Мигрируем в PostgreSQL если доступен
@@ -250,11 +274,16 @@ class AIMemory:
                     ('symbol_knowledge', self.symbol_knowledge),
                     ('learned_rules', self.learned_rules[-500:]),
                     ('performance_history', self.performance_history[-100:]),
-                    ('recent_analyses', self.recent_analyses[-100:]),  # Последние 100 анализов
+                    ('recent_analyses', self.recent_analyses[-100:]),
+                    ('time_patterns', self.time_patterns),
+                    ('regime_patterns', self.regime_patterns),
+                    ('correlation_patterns', self.correlation_patterns),
+                    ('symbol_accuracy', self.symbol_accuracy),
                     ('stats', {
                         'total_trades_analyzed': self.total_trades_analyzed,
                         'total_news_analyzed': self.total_news_analyzed,
                         'prediction_accuracy': self.prediction_accuracy,
+                        'prediction_accuracy_ema_n': self._prediction_accuracy_ema_n,
                         'last_saved': datetime.now().isoformat()
                     })
                 ]
@@ -289,9 +318,14 @@ class AIMemory:
                 'learned_rules': self.learned_rules[-500:],
                 'performance_history': self.performance_history[-100:],
                 'recent_analyses': self.recent_analyses[-100:],
+                'time_patterns': self.time_patterns,
+                'regime_patterns': self.regime_patterns,
+                'correlation_patterns': self.correlation_patterns,
+                'symbol_accuracy': self.symbol_accuracy,
                 'total_trades_analyzed': self.total_trades_analyzed,
                 'total_news_analyzed': self.total_news_analyzed,
                 'prediction_accuracy': self.prediction_accuracy,
+                'prediction_accuracy_ema_n': self._prediction_accuracy_ema_n,
                 'last_saved': datetime.now().isoformat()
             }
             with open(MEMORY_PATH, 'w', encoding='utf-8') as f:
@@ -300,7 +334,7 @@ class AIMemory:
             logger.error(f"[AI_MEMORY] File save error: {e}")
     
     def add_trade_pattern(self, symbol: str, pattern: Dict):
-        """Добавить паттерн сделки"""
+        """Добавить паттерн сделки и обновить time/regime паттерны"""
         if symbol not in self.trade_patterns:
             self.trade_patterns[symbol] = {'wins': [], 'losses': []}
         
@@ -312,6 +346,28 @@ class AIMemory:
             self.trade_patterns[symbol][key] = self.trade_patterns[symbol][key][-100:]
         
         self.total_trades_analyzed += 1
+        
+        # Обновляем time_patterns (час UTC по timestamp)
+        try:
+            ts = pattern.get('timestamp', '')
+            if ts:
+                if isinstance(ts, str):
+                    ts = ts.replace('Z', '+00:00')
+                    dt = datetime.fromisoformat(ts)
+                else:
+                    dt = ts
+                hour_key = str(dt.hour)
+                if hour_key not in self.time_patterns:
+                    self.time_patterns[hour_key] = {'wins': 0, 'losses': 0}
+                self.time_patterns[hour_key][key] = self.time_patterns[hour_key].get(key, 0) + 1
+        except Exception:
+            pass
+        
+        # Обновляем regime_patterns
+        regime = (pattern.get('market_regime_at_entry') or '').strip().upper() or 'UNKNOWN'
+        if regime not in self.regime_patterns:
+            self.regime_patterns[regime] = {'wins': 0, 'losses': 0}
+        self.regime_patterns[regime][key] = self.regime_patterns[regime].get(key, 0) + 1
     
     def add_news_pattern(self, news_hash: str, pattern: Dict):
         """Добавить паттерн новости"""
@@ -364,19 +420,119 @@ class AIMemory:
         
         return context
     
+    def get_enhanced_context(self, symbol: str, direction: str = '', market_regime: str = '') -> str:
+        """Расширенный контекст для AI: символ + time/regime/correlation паттерны."""
+        base = self.get_symbol_context(symbol)
+        parts = [base]
+        
+        # Лучшие/худшие часы (UTC)
+        if self.time_patterns:
+            by_hour = []
+            for hour, counts in sorted(self.time_patterns.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+                w, l = counts.get('wins', 0), counts.get('losses', 0)
+                total = w + l
+                wr = (w / total * 100) if total else 0
+                by_hour.append(f"  UTC {hour}:00 — WR {wr:.0f}% ({w}W/{l}L)")
+            if by_hour:
+                parts.append("Time patterns (by hour UTC):\n" + "\n".join(by_hour[-12:]))
+        
+        # Режим рынка: где лучше/хуже
+        if self.regime_patterns:
+            by_regime = []
+            for regime, counts in self.regime_patterns.items():
+                w, l = counts.get('wins', 0), counts.get('losses', 0)
+                total = w + l
+                wr = (w / total * 100) if total else 0
+                by_regime.append(f"  {regime}: WR {wr:.0f}% ({w}W/{l}L)")
+            if by_regime:
+                parts.append("Regime patterns:\n" + "\n".join(by_regime))
+        
+        # Correlation с BTC по символу (если есть данные)
+        if symbol in self.correlation_patterns:
+            corr = self.correlation_patterns[symbol]
+            parts.append(f"BTC correlation outcomes: {corr}")
+        
+        return "\n---\n".join(parts)
+    
+    def record_signal_decision(self, symbol: str, decision: Dict):
+        """Записать решение AI по сигналу (вызывать после should_take_trade перед открытием сделки)."""
+        self.last_signal_decisions[symbol] = {
+            'confidence': decision.get('confidence', 0.5),
+            'should_trade': decision.get('should_trade', True),
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    def get_pending_feedback(self, symbol: str, max_age_hours: float = 24.0) -> Optional[Dict]:
+        """Получить последнее решение AI по символу для обратной связи (и удалить если устарело)."""
+        rec = self.last_signal_decisions.get(symbol)
+        if not rec:
+            return None
+        try:
+            ts = datetime.fromisoformat(rec['timestamp'].replace('Z', '+00:00'))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age_h = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+            if age_h > max_age_hours or age_h < 0:
+                del self.last_signal_decisions[symbol]
+                return None
+        except Exception:
+            pass
+        return rec
+    
+    def clear_signal_decision(self, symbol: str):
+        """Очистить сохранённое решение по символу после учёта обратной связи."""
+        self.last_signal_decisions.pop(symbol, None)
+    
+    def update_prediction_accuracy(self, actual_win: bool, predicted_confidence: float, symbol: Optional[str] = None, alpha: float = 0.1):
+        """Обновить точность предсказаний EMA; при указании symbol — также обновить symbol_accuracy."""
+        correct = 1.0 if (actual_win and predicted_confidence >= 0.5) or (not actual_win and predicted_confidence < 0.5) else 0.0
+        self._prediction_accuracy_ema_n += 1
+        n = self._prediction_accuracy_ema_n
+        self.prediction_accuracy = self.prediction_accuracy * (1 - alpha) + correct * alpha if n > 1 else correct
+        if symbol:
+            prev = self.symbol_accuracy.get(symbol, 0.5)
+            self.symbol_accuracy[symbol] = prev * (1 - alpha) + correct * alpha
+        logger.debug(f"[AI_MEMORY] Prediction accuracy EMA: {self.prediction_accuracy:.3f} (n={n})" + (f", {symbol}: {self.symbol_accuracy.get(symbol, 0):.3f}" if symbol else ""))
+    
     def get_relevant_rules(self, context: str) -> List[str]:
-        """Получить релевантные правила для контекста"""
-        # Простой поиск по ключевым словам
-        relevant = []
-        context_lower = context.lower()
+        """Релевантные правила по символу, направлению и режиму рынка с оценкой по релевантности."""
+        context_lower = context.lower().strip()
+        tokens = set(context_lower.split())
+        # Извлекаем символ (первый токен может быть BTC/USDT или BTC)
+        symbol_part = (context_lower.split() or [''])[0].replace('/usdt', '').strip()
+        symbol_bases = [symbol_part]
+        if '/' in context_lower:
+            symbol_bases.append(context_lower.split('/')[0].strip())
+        # Направление и режим
+        direction_words = {'long', 'short', 'buy', 'sell'}
+        regime_words = {'uptrend', 'downtrend', 'ranging', 'trend', 'volatility', 'regime'}
+        context_directions = tokens & direction_words
+        context_regimes = tokens & regime_words
         
-        for rule in self.learned_rules[-100:]:  # Последние 100
+        scored = []
+        for rule in self.learned_rules[-100:]:
             rule_lower = rule.lower()
-            # Если есть общие слова
-            if any(word in context_lower for word in rule_lower.split()[:5]):
-                relevant.append(rule)
-        
-        return relevant[:10]  # Максимум 10
+            rule_tokens = set(rule_lower.split())
+            score = 0.0
+            # Совпадение по символу (BTC, ETH и т.д.)
+            for base in symbol_bases:
+                if len(base) >= 2 and base in rule_lower:
+                    score += 2.0
+                    break
+            # Совпадение по направлению (LONG/SHORT)
+            if context_directions and (context_directions & rule_tokens):
+                score += 1.5
+            # Совпадение по режиму рынка
+            if context_regimes and (context_regimes & rule_tokens):
+                score += 1.0
+            # Общие значимые слова (не стоп-слова)
+            stop = {'the', 'a', 'an', 'in', 'on', 'at', 'to', 'for', 'of', 'and', 'or', 'is', 'if', 'no'}
+            overlap = (tokens & rule_tokens) - stop
+            score += 0.3 * len(overlap)
+            if score >= 0.3:
+                scored.append((score, rule))
+        scored.sort(key=lambda x: -x[0])
+        return [r for _, r in scored[:10]]
 
 
 class DeepSeekAnalyzer:
@@ -464,25 +620,30 @@ class DeepSeekAnalyzer:
             relevant_rules = self.memory.get_relevant_rules(symbol)
             
             system_prompt = """Ты - эксперт-трейдер с 20-летним опытом в крипто-трейдинге.
-Твоя задача - анализировать сделки и извлекать уроки.
+Твоя задача - глубоко анализировать сделки и извлекать уроки для повышения win rate.
 
-ВАЖНО:
-- Будь конкретным и практичным
-- Указывай точные факторы успеха/провала
-- Давай actionable рекомендации
-- Учитывай рыночные условия
+МНОГОФАКТОРНЫЙ АНАЛИЗ (обязательно затронь):
+- Технический: RSI, объём, тренд на таймфрейме входа, структура рынка
+- Режим рынка в момент входа (тренд/флэт/волатильность)
+- Контекст новостей/событий если релевантен
+- Время суток и день недели (паттерны ликвидности)
+- Качество входа: вовремя ли вошли относительно движения
 
 Формат ответа (JSON):
 {
     "win_factors": ["фактор1", "фактор2"],
     "loss_factors": ["фактор1", "фактор2"],
-    "market_conditions": "описание рынка",
-    "entry_quality": 7,
-    "exit_quality": 8,
+    "market_conditions": "подробное описание рынка в момент сделки",
+    "market_regime_at_entry": "UPTREND/DOWNTREND/RANGING/HIGH_VOLATILITY",
+    "pattern_type": "breakout/reversal/trend_continuation/pullback/range/other",
+    "entry_timing_score": 1-10,
+    "market_alignment_score": 1-10,
+    "entry_quality": 1-10,
+    "exit_quality": 1-10,
     "lessons_learned": ["урок1", "урок2"],
     "recommendations": ["рекомендация1"],
-    "confidence_score": 0.8,
-    "new_rule": "если есть новое правило для запоминания"
+    "confidence_score": 0.0-1.0,
+    "new_rule": "одно конкретное правило для запоминания или пустая строка"
 }"""
 
             user_prompt = f"""Проанализируй эту сделку:
@@ -513,7 +674,7 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
                 {"role": "user", "content": user_prompt}
             ]
             
-            response = await self._call_deepseek(messages, max_tokens=800)
+            response = await self._call_deepseek(messages, max_tokens=1200)
             
             if not response:
                 return None
@@ -552,7 +713,7 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
                 confidence_score=analysis_data.get('confidence_score', 0.5)
             )
             
-            # Сохраняем в память
+            # Сохраняем в память (включая режим и тип паттерна для обучения)
             pattern = {
                 'is_win': is_win,
                 'direction': trade.get('direction'),
@@ -561,6 +722,10 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
                 'entry_quality': analysis.entry_quality,
                 'summary': analysis_data.get('market_conditions', '')[:100],
                 'lessons': analysis.lessons_learned[:2],
+                'market_regime_at_entry': analysis_data.get('market_regime_at_entry', ''),
+                'pattern_type': analysis_data.get('pattern_type', ''),
+                'entry_timing_score': analysis_data.get('entry_timing_score'),
+                'market_alignment_score': analysis_data.get('market_alignment_score'),
                 'timestamp': datetime.now().isoformat()
             }
             self.memory.add_trade_pattern(symbol, pattern)
@@ -576,6 +741,13 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
             
             # Сохраняем память (включая recent_analyses)
             self.memory.save()
+            
+            # Обратная связь: обновить точность предсказаний по факту сделки
+            pending = self.memory.get_pending_feedback(symbol)
+            if pending:
+                self.memory.update_prediction_accuracy(is_win, pending.get('confidence', 0.5), symbol=symbol)
+                self.memory.clear_signal_decision(symbol)
+                self.memory.save()
             
             logger.info(f"[AI] Analyzed trade {symbol}: {'WIN' if is_win else 'LOSS'}, quality={analysis.entry_quality}/{analysis.exit_quality}")
             
@@ -604,8 +776,9 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
         try:
             symbol = signal.get('symbol', 'UNKNOWN')
             
-            # Получаем контекст
-            symbol_context = self.memory.get_symbol_context(symbol)
+            # Расширенный контекст: символ + time/regime/correlation паттерны
+            market_regime = (market_data or {}).get('market_regime', '') or (market_data or {}).get('regime', '')
+            symbol_context = self.memory.get_enhanced_context(symbol, signal.get('direction', ''), market_regime)
             relevant_rules = self.memory.get_relevant_rules(f"{symbol} {signal.get('direction', '')}")
             
             # Статистика из памяти
@@ -614,24 +787,26 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
             loss_count = len(patterns['losses'])
             historical_wr = win_count / (win_count + loss_count) if (win_count + loss_count) > 0 else 0.5
             
-            system_prompt = """Ты - AI торговый советник. Твоя задача - принимать решения о сделках.
+            system_prompt = """Ты - AI торговый советник. Принимай решения о сделках на основе взвешенной оценки.
 
-КРИТЕРИИ ОЦЕНКИ:
-1. Качество сигнала (технический анализ)
-2. Историческая успешность символа
-3. Текущие рыночные условия
-4. Соотношение риск/прибыль
-5. Выученные правила из прошлых сделок
+КРИТЕРИИ (оцени каждый и выведи итог):
+1. Технический анализ (40%): качество сетапа, R/R, структура, объём
+2. Историческая успешность (25%): WR по символу, похожие сетапы из памяти и их исходы
+3. Рынок и новости (20%): корреляция с BTC, funding rate, open interest, последние новости
+4. Риск (15%): волатильность, зона входа, динамический SL/TP на основе ATR
+
+Учитывай похожие исторические сетапы: если по символу/направлению были убытки в таком же режиме — снижай уверенность. Указывай оптимальную зону входа и предложения по SL/TP в процентах если нужно скорректировать.
 
 Формат ответа (JSON):
 {
     "should_trade": true/false,
     "confidence": 0.0-1.0,
-    "reasoning": "краткое обоснование",
+    "reasoning": "краткое обоснование с учётом весов",
     "risk_level": "low/medium/high",
     "adjusted_sl_percent": null или число (процент от входа),
     "adjusted_tp_percent": null или число,
     "position_size_multiplier": 0.5-1.5,
+    "optimal_entry_zone": "описание зоны входа если есть",
     "key_concerns": ["беспокойство1"],
     "key_strengths": ["сильная сторона1"]
 }"""
@@ -664,7 +839,7 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
                 {"role": "user", "content": user_prompt}
             ]
             
-            response = await self._call_deepseek(messages, max_tokens=600)
+            response = await self._call_deepseek(messages, max_tokens=1000)
             
             if not response:
                 return {
@@ -693,11 +868,15 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
                 'adjusted_sl': decision.get('adjusted_sl_percent'),
                 'adjusted_tp': decision.get('adjusted_tp_percent'),
                 'position_size_multiplier': decision.get('position_size_multiplier', 1.0),
+                'optimal_entry_zone': decision.get('optimal_entry_zone', ''),
                 'key_concerns': decision.get('key_concerns', []),
                 'key_strengths': decision.get('key_strengths', [])
             }
             
             logger.info(f"[AI] Trade decision for {symbol}: {'✅ TAKE' if result['should_trade'] else '❌ SKIP'} (conf={result['confidence']:.2f})")
+            
+            # Сохраняем решение для обратной связи после закрытия сделки
+            self.memory.record_signal_decision(symbol, result)
             
             return result
             
@@ -832,26 +1011,44 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             logger.error(f"[AI] Error analyzing news: {e}")
             return None
     
+    def _news_keyword_weight(self, word: str) -> float:
+        """Вес ключевого слова для TF-IDF-подобного сопоставления новостей."""
+        w = word.lower().strip()
+        if not w or len(w) < 2:
+            return 0.0
+        high = {'sec', 'etf', 'fed', 'rate', 'ban', 'approval', 'rejection', 'hack', 'exploit',
+                 'bitcoin', 'btc', 'ethereum', 'eth', 'regulation', 'inflation', 'tariff', 'trump'}
+        if w in high:
+            return 2.0
+        if any(x in w for x in ('crypto', 'bull', 'bear', 'pump', 'dump', 'long', 'short')):
+            return 1.5
+        return 1.0
+    
     async def predict_news_impact(self, news: Dict) -> Dict:
         """
-        Предсказать влияние новости ДО того как она повлияет
+        Предсказать влияние новости ДО того как она повлияет.
+        Улучшенное сопоставление по весу ключевых слов, учёт отложенного эффекта и типа события.
         """
         try:
             title = news.get('title', '')
             coins = news.get('affected_coins', [])
+            title_words = set(title.lower().split())
             
-            # Ищем похожие паттерны
-            similar_patterns = []
+            # Взвешенное сопоставление с прошлыми новостями
+            scored = []
             for pattern in self.memory.news_patterns.values():
-                # Простое сравнение по ключевым словам
-                title_words = set(title.lower().split())
-                pattern_words = set(pattern.get('title', '').lower().split())
-                overlap = len(title_words & pattern_words)
-                
-                if overlap >= 2 or any(coin in pattern.get('coins', []) for coin in coins):
-                    similar_patterns.append(pattern)
+                pattern_title = pattern.get('title', '') or ''
+                pattern_words = set(pattern_title.lower().split())
+                overlap_words = title_words & pattern_words
+                score = sum(self._news_keyword_weight(w) for w in overlap_words)
+                if any(c in (pattern.get('coins') or []) for c in coins):
+                    score += 3.0  # совпадение монет сильно повышает релевантность
+                if score >= 1.5:  # порог вместо фиксированного overlap >= 2
+                    scored.append((score, pattern))
+            scored.sort(key=lambda x: -x[0])
+            similar_patterns = [p for _, p in scored[:25]]
             
-            # Считаем статистику
+            # Считаем статистику (в т.ч. отложенный эффект из сохранённых паттернов)
             if similar_patterns:
                 bullish_count = sum(1 for p in similar_patterns if p.get('actual_direction') == 'BULLISH')
                 bearish_count = sum(1 for p in similar_patterns if p.get('actual_direction') == 'BEARISH')
@@ -873,12 +1070,17 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             
             system_prompt = """Ты - эксперт по крипто-новостям. Предскажи влияние новости на рынок.
 
+Учитывай:
+- Отложенный эффект: часть новостей влияет через 1-24 часа (регуляторы, макро).
+- Тип события: one_time (разовый скачок) или trend_start (начало тренда) — от этого зависит сила и длительность реакции.
+
 Формат ответа (JSON):
 {
     "predicted_direction": "BULLISH/BEARISH/NEUTRAL",
     "confidence": 0.0-1.0,
     "expected_price_change_percent": число,
-    "time_to_impact_hours": число,
+    "time_to_impact_hours": число (0 = сразу, 1-24 = отложенный эффект),
+    "event_type": "one_time или trend_start или uncertain",
     "reasoning": "краткое обоснование",
     "trading_recommendation": "buy/sell/hold/wait"
 }"""
@@ -888,12 +1090,12 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
 Заголовок: {title}
 Затронутые монеты: {', '.join(coins[:5])}
 
-Статистика похожих новостей из памяти:
+Статистика похожих новостей из памяти (взвешенное совпадение):
 - Найдено похожих: {len(similar_patterns)}
 - Среднее изменение цены: {avg_change:+.2f}%
-- Мой предварительный анализ: {predicted} (conf: {confidence:.2f})
+- Предварительный анализ: {predicted} (conf: {confidence:.2f})
 
-Дай свой прогноз."""
+Оцени время до влияния (сразу / через часы) и тип: разовое событие или старт тренда. Дай прогноз."""
 
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -907,7 +1109,9 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
                 'confidence': confidence,
                 'expected_change': avg_change,
                 'similar_count': len(similar_patterns),
-                'reasoning': ''
+                'reasoning': '',
+                'time_to_impact_hours': 0,
+                'event_type': 'uncertain'
             }
             
             if response:
@@ -921,7 +1125,9 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
                             'confidence': ai_pred.get('confidence', confidence),
                             'expected_change': ai_pred.get('expected_price_change_percent', avg_change),
                             'reasoning': ai_pred.get('reasoning', ''),
-                            'recommendation': ai_pred.get('trading_recommendation', 'hold')
+                            'recommendation': ai_pred.get('trading_recommendation', 'hold'),
+                            'time_to_impact_hours': ai_pred.get('time_to_impact_hours', 0),
+                            'event_type': ai_pred.get('event_type', 'uncertain')
                         })
                 except json.JSONDecodeError:
                     pass
