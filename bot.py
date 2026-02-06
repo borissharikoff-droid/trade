@@ -2754,36 +2754,48 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.warning(f"[START] Error setting referrer: {e}")
         
         balance = user.get('balance', 0.0)
-        trading_status = "ВКЛ" if user.get('trading', False) else "ВЫКЛ"
-        auto_trade_status = "ВКЛ" if user.get('auto_trade', False) else "ВЫКЛ"
+        is_trading = user.get('trading', False)
+        is_auto = user.get('auto_trade', False)
         
         # Получаем статистику пользователя
         try:
             stats = db_get_user_stats(user_id)
             wins = stats.get('wins', 0)
             total_trades = stats.get('total', 0)
-            winrate = stats.get('winrate', '0%')
+            losses = total_trades - wins
+            winrate = stats.get('winrate', '0')
             total_profit = stats.get('total_pnl', 0.0)
             profit_str = f"+${total_profit:.2f}" if total_profit >= 0 else f"-${abs(total_profit):.2f}"
         except Exception as e:
             logger.warning(f"[START] Error getting stats for user {user_id}: {e}")
             wins = 0
+            losses = 0
             total_trades = 0
-            winrate = '0%'
+            winrate = '0'
             profit_str = "$0.00"
         
-        text = f"""Торговля: {trading_status}
-Авто-трейд: {auto_trade_status}
-
-📊 Статистика: {wins}/{total_trades} ({winrate}%) | Профит: {profit_str}
-
-💰 Баланс: <b>${balance:.2f}</b>"""
+        text = (
+            f"🌀 <b>YULA</b>\n"
+            f"\n"
+            f"💰 Баланс\n"
+            f"└ <b>${balance:.2f}</b>\n"
+            f"\n"
+            f"📊 Результат\n"
+            f"├ Сделок: {total_trades} ({wins}W / {losses}L)\n"
+            f"├ Winrate: {winrate}%\n"
+            f"└ Профит: <b>{profit_str}</b>\n"
+            f"\n"
+            f"⚙️ Режим\n"
+            f"├ Сигналы: {'✅' if is_trading else '❌'}\n"
+            f"└ Авто-трейд: {'✅' if is_auto else '❌'}"
+        )
         
         keyboard = [
-            [InlineKeyboardButton(f"{'❌ Выкл' if user.get('trading', False) else '✅ Вкл'}", callback_data="toggle"),
-             InlineKeyboardButton(f"{'✅' if user.get('auto_trade', False) else '❌'} Авто-трейд", callback_data="auto_trade_menu")],
-            [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"), InlineKeyboardButton("📊 Сделки", callback_data="trades")],
-            [InlineKeyboardButton("Дополнительно", callback_data="more_menu")]
+            [InlineKeyboardButton(f"{'🔴 ВЫКЛ' if is_trading else '🟢 ВКЛ'}", callback_data="toggle"),
+             InlineKeyboardButton(f"🤖 {'✅' if is_auto else '❌'} Авто", callback_data="auto_trade_menu")],
+            [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"),
+             InlineKeyboardButton("📋 Сделки", callback_data="trades")],
+            [InlineKeyboardButton("🔧 Дополнительно", callback_data="more_menu")]
         ]
         
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -2936,9 +2948,9 @@ async def send_stars_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE)
             title=f"Пополнение {usd_label}",
             description=f"Пополнение баланса на {usd_label}",
             payload=f"deposit_{usd}",
-            provider_token="",  # Пустая строка для Telegram Stars
+            provider_token=None,  # Omit for Telegram Stars (Bot API 7.4+)
             currency="XTR",
-            prices=[LabeledPrice(label=usd_label, amount=stars)]
+            prices=[LabeledPrice(label=usd_label, amount=int(stars))]
         )
         logger.info(f"[STARS] Invoice sent successfully to user {user_id}: {stars} stars")
     except Exception as e:
@@ -6808,9 +6820,9 @@ async def handle_custom_amount(update: Update, context: ContextTypes.DEFAULT_TYP
                     title=f"Пополнение ${amount}",
                     description=f"Пополнение баланса на ${amount}",
                     payload=f"deposit_{amount}",
-                    provider_token="",
+                    provider_token=None,  # Omit for Telegram Stars (Bot API 7.4+)
                     currency="XTR",
-                    prices=[LabeledPrice(label=f"${amount}", amount=stars)]
+                    prices=[LabeledPrice(label=f"${amount}", amount=int(stars))]
                 )
                 logger.info(f"[STARS] Custom invoice sent to user {user_id}: {stars} stars")
             except Exception as e:
