@@ -6,7 +6,7 @@ Minimalist web interface for monitoring trading statistics
 import os
 import logging
 from datetime import datetime, timedelta, timezone
-from flask import Flask, jsonify, render_template, request, Response
+from flask import Flask, jsonify, render_template, request, Response, make_response
 from threading import Thread
 from collections import deque
 import json
@@ -16,6 +16,32 @@ logger = logging.getLogger(__name__)
 # Flask app
 app = Flask(__name__, template_folder='templates')
 app.config['JSON_SORT_KEYS'] = False
+
+# Optional auth: set DASHBOARD_SECRET in env to require ?token=SECRET or Authorization: Bearer SECRET
+DASHBOARD_SECRET = os.environ.get("DASHBOARD_SECRET")
+
+
+def _dashboard_auth_ok():
+    """Return True if request is authorized (no secret set, or valid token)."""
+    if not DASHBOARD_SECRET:
+        return True
+    token = (
+        request.args.get("token")
+        or request.cookies.get("dashboard_token")
+        or (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
+    )
+    return token == DASHBOARD_SECRET
+
+
+@app.before_request
+def _require_dashboard_auth():
+    if request.path.startswith("/api/") or request.path == "/" or request.path == "" or request.path.startswith("/health"):
+        if request.path == "/health":
+            return  # no auth for health check
+        if not _dashboard_auth_ok():
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "Unauthorized"}), 401
+            return Response("Unauthorized", status=401, headers={"WWW-Authenticate": "Bearer"})
 
 # Will be set from bot.py
 _run_sql = None
@@ -618,7 +644,10 @@ def api_extended():
 def api_logs():
     """Logs endpoint"""
     limit = request.args.get('limit', 100, type=int)
+    limit = max(1, min(1000, limit))  # clamp 1-1000
     level = request.args.get('level', None)
+    if level is not None and level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        level = None
     
     # Get in-memory logs
     memory_logs = get_logs(limit, level)
@@ -1201,8 +1230,11 @@ def api_analytics_summary():
 
 @app.route('/')
 def dashboard():
-    """Main dashboard page"""
-    return render_template('dashboard.html')
+    """Main dashboard page. If ?token=DASHBOARD_SECRET, set cookie so API calls work."""
+    resp = make_response(render_template('dashboard.html'))
+    if DASHBOARD_SECRET and request.args.get("token") == DASHBOARD_SECRET:
+        resp.set_cookie("dashboard_token", DASHBOARD_SECRET, max_age=86400 * 7, httponly=True, samesite="Lax")
+    return resp
 
 
 @app.route('/health')

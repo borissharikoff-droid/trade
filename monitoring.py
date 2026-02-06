@@ -5,6 +5,7 @@ Provides metrics collection and health check endpoints
 
 import logging
 import time
+import threading
 from typing import Dict, List
 from datetime import datetime
 from collections import defaultdict
@@ -13,41 +14,47 @@ logger = logging.getLogger(__name__)
 
 
 class MetricsCollector:
-    """Collects and stores metrics"""
+    """Collects and stores metrics (thread-safe)"""
     
     def __init__(self):
         self.metrics: Dict[str, any] = defaultdict(int)
         self.timestamps: Dict[str, float] = {}
         self.error_counts: Dict[str, int] = defaultdict(int)
         self.last_reset = time.time()
+        self._lock = threading.Lock()
     
     def increment(self, metric: str, value: int = 1):
         """Increment a counter metric"""
-        self.metrics[metric] += value
+        with self._lock:
+            self.metrics[metric] += value
     
     def set_gauge(self, metric: str, value: float):
         """Set a gauge metric"""
-        self.metrics[metric] = value
-        self.timestamps[metric] = time.time()
+        with self._lock:
+            self.metrics[metric] = value
+            self.timestamps[metric] = time.time()
     
     def record_error(self, error_type: str):
         """Record an error"""
-        self.error_counts[error_type] += 1
-        self.increment("errors_total")
+        with self._lock:
+            self.error_counts[error_type] += 1
+            self.metrics["errors_total"] += 1
     
     def get_metrics(self) -> Dict:
         """Get all metrics"""
-        return {
-            'counters': dict(self.metrics),
-            'errors': dict(self.error_counts),
-            'uptime': time.time() - self.last_reset
-        }
+        with self._lock:
+            return {
+                'counters': dict(self.metrics),
+                'errors': dict(self.error_counts),
+                'uptime': time.time() - self.last_reset
+            }
     
     def reset(self):
         """Reset metrics"""
-        self.metrics.clear()
-        self.error_counts.clear()
-        self.last_reset = time.time()
+        with self._lock:
+            self.metrics.clear()
+            self.error_counts.clear()
+            self.last_reset = time.time()
 
 
 # Global metrics collector

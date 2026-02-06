@@ -10,6 +10,16 @@ from advanced_signals import correlation_analyzer
 logger = logging.getLogger(__name__)
 
 
+def _validate_sizing_inputs(balance: float, atr: float, entry: float) -> None:
+    """Валидация входных данных для расчёта размера позиции."""
+    if balance is None or balance < 0:
+        raise ValueError("balance must be non-negative")
+    if atr is None or atr < 0:
+        raise ValueError("atr must be non-negative")
+    if entry is None or entry <= 0:
+        raise ValueError("entry must be positive")
+
+
 def calculate_volatility_based_size(balance: float, atr: float, entry: float, 
                                    risk_percent: float = 1.0,
                                    max_position_percent: float = 15.0) -> float:
@@ -26,6 +36,7 @@ def calculate_volatility_based_size(balance: float, atr: float, entry: float,
     Returns:
         Размер позиции в USD
     """
+    _validate_sizing_inputs(balance, atr, entry)
     # Базовый риск: 1% от баланса
     risk_amount = balance * (risk_percent / 100)
     
@@ -79,6 +90,12 @@ def check_correlation_risk(user_positions: List[Dict], new_symbol: str,
     Returns:
         (is_safe, reason)
     """
+    if user_balance is None or user_balance < 0:
+        return False, "Invalid balance"
+    if not new_symbol or not isinstance(new_symbol, str):
+        return False, "Invalid symbol"
+    if new_direction not in ("LONG", "SHORT"):
+        return False, "Invalid direction"
     if not user_positions:
         return True, "OK"
     

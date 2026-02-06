@@ -6,6 +6,7 @@ Provides resilient error handling for API calls and database operations
 import logging
 import asyncio
 import time
+import threading
 from typing import Callable, Any, Optional, TypeVar, Tuple
 from enum import Enum
 from datetime import datetime, timedelta
@@ -24,7 +25,7 @@ class CircuitState(Enum):
 
 
 class CircuitBreaker:
-    """Circuit breaker pattern for API calls"""
+    """Circuit breaker pattern for API calls (thread-safe)"""
     
     def __init__(self, failure_threshold: int = 5, timeout: int = 60, 
                  expected_exception: type = Exception):
@@ -34,37 +35,44 @@ class CircuitBreaker:
         self.failure_count = 0
         self.last_failure_time: Optional[datetime] = None
         self.state = CircuitState.CLOSED
+        self._lock = threading.Lock()
     
     def call(self, func: Callable, *args, **kwargs) -> Any:
         """Execute function with circuit breaker"""
-        if self.state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self.state = CircuitState.HALF_OPEN
-            else:
-                raise Exception(f"Circuit breaker is OPEN. Service unavailable.")
+        with self._lock:
+            if self.state == CircuitState.OPEN:
+                if self._should_attempt_reset():
+                    self.state = CircuitState.HALF_OPEN
+                else:
+                    raise Exception("Circuit breaker is OPEN. Service unavailable.")
         
         try:
             result = func(*args, **kwargs)
-            self._on_success()
+            with self._lock:
+                self._on_success()
             return result
-        except self.expected_exception as e:
-            self._on_failure()
+        except self.expected_exception:
+            with self._lock:
+                self._on_failure()
             raise
     
     async def call_async(self, func: Callable, *args, **kwargs) -> Any:
         """Execute async function with circuit breaker"""
-        if self.state == CircuitState.OPEN:
-            if self._should_attempt_reset():
-                self.state = CircuitState.HALF_OPEN
-            else:
-                raise Exception(f"Circuit breaker is OPEN. Service unavailable.")
+        with self._lock:
+            if self.state == CircuitState.OPEN:
+                if self._should_attempt_reset():
+                    self.state = CircuitState.HALF_OPEN
+                else:
+                    raise Exception("Circuit breaker is OPEN. Service unavailable.")
         
         try:
             result = await func(*args, **kwargs)
-            self._on_success()
+            with self._lock:
+                self._on_success()
             return result
-        except self.expected_exception as e:
-            self._on_failure()
+        except self.expected_exception:
+            with self._lock:
+                self._on_failure()
             raise
     
     def _on_success(self):
@@ -76,16 +84,14 @@ class CircuitBreaker:
         """Handle failure"""
         self.failure_count += 1
         self.last_failure_time = datetime.now()
-        
         if self.failure_count >= self.failure_threshold:
             self.state = CircuitState.OPEN
-            logger.warning(f"[CIRCUIT] Opened after {self.failure_count} failures")
+            logger.warning("[CIRCUIT] Opened after %s failures", self.failure_count)
     
     def _should_attempt_reset(self) -> bool:
         """Check if we should try to reset"""
         if self.last_failure_time is None:
             return True
-        
         elapsed = (datetime.now() - self.last_failure_time).total_seconds()
         return elapsed >= self.timeout
 

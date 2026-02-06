@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 # Price tracking for news impact
 _news_price_tracker: Dict[str, Dict] = {}  # news_id -> {timestamp, coins, prices_before, checked}
 
-# DeepSeek API Configuration
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-b2c365a48862461fb4f9ea74887a3f5c")
+# DeepSeek API Configuration - key must be set via env, no default
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"  # или deepseek-coder для технического анализа
 
@@ -403,7 +403,9 @@ class DeepSeekAnalyzer:
         if not OPENAI_AVAILABLE:
             logger.error("[AI] OpenAI library not available")
             return False
-        
+        if not DEEPSEEK_API_KEY:
+            logger.error("[AI] DEEPSEEK_API_KEY not set in environment")
+            return False
         try:
             self.client = AsyncOpenAI(
                 api_key=DEEPSEEK_API_KEY,

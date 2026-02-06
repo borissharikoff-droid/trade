@@ -398,33 +398,44 @@ class SmartAnalyzer:
     # ==================== DATA FETCHING ====================
     
     async def get_klines(self, symbol: str, interval: str = '1h', limit: int = 100) -> List:
-        """Получить свечи с Binance"""
-        try:
-            binance_symbol = symbol.replace('/', '')
-            url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
-            
-            session = await self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-        except Exception as e:
-            logger.warning(f"[KLINES] Error {symbol}: {e}")
+        """Получить свечи с Binance (с retry и exponential backoff)"""
+        binance_symbol = symbol.replace('/', '')
+        url = f"https://api.binance.com/api/v3/klines?symbol={binance_symbol}&interval={interval}&limit={limit}"
+        delay = 1.0
+        for attempt in range(4):  # 1 initial + 3 retries
+            try:
+                session = await self._get_session()
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+            except Exception as e:
+                if attempt == 3:
+                    logger.warning(f"[KLINES] Error {symbol} after retries: {e}")
+                    return []
+                logger.debug(f"[KLINES] Attempt {attempt + 1} failed: {e}, retry in {delay}s")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
         return []
     
     async def get_price(self, symbol: str) -> float:
-        """Текущая цена"""
-        try:
-            binance_symbol = symbol.replace('/', '')
-            url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}"
-            
-            session = await self._get_session()
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return float(data['price'])
-        except Exception as e:
-            logger.warning(f"[PRICE] Error {symbol}: {e}")
-        return 0
+        """Текущая цена (с retry и exponential backoff)"""
+        binance_symbol = symbol.replace('/', '')
+        url = f"https://api.binance.com/api/v3/ticker/price?symbol={binance_symbol}"
+        delay = 1.0
+        for attempt in range(4):
+            try:
+                session = await self._get_session()
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return float(data['price'])
+            except Exception as e:
+                if attempt == 3:
+                    logger.warning(f"[PRICE] Error {symbol} after retries: {e}")
+                    return 0.0
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
+        return 0.0
     
     # ==================== MULTI-TIMEFRAME ANALYSIS ====================
     

@@ -139,29 +139,31 @@ class ThreadSafeCache:
             self._data[key] = value
     
     def delete(self, key: int):
-        """Delete key with per-key locking"""
-        lock = self._get_lock(key)
-        with lock:
+        """Delete key with per-key locking; remove key lock to avoid unbounded growth"""
+        with self._global_lock:
             if key in self._data:
                 del self._data[key]
+            self._locks.pop(key, None)
     
     def pop(self, key: int, default: Any = None) -> Any:
-        """Pop key with per-key locking (like dict.pop)"""
-        lock = self._get_lock(key)
-        with lock:
+        """Pop key; under global lock to avoid unbounded _locks growth"""
+        with self._global_lock:
             if key in self._data:
                 value = self._data[key]
                 del self._data[key]
+                self._locks.pop(key, None)
                 return value
             return default
     
     def items(self):
-        """Get all items (read-only, no locking)"""
-        return self._data.items()
+        """Get all items (thread-safe copy)"""
+        with self._global_lock:
+            return list(self._data.items())
     
     def keys(self):
-        """Get all keys (read-only, no locking)"""
-        return self._data.keys()
+        """Get all keys (thread-safe copy)"""
+        with self._global_lock:
+            return list(self._data.keys())
     
     def clear(self):
         """Clear all data"""

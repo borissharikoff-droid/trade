@@ -72,26 +72,32 @@ class WhaleTracker:
         self._cache_ttl = 30  # секунд
     
     async def _request(self, endpoint: str, payload: dict = None) -> Optional[Dict]:
-        """Запрос к Hyperliquid API"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                if payload:
-                    async with session.post(
-                        f"{HYPERLIQUID_API}{endpoint}",
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as resp:
-                        if resp.status == 200:
-                            return await resp.json()
-                else:
-                    async with session.get(
-                        f"{HYPERLIQUID_API}{endpoint}",
-                        timeout=aiohttp.ClientTimeout(total=10)
-                    ) as resp:
-                        if resp.status == 200:
-                            return await resp.json()
-        except Exception as e:
-            logger.warning(f"[WHALE] API error: {e}")
+        """Запрос к Hyperliquid API (с retry и exponential backoff)"""
+        delay = 1.0
+        for attempt in range(4):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    if payload:
+                        async with session.post(
+                            f"{HYPERLIQUID_API}{endpoint}",
+                            json=payload,
+                            timeout=aiohttp.ClientTimeout(total=10)
+                        ) as resp:
+                            if resp.status == 200:
+                                return await resp.json()
+                    else:
+                        async with session.get(
+                            f"{HYPERLIQUID_API}{endpoint}",
+                            timeout=aiohttp.ClientTimeout(total=10)
+                        ) as resp:
+                            if resp.status == 200:
+                                return await resp.json()
+            except Exception as e:
+                if attempt == 3:
+                    logger.warning(f"[WHALE] API error after retries: {e}")
+                    return None
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 30)
         return None
     
     async def get_all_mids(self) -> Dict[str, float]:

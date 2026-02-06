@@ -4,16 +4,20 @@
 и добавления их в bundle YULA
 
 Запуск: python setup_rss_feeds.py
+
+Требует переменные окружения:
+  RSS_APP_API_KEY, RSS_APP_API_SECRET, RSS_APP_BUNDLE_ID
 """
 
+import os
 import requests
 import time
 
-# RSS.app API credentials
-API_KEY = "c_xMtGIIcrdOZ8Nt"
-API_SECRET = "s_r8NiIDkqNcLUwMDiusRtqf"
+# RSS.app API credentials - from environment only
+API_KEY = os.getenv("RSS_APP_API_KEY")
+API_SECRET = os.getenv("RSS_APP_API_SECRET")
 API_URL = "https://api.rss.app/v1"
-BUNDLE_ID = "_XzgeXtiahhlT8Vg5"
+BUNDLE_ID = os.getenv("RSS_APP_BUNDLE_ID")
 
 # Все Twitter аккаунты для мониторинга
 TWITTER_ACCOUNTS = {
@@ -66,6 +70,8 @@ TWITTER_ACCOUNTS = {
 }
 
 def get_auth_header():
+    if not API_KEY or not API_SECRET:
+        raise ValueError("RSS_APP_API_KEY and RSS_APP_API_SECRET must be set in environment")
     return f"Bearer {API_KEY}:{API_SECRET}"
 
 def list_existing_feeds():
@@ -113,6 +119,8 @@ def create_twitter_feed(username):
 
 def add_feed_to_bundle(feed_id):
     """Добавить фид в bundle"""
+    if not BUNDLE_ID:
+        return False
     resp = requests.put(
         f"{API_URL}/bundles/{BUNDLE_ID}/feeds/{feed_id}",
         headers={"Authorization": get_auth_header()},
@@ -121,6 +129,12 @@ def add_feed_to_bundle(feed_id):
     return resp.status_code == 200
 
 def main():
+    if not API_KEY or not API_SECRET:
+        print("ERROR: Set RSS_APP_API_KEY and RSS_APP_API_SECRET in environment.")
+        return
+    if not BUNDLE_ID:
+        print("ERROR: Set RSS_APP_BUNDLE_ID in environment.")
+        return
     print("=" * 60)
     print("🚀 RSS.app Twitter Feeds Setup for YULA Bundle")
     print("=" * 60)

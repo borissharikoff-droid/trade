@@ -24,8 +24,9 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")  # Обязательно
 # Разрешённые пользователи (твой Telegram ID)
 ALLOWED_USERS = set()  # Пустой = все могут использовать. Добавь свой ID для ограничения
 
-# Контекст разговора для каждого пользователя
+# Контекст разговора для каждого пользователя (потокобезопасный доступ)
 conversations = {}  # {user_id: [messages]}
+_conversations_lock = asyncio.Lock()
 MAX_CONTEXT_MESSAGES = 20  # Максимум сообщений в контексте
 
 # Системный промпт с полным контекстом проекта
@@ -196,19 +197,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
     
-    # Инициализация контекста если нужно
-    if user_id not in conversations:
-        conversations[user_id] = []
-    
-    # Добавляем сообщение пользователя
-    conversations[user_id].append({
-        "role": "user",
-        "content": user_message
-    })
-    
-    # Ограничиваем контекст
-    if len(conversations[user_id]) > MAX_CONTEXT_MESSAGES:
-        conversations[user_id] = conversations[user_id][-MAX_CONTEXT_MESSAGES:]
+    # Инициализация контекста и добавление сообщения (потокобезопасно)
+    async with _conversations_lock:
+        if user_id not in conversations:
+            conversations[user_id] = []
+        conversations[user_id].append({"role": "user", "content": user_message})
+        if len(conversations[user_id]) > MAX_CONTEXT_MESSAGES:
+            conversations[user_id] = conversations[user_id][-MAX_CONTEXT_MESSAGES:]
+        messages_for_api = list(conversations[user_id])
     
     # Показываем "печатает..."
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -219,16 +215,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             model="claude-sonnet-4-20250514",
             max_tokens=4096,
             system=SYSTEM_PROMPT,
-            messages=conversations[user_id]
+            messages=messages_for_api
         )
         
         assistant_message = response.content[0].text
         
-        # Добавляем ответ в контекст
-        conversations[user_id].append({
-            "role": "assistant",
-            "content": assistant_message
-        })
+        # Добавляем ответ в контекст (потокобезопасно)
+        async with _conversations_lock:
+            conversations[user_id].append({"role": "assistant", "content": assistant_message})
         
         # Telegram ограничивает сообщения до 4096 символов
         if len(assistant_message) > 4000:
