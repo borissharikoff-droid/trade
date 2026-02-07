@@ -1383,15 +1383,28 @@
                     <div style="display: none;" id="validSetupsPct"></div>
                     <div style="display: none;" id="rejectedPct"></div>
                     
-                    <!-- Reasons Analysis -->
-                    <div class="section-title"><span class="section-icon">📋</span> Close Reasons</div>
+                    <!-- Market Analysis -->
+                    <div class="section-title"><span class="section-icon">🧠</span> Market Analysis</div>
                     <div class="reasons-grid">
                         <div class="reasons-list">
-                            <h3 class="wins"><span>✅</span> Winning Reasons</h3>
+                            <h3 class="wins"><span>📈</span> Why We Win</h3>
+                            <div id="winFactors"><div class="no-data">AI is learning...</div></div>
+                        </div>
+                        <div class="reasons-list">
+                            <h3 class="losses"><span>📉</span> Why We Lose</h3>
+                            <div id="lossFactors"><div class="no-data">AI is learning...</div></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Close Reasons (technical) -->
+                    <div class="section-title" style="margin-top: 12px;"><span class="section-icon">📋</span> Close Reasons</div>
+                    <div class="reasons-grid">
+                        <div class="reasons-list">
+                            <h3 class="wins"><span>✅</span> Winning</h3>
                             <div id="winReasons"><div class="no-data">No data</div></div>
                         </div>
                         <div class="reasons-list">
-                            <h3 class="losses"><span>❌</span> Losing Reasons</h3>
+                            <h3 class="losses"><span>❌</span> Losing</h3>
                             <div id="lossReasons"><div class="no-data">No data</div></div>
                         </div>
                     </div>
@@ -2009,6 +2022,30 @@
             container.innerHTML = html;
         }
         
+        function renderMarketFactors(factors, containerId, isWin) {
+            const container = document.getElementById(containerId);
+            if (!factors || Object.keys(factors).length === 0) {
+                container.innerHTML = '<div class="no-data">AI is learning...</div>';
+                return;
+            }
+            
+            const total = Object.values(factors).reduce((a, b) => a + b, 0);
+            const maxCount = Math.max(...Object.values(factors));
+            let html = '';
+            for (const [factor, count] of Object.entries(factors).slice(0, 6)) {
+                const pct = (count / maxCount * 100).toFixed(0);
+                const share = total > 0 ? (count / total * 100).toFixed(1) : '0';
+                html += `<div class="reason-item">
+                    <span class="reason-name" style="font-size: 0.78rem; flex: 2;">${factor}</span>
+                    <div class="reason-bar">
+                        <div class="reason-bar-fill ${isWin ? 'win' : 'loss'}" style="width: ${pct}%"></div>
+                    </div>
+                    <span class="reason-count">${count} <span style="color:var(--text-muted);font-size:0.7em">(${share}%)</span></span>
+                </div>`;
+            }
+            container.innerHTML = html;
+        }
+
         function renderTrades(trades) {
             const tbody = document.getElementById('tradesBody');
             document.getElementById('tradesCount').textContent = (trades?.length || 0) + ' trades';
@@ -2524,6 +2561,10 @@
             
             // Insights
             renderAIInsights(aiData.insights || []);
+            
+            // Market Analysis (win/loss factors on Overview tab)
+            renderMarketFactors(aiData.win_factors || {}, 'winFactors', true);
+            renderMarketFactors(aiData.loss_factors || {}, 'lossFactors', false);
         }
         
         function renderAIAnalyses(analyses) {
@@ -2722,8 +2763,20 @@
             
             let html = '';
             for (const insight of insights) {
-                const categoryIcon = insight.category === 'daily_summary' ? '📅' : insight.category === 'trade' ? '📊' : '💡';
-                const categoryLabel = insight.category === 'daily_summary' ? 'daily_summary' : insight.category || 'insight';
+                const isDailySummary = insight.category === 'daily_summary';
+                const categoryIcon = isDailySummary ? '📅' : insight.category === 'trade' ? '📊' : '💡';
+                
+                // Use title if available (PnL-based), otherwise fallback
+                let displayTitle = '';
+                if (insight.title) {
+                    displayTitle = insight.title;
+                } else if (isDailySummary) {
+                    // Try to extract PnL from the content for older summaries
+                    const pnlMatch = (insight.insight || '').match(/PnL[:\s]*([+-]?\$[\d,.]+)/i);
+                    displayTitle = pnlMatch ? `Daily Report ${pnlMatch[1]}` : 'Daily Report';
+                } else {
+                    displayTitle = insight.category === 'trade' ? 'Trade Analysis' : 'Insight';
+                }
                 
                 // Show full date/time
                 let dateStr = '';
@@ -2737,9 +2790,14 @@
                 }
                 const timeAgo = formatTimeAgo(insight.timestamp);
                 
-                html += `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${insight.category === 'daily_summary' ? 'var(--accent)' : 'var(--border-color)'};">
+                // Color the title based on PnL sign
+                const titleColor = isDailySummary 
+                    ? (insight.title && insight.title.startsWith('-') ? 'var(--negative)' : 'var(--positive)')
+                    : 'var(--accent)';
+                
+                html += `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${isDailySummary ? titleColor : 'var(--border-color)'};">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                        <span style="font-weight: 600; color: var(--accent); font-size: 0.9rem;">${categoryIcon} ${categoryLabel}</span>
+                        <span style="font-weight: 600; color: ${titleColor}; font-size: 0.9rem;">${categoryIcon} ${escapeHtml(displayTitle)}</span>
                         <span style="font-size: 0.72rem; color: var(--text-muted);">📅 ${dateStr} &nbsp;(${timeAgo})</span>
                     </div>
                     <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">
@@ -2767,11 +2825,13 @@
                     const container = document.getElementById('aiInsightsList');
                     const dateLabel = data.date || period;
                     const genAt = data.generated_at || new Date().toLocaleString('ru-RU');
-                    const tradesCount = data.trades_count || 0;
-                    const newHtml = `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid var(--positive);">
+                    const reportTitle = data.title || `Report ${dateLabel}`;
+                    const pnl = data.total_pnl || 0;
+                    const pnlColor = pnl >= 0 ? 'var(--positive)' : 'var(--negative)';
+                    const newHtml = `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${pnlColor};">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                            <span style="font-weight: 600; color: var(--positive); font-size: 0.9rem;">📋 Report: ${escapeHtml(dateLabel)}</span>
-                            <span style="font-size: 0.72rem; color: var(--text-muted);">Generated: ${escapeHtml(genAt)} | ${tradesCount} trades</span>
+                            <span style="font-weight: 600; color: ${pnlColor}; font-size: 0.9rem;">📅 ${escapeHtml(reportTitle)}</span>
+                            <span style="font-size: 0.72rem; color: var(--text-muted);">📅 ${escapeHtml(dateLabel)} &nbsp;|&nbsp; ${escapeHtml(genAt)}</span>
                         </div>
                         <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">
                             ${escapeHtml(data.report || 'Empty report')}

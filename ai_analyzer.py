@@ -382,11 +382,12 @@ class AIMemory:
         
         self.total_news_analyzed += 1
     
-    def add_insight(self, insight: str, category: str = "general"):
+    def add_insight(self, insight: str, category: str = "general", title: str = ""):
         """Добавить инсайт"""
         self.market_insights.append({
             'insight': insight,
             'category': category,
+            'title': title,
             'timestamp': datetime.now().isoformat()
         })
     
@@ -1185,34 +1186,48 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             top_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1], reverse=True)[:5]
             worst_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1])[:5]
             
-            system_prompt = """Ты - трейдинг-коуч. Сформируй дневное саммари для команды.
+            losses = total_trades - wins
+            avg_win = sum(float(t.get('pnl', 0)) for t in trades if float(t.get('pnl', 0)) > 0) / max(wins, 1)
+            avg_loss = sum(float(t.get('pnl', 0)) for t in trades if float(t.get('pnl', 0)) < 0) / max(losses, 1)
+            
+            system_prompt = """Ты - трейдинг-коуч. Сформируй дневное саммари.
 
-Включи в ответ:
-1. Что за сегодня узнало ИИ: новые правила, паттерны, выводы из сделок.
-2. Сделки за день: количество, выигрыши/проигрыши, как меняется стиль торговли.
-3. Рост и динамика: PnL за день, сравнение с предыдущими днями по тону.
-4. Конкретные рекомендации на завтра и новые правила для запоминания."""
+СТРУКТУРА ОТЧЁТА:
+1. КРАТКИЙ ОБЗОР: PnL, винрейт, сколько сделок, что было хорошо/плохо.
+2. ЧТО ИИ УЗНАЛ СЕГОДНЯ: конкретные новые правила, паттерны, выводы из сделок. Какие фундаментальные знания получены о рынке (макро-данные, геополитика, настроения, корреляции).
+3. СТАТИСТИКА: все числа — сделки, выигрыши, проигрыши, средний профит, средний убыток, лучшие/худшие символы.
+4. ФУНДАМЕНТАЛЬНЫЙ АНАЛИЗ: почему рынок двигался так, какие события повлияли, какие макро-факторы были в игре.
+5. РЕКОМЕНДАЦИИ НА ЗАВТРА: конкретные правила и стратегические советы.
+
+Пиши кратко, по делу, с цифрами."""
 
             wr_pct = (wins / total_trades * 100) if total_trades else 0
-            user_prompt = f"""Дневное саммари (сегодня):
+            user_prompt = f"""Дневное саммари:
 
-=== СТАТИСТИКА ДНЯ ===
-Сделок: {total_trades} | Прибыльных: {wins} | Win rate: {wr_pct:.1f}%
-Общий PnL за день: ${total_pnl:.2f}
+=== ПОЛНАЯ СТАТИСТИКА ===
+Всего сделок: {total_trades}
+Прибыльных: {wins} | Убыточных: {losses}
+Win Rate: {wr_pct:.1f}%
+Общий PnL: ${total_pnl:.2f}
+Средний выигрыш: ${avg_win:.2f}
+Средний убыток: ${avg_loss:.2f}
 
-=== ЛУЧШИЕ СИМВОЛЫ ===
+=== ТОП ПРИБЫЛЬНЫЕ СИМВОЛЫ ===
 {chr(10).join(f'{s}: ${p:.2f}' for s, p in top_symbols) if top_symbols else 'Нет'}
 
-=== ХУДШИЕ СИМВОЛЫ ===
+=== САМЫЕ УБЫТОЧНЫЕ СИМВОЛЫ ===
 {chr(10).join(f'{s}: ${p:.2f}' for s, p in worst_symbols) if worst_symbols else 'Нет'}
 
 === НОВОСТИ ДНЯ ===
-{chr(10).join(n.get('title', '')[:60] for n in news[:10]) if news else 'Нет'}
+{chr(10).join(n.get('title', '')[:60] for n in news[:10]) if news else 'Нет значимых новостей'}
 
 === ВЫУЧЕННЫЕ ПРАВИЛА (всего: {len(self.memory.learned_rules)}) ===
 {chr(10).join(self.memory.learned_rules[-10:])}
 
-Опиши: что ИИ узнало сегодня, как мы растем, как меняется стиль торговли. Дай рекомендации."""
+=== ВЫУЧЕННЫЕ ПРАВИЛА СЕГОДНЯ ===
+{chr(10).join(self.memory.learned_rules[-3:]) if self.memory.learned_rules else 'Нет новых правил'}
+
+Сформируй отчёт по структуре из системного промпта. Обязательно включи ВСЕ цифры и фундаментальный анализ рынка."""
 
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -1222,8 +1237,12 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             response = await self._call_deepseek(messages, max_tokens=1000)
             
             if response:
+                # Build a PnL-based title for the summary (e.g. "+$107.63" or "-$52.40")
+                pnl_sign = '+' if total_pnl >= 0 else ''
+                summary_title = f"{pnl_sign}${total_pnl:.2f} | {total_trades} trades | WR {wr_pct:.0f}%"
+                
                 # Сохраняем инсайт
-                self.memory.add_insight(response[:500], 'daily_summary')
+                self.memory.add_insight(response[:500], 'daily_summary', title=summary_title)
                 self.memory.save()
             
             return response or "Не удалось сгенерировать инсайты"

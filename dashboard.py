@@ -1569,6 +1569,25 @@ def api_ai():
         recent_analyses = list(analyzer.recent_analyses)[-20:]
         recent_analyses.reverse()
         
+        # Aggregate win/loss factors (fundamental market reasons) from AI analyses
+        all_analyses = list(analyzer.recent_analyses)
+        win_factors_agg = {}
+        loss_factors_agg = {}
+        for a in all_analyses:
+            if a.get('is_win'):
+                for f in (a.get('win_factors') or []):
+                    f_clean = f.strip()[:80]
+                    if f_clean:
+                        win_factors_agg[f_clean] = win_factors_agg.get(f_clean, 0) + 1
+            else:
+                for f in (a.get('loss_factors') or []):
+                    f_clean = f.strip()[:80]
+                    if f_clean:
+                        loss_factors_agg[f_clean] = loss_factors_agg.get(f_clean, 0) + 1
+        # Sort by count desc, take top 10
+        win_factors_sorted = dict(sorted(win_factors_agg.items(), key=lambda x: x[1], reverse=True)[:10])
+        loss_factors_sorted = dict(sorted(loss_factors_agg.items(), key=lambda x: x[1], reverse=True)[:10])
+        
         # Get learned rules (last 200 for dashboard visibility)
         learned_rules = memory.learned_rules[-200:]
         learned_rules.reverse()
@@ -1657,6 +1676,8 @@ def api_ai():
             'pattern_summary': pattern_summary,
             'news_patterns': news_patterns,
             'pending_news': pending_news,
+            'win_factors': win_factors_sorted,
+            'loss_factors': loss_factors_sorted,
             'timestamp': to_moscow_time()
         })
         
@@ -1706,6 +1727,11 @@ def api_ai_generate_report():
             )
 
         trades = [dict(r) for r in (rows or [])]
+        
+        # Calculate stats for the title
+        total_pnl = sum(float(t.get('pnl', 0)) for t in trades)
+        wins = sum(1 for t in trades if float(t.get('pnl', 0)) > 0)
+        wr = (wins / len(trades) * 100) if trades else 0
 
         news = []
         try:
@@ -1720,6 +1746,7 @@ def api_ai_generate_report():
         msk_tz = timezone(timedelta(hours=3))
         report_time = datetime.now(msk_tz).strftime('%d.%m.%Y %H:%M MSK')
         day_label = day_start.strftime('%d.%m.%Y')
+        pnl_sign = '+' if total_pnl >= 0 else ''
 
         return jsonify({
             'success': True,
@@ -1727,6 +1754,9 @@ def api_ai_generate_report():
             'date': day_label,
             'generated_at': report_time,
             'trades_count': len(trades),
+            'total_pnl': round(total_pnl, 2),
+            'win_rate': round(wr, 1),
+            'title': f"{pnl_sign}${total_pnl:.2f} | {len(trades)} trades | WR {wr:.0f}%",
             'timestamp': to_moscow_time()
         })
     except Exception as e:
