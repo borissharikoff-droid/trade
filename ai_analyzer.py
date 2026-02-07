@@ -390,10 +390,28 @@ class AIMemory:
             'timestamp': datetime.now().isoformat()
         })
     
+    def _rule_similarity(self, a: str, b: str) -> float:
+        """Word overlap ratio 0-1. Used to reject near-duplicate rules."""
+        if not a or not b:
+            return 0.0
+        wa, wb = set(a.lower().split()), set(b.lower().split())
+        if not wa:
+            return 0.0
+        return len(wa & wb) / len(wa)
+    
     def add_rule(self, rule: str):
-        """Добавить выученное правило"""
-        if rule not in self.learned_rules:
-            self.learned_rules.append(rule)
+        """Добавить выученное правило (отклоняем только при >85% совпадении по словам)."""
+        rule = (rule or '').strip()
+        if not rule:
+            return
+        if rule in self.learned_rules:
+            logger.debug("[AI_MEMORY] Rule rejected as exact duplicate")
+            return
+        for existing in self.learned_rules[-500:]:
+            if self._rule_similarity(rule, existing) > 0.85:
+                logger.debug(f"[AI_MEMORY] Rule rejected as similar to existing: {rule[:60]}...")
+                return
+        self.learned_rules.append(rule)
     
     def get_symbol_context(self, symbol: str) -> str:
         """Получить контекст знаний о символе"""
@@ -643,7 +661,7 @@ class DeepSeekAnalyzer:
     "lessons_learned": ["урок1", "урок2"],
     "recommendations": ["рекомендация1"],
     "confidence_score": 0.0-1.0,
-    "new_rule": "одно конкретное правило для запоминания или пустая строка"
+    "new_rule": "одно КОНКРЕТНОЕ правило для запоминания: обязательно укажи символ, направление (LONG/SHORT), режим рынка или время — не давай общих фраз. Или пустая строка если нового правила нет."
 }"""
 
             user_prompt = f"""Проанализируй эту сделку:
@@ -734,8 +752,10 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
             if analysis_data.get('new_rule'):
                 self.memory.add_rule(analysis_data['new_rule'])
             
-            # Добавляем в recent_analyses (с лимитом 100)
-            self.memory.recent_analyses.append(asdict(analysis))
+            # Добавляем в recent_analyses с временем закрытия сделки
+            analysis_dict = asdict(analysis)
+            analysis_dict['timestamp'] = trade.get('closed_at') or datetime.now().isoformat()
+            self.memory.recent_analyses.append(analysis_dict)
             if len(self.memory.recent_analyses) > 100:
                 self.memory.recent_analyses = self.memory.recent_analyses[-100:]
             
@@ -795,7 +815,7 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
 3. Рынок и новости (20%): корреляция с BTC, funding rate, open interest, последние новости
 4. Риск (15%): волатильность, зона входа, динамический SL/TP на основе ATR
 
-Учитывай похожие исторические сетапы: если по символу/направлению были убытки в таком же режиме — снижай уверенность. Указывай оптимальную зону входа и предложения по SL/TP в процентах если нужно скорректировать.
+Учитывай похожие исторические сетапы: если по символу/направлению были убытки в таком же режиме — снижай уверенность. Указывай оптимальную зону входа и предложения по SL/TP в процентах если нужно скорректировать. Учитывай BOB index (1-10: Bearish/Neutral/Bullish) из рыночных данных — при расхождении направления сделки с BOB снижай уверенность.
 
 Формат ответа (JSON):
 {
@@ -1161,35 +1181,34 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             top_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1], reverse=True)[:5]
             worst_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1])[:5]
             
-            system_prompt = """Ты - трейдинг-коуч. Проанализируй дневную торговую сессию и дай ценные инсайты.
+            system_prompt = """Ты - трейдинг-коуч. Сформируй дневное саммари для команды.
 
-Формат ответа:
-1. Краткий обзор дня
-2. Что работало хорошо
-3. Что нужно улучшить
-4. Конкретные рекомендации на завтра
-5. Новые правила для запоминания"""
+Включи в ответ:
+1. Что за сегодня узнало ИИ: новые правила, паттерны, выводы из сделок.
+2. Сделки за день: количество, выигрыши/проигрыши, как меняется стиль торговли.
+3. Рост и динамика: PnL за день, сравнение с предыдущими днями по тону.
+4. Конкретные рекомендации на завтра и новые правила для запоминания."""
 
-            user_prompt = f"""Анализ торговой сессии:
+            wr_pct = (wins / total_trades * 100) if total_trades else 0
+            user_prompt = f"""Дневное саммари (сегодня):
 
-=== СТАТИСТИКА ===
-Всего сделок: {total_trades}
-Прибыльных: {wins} ({wins/total_trades*100:.1f}% WR)
-Общий PnL: ${total_pnl:.2f}
+=== СТАТИСТИКА ДНЯ ===
+Сделок: {total_trades} | Прибыльных: {wins} | Win rate: {wr_pct:.1f}%
+Общий PnL за день: ${total_pnl:.2f}
 
 === ЛУЧШИЕ СИМВОЛЫ ===
-{chr(10).join(f'{s}: ${p:.2f}' for s, p in top_symbols)}
+{chr(10).join(f'{s}: ${p:.2f}' for s, p in top_symbols) if top_symbols else 'Нет'}
 
 === ХУДШИЕ СИМВОЛЫ ===
-{chr(10).join(f'{s}: ${p:.2f}' for s, p in worst_symbols)}
+{chr(10).join(f'{s}: ${p:.2f}' for s, p in worst_symbols) if worst_symbols else 'Нет'}
 
 === НОВОСТИ ДНЯ ===
-{chr(10).join(n.get('title', '')[:60] for n in news[:10])}
+{chr(10).join(n.get('title', '')[:60] for n in news[:10]) if news else 'Нет'}
 
 === ВЫУЧЕННЫЕ ПРАВИЛА (всего: {len(self.memory.learned_rules)}) ===
 {chr(10).join(self.memory.learned_rules[-10:])}
 
-Дай анализ и рекомендации."""
+Опиши: что ИИ узнало сегодня, как мы растем, как меняется стиль торговли. Дай рекомендации."""
 
             messages = [
                 {"role": "system", "content": system_prompt},

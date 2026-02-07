@@ -1946,6 +1946,65 @@ class NewsAnalyzer:
         """Получить текущий рыночный сентимент"""
         return self.market_sentiment.copy()
     
+    async def calculate_bob_index(self, btc_rsi: Optional[float] = None, 
+                                  btc_trend: Optional[str] = None, 
+                                  funding_rate: Optional[float] = None) -> Dict[str, Any]:
+        """
+        BOB index (Bearish or Bullish) 1-10.
+        Weights: news 40%, BTC trend 30%, RSI 20%, funding 10%.
+        Scale: 1-3 Bearish, 4-6 Neutral, 7-10 Bullish.
+        """
+        factors = {}
+        # News sentiment: -100..100 -> 1..10
+        sentiment = self.get_market_sentiment()
+        score = sentiment.get('score', 0)
+        news_1_10 = max(1, min(10, (score + 100) / 200 * 9 + 1))
+        factors['news'] = round(news_1_10, 1)
+        
+        # BTC trend: optional
+        if btc_trend and isinstance(btc_trend, str):
+            t = btc_trend.upper()
+            btc_1_10 = 8 if 'BULL' in t or t == 'UP' else (2 if 'BEAR' in t or t == 'DOWN' else 5)
+        else:
+            btc_1_10 = 5.0
+        factors['btc_trend'] = btc_1_10
+        
+        # RSI: 0-100 -> 1-10
+        if btc_rsi is not None:
+            rsi_1_10 = max(1, min(10, (btc_rsi / 100) * 9 + 1))
+        else:
+            rsi_1_10 = 5.0
+        factors['rsi'] = round(rsi_1_10, 1)
+        
+        # Funding: positive = longs pay = bearish -> low value
+        if funding_rate is not None:
+            funding_1_10 = max(1, min(10, 5.5 - funding_rate * 100))
+        else:
+            try:
+                funding_data = await self.fetch_coinglass_funding()
+                btc_funding = None
+                for item in funding_data.get('extreme_long', []) + funding_data.get('extreme_short', []) + funding_data.get('neutral', []):
+                    if isinstance(item, dict) and item.get('symbol') == 'BTC':
+                        btc_funding = float(item.get('rate', 0) or 0)
+                        break
+                if btc_funding is not None:
+                    funding_1_10 = max(1, min(10, 5.5 - btc_funding * 100))
+                else:
+                    funding_1_10 = 5.0
+            except Exception:
+                funding_1_10 = 5.0
+        factors['funding'] = round(funding_1_10, 1)
+        
+        value = 0.4 * news_1_10 + 0.3 * btc_1_10 + 0.2 * rsi_1_10 + 0.1 * funding_1_10
+        value = max(1, min(10, round(value, 1)))
+        if value <= 3:
+            label = 'BEARISH'
+        elif value >= 7:
+            label = 'BULLISH'
+        else:
+            label = 'NEUTRAL'
+        return {'value': value, 'label': label, 'factors': factors}
+    
     # ==================== MANIPULATION DETECTION ====================
     
     async def detect_manipulation_news(self) -> List[Dict]:

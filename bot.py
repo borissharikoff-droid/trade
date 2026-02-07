@@ -750,7 +750,8 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
                 'pnl': pnl,
                 'reason': reason,
                 'amount': pos['amount'],
-                'duration': f"{holding_minutes:.0f}min" if holding_minutes else "N/A"
+                'duration': f"{holding_minutes:.0f}min" if holding_minutes else "N/A",
+                'closed_at': closed_at
             }
             # Fire and forget - не блокируем основной поток
             asyncio.create_task(_ai_analyze_trade_background(trade_data))
@@ -763,7 +764,9 @@ async def _ai_analyze_trade_background(trade_data: Dict):
     try:
         if not AI_FEATURES:
             return
-        
+        # Пропускаем анализ при нулевом PnL (часто неполные данные)
+        if float(trade_data.get('pnl', 0)) == 0:
+            return
         analysis = await ai_analyze_trade(trade_data)
         if analysis:
             # Логируем ключевые инсайты
@@ -2268,6 +2271,7 @@ async def add_commission(amount: float, user_id: Optional[int] = None, bot=None)
         bot: Telegram bot instance для отправки уведомлений (опционально)
     """
     global pending_commission
+    added_this_call = 0.0  # сколько в этой сделке пошло в pending (админу)
     
     # Распределяем комиссию между рефералами и админом
     if user_id:
@@ -2280,8 +2284,12 @@ async def add_commission(amount: float, user_id: Optional[int] = None, bot=None)
         # Добавить логирование и проверку
         if not referrer_chain:
             logger.info(f"[REF_COMMISSION] No referrer chain for user {user_id}, all commission (${amount:.4f}) to admin")
+            added_this_call = amount
             pending_commission += amount
             save_pending_commission()
+            logger.info(f"[COMMISSION] Commission accrued: ${added_this_call:.2f}, total pending: ${pending_commission:.2f}")
+            if pending_commission >= COMMISSION_WITHDRAW_THRESHOLD and ADMIN_CRYPTO_ID:
+                await withdraw_commission()
             return
         
         logger.info(f"[REF_COMMISSION] Chain for user {user_id}: {referrer_chain}")
@@ -2323,16 +2331,17 @@ async def add_commission(amount: float, user_id: Optional[int] = None, bot=None)
         
         # Остаток идет админу
         admin_commission = amount - total_referral_share
+        added_this_call = admin_commission
         pending_commission += admin_commission
         logger.info(f"[COMMISSION] Total: ${amount:.2f}, Referrals: ${total_referral_share:.2f}, Admin: ${admin_commission:.2f}")
     else:
         # Если user_id не указан - вся комиссия идет админу (старый режим)
+        added_this_call = amount
         pending_commission += amount
         logger.info(f"[COMMISSION] +${amount:.2f} (no user_id, all to admin)")
     
     save_pending_commission()  # Persist to DB
-    
-    logger.info(f"[COMMISSION] Накоплено: ${pending_commission:.2f}")
+    logger.info(f"[COMMISSION] Commission accrued: ${added_this_call:.2f}, total pending: ${pending_commission:.2f}")
     
     # Авто-вывод при достижении порога
     if pending_commission >= COMMISSION_WITHDRAW_THRESHOLD and ADMIN_CRYPTO_ID:
@@ -2787,7 +2796,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         keyboard = [
             [InlineKeyboardButton(f"{'🔴 ВЫКЛ' if is_trading else '🟢 ВКЛ'}", callback_data="toggle"),
              InlineKeyboardButton(f"🤖 {'✅' if is_auto else '❌'} Авто", callback_data="auto_trade_menu")],
-            [InlineKeyboardButton("💳 Пополнить", callback_data="deposit"),
+            [InlineKeyboardButton("💰 Баланс", callback_data="deposit"),
              InlineKeyboardButton("📋 Сделки", callback_data="trades")],
             [InlineKeyboardButton("🔧 Дополнительно", callback_data="more_menu")]
         ]
@@ -2851,14 +2860,25 @@ async def deposit_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         
         user = get_user(user_id)
         balance = user['balance']
+        user_positions = get_positions(user_id)
+        total_in_positions = sum(p.get('amount', 0) or 0 for p in user_positions)
+        available = balance - total_in_positions
         
-        text = f"""Минимум: ${MIN_DEPOSIT}
-
-💰 Баланс: <b>${balance:.2f}</b>"""
+        text = (
+            f"🌀 <b>YULA</b>\n\n"
+            f"💰 Баланс\n"
+            f"└ ${balance:.2f}\n\n"
+            f"Пополнить\n"
+            f"├ Telegram Stars\n"
+            f"└ Crypto (USDT/TON)\n\n"
+            f"Вывод\n"
+            f"└ Доступно: ${available:.2f}"
+        )
         
         keyboard = [
-            [InlineKeyboardButton("⭐ Telegram Stars", callback_data="pay_stars")],
-            [InlineKeyboardButton("💎 Crypto (USDT/TON)", callback_data="pay_crypto")],
+            [InlineKeyboardButton("⭐ Stars", callback_data="pay_stars"),
+             InlineKeyboardButton("💎 Crypto", callback_data="pay_crypto")],
+            [InlineKeyboardButton("💸 Вывод", callback_data="withdraw_menu")],
             [InlineKeyboardButton("🔙 Назад", callback_data="back")]
         ]
         
@@ -3498,7 +3518,7 @@ async def withdraw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
          InlineKeyboardButton("$250", callback_data="withdraw_250"),
          InlineKeyboardButton("Всё", callback_data="withdraw_all")],
         [InlineKeyboardButton("💵 Своя сумма", callback_data="withdraw_custom")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]
+        [InlineKeyboardButton("🔙 Назад", callback_data="deposit")]
     ]
     
     await edit_or_send(query, text, InlineKeyboardMarkup(keyboard))
@@ -3567,7 +3587,7 @@ async def handle_withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await edit_or_send(
                 query,
                 "<b>❌ Ошибка</b>\n\nНе удалось обработать запрос на вывод.",
-                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="more_menu")]])
+                InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Назад", callback_data="deposit")]])
             )
         except:
             pass
@@ -5611,8 +5631,14 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                             'quality': setup.quality if hasattr(setup, 'quality') else 'UNKNOWN',
                             'provider_winrate': confidence_percent
                         }
+                        market_data = {'market_regime': getattr(getattr(setup, 'market_regime', None), 'name', None)}
+                        try:
+                            bob = await news_analyzer.calculate_bob_index()
+                            market_data['bob_index'] = bob
+                        except Exception:
+                            pass
                         ai_decision = await asyncio.wait_for(
-                            ai_should_take_signal(signal_data),
+                            ai_should_take_signal(signal_data, market_data),
                             timeout=5.0
                         )
                         
@@ -8517,6 +8543,7 @@ async def commission_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 ├ Баланс: {crypto_balance}
 ├ Admin ID: <code>{ADMIN_CRYPTO_ID or '❌ Не настроен'}</code>
 └ Testnet: {'Да' if testnet else 'Нет'}
+{"⚠️ Автовывод комиссий не работает: задайте ADMIN_CRYPTO_ID в .env" if not ADMIN_CRYPTO_ID else ""}
 
 💡 Комиссия {COMMISSION_PERCENT}% взимается при открытии сделки и накапливается до порога, затем автовыводится."""
     
@@ -8648,7 +8675,8 @@ async def refresh_commission_callback(update: Update, context: ContextTypes.DEFA
 ⏳ Накоплено: <b>${pending_commission:.2f}</b>
 🎯 Порог: ${COMMISSION_WITHDRAW_THRESHOLD}
 
-CryptoBot: {crypto_balance} | ID: <code>{ADMIN_CRYPTO_ID or '—'}</code>"""
+CryptoBot: {crypto_balance} | ID: <code>{ADMIN_CRYPTO_ID or '❌ Не настроен'}</code>
+{"⚠️ Задайте ADMIN_CRYPTO_ID в .env для автовывода" if not ADMIN_CRYPTO_ID else ""}"""
     
     keyboard = []
     if pending_commission >= 1:
@@ -10629,7 +10657,6 @@ async def more_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [InlineKeyboardButton("🤝 Рефералка", callback_data="referral_menu")],
         [InlineKeyboardButton("📜 История", callback_data="history_menu")],
-        [InlineKeyboardButton("💸 Вывод", callback_data="withdraw_menu")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back")]
     ]
     
@@ -11091,13 +11118,34 @@ def main() -> None:
             
             app.job_queue.run_once(init_ai_job, when=5)  # Через 5 секунд после старта
             
-            # Daily AI Insights - ОТКЛЮЧЕНО по запросу пользователя
-            # Можно вызвать вручную через /ai insights
-            # async def ai_daily_insights_job(context):
-            #     """Generate daily AI insights"""
-            #     ...
-            # app.job_queue.run_repeating(ai_daily_insights_job, interval=86400, first=3600)
-            logger.info("[AI] Daily insights job DISABLED (можно вызвать вручную: /ai insights)")
+            # Daily Summary at 12:00 MSK (09:00 UTC)
+            async def ai_daily_summary_job(context):
+                """Generate daily summary: what AI learned, trades, growth, style. Runs 12:00 MSK."""
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    now = datetime.now(timezone.utc)
+                    since = (now - timedelta(hours=24)).isoformat()
+                    if USE_POSTGRES:
+                        rows = run_sql(
+                            "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= %s",
+                            (since,), fetch="all"
+                        )
+                    else:
+                        rows = run_sql(
+                            "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= ?",
+                            (since,), fetch="all"
+                        )
+                    trades = [dict(r) for r in (rows or [])]
+                    news = []
+                    if NEWS_FEATURES and news_analyzer and getattr(news_analyzer, 'recent_events', None):
+                        news = [{'title': getattr(e, 'title', str(e)[:80])} for e in list(news_analyzer.recent_events)[-20:]]
+                    summary = await ai_daily_insights(trades, news)
+                    logger.info(f"[AI] Daily summary generated: {len(trades)} trades, summary length {len(summary or '')}")
+                except Exception as e:
+                    logger.error(f"[AI] Daily summary job error: {e}", exc_info=True)
+            from datetime import time as dt_time
+            app.job_queue.run_daily(ai_daily_summary_job, time=dt_time(9, 0, 0))
+            logger.info("[AI] Daily summary job enabled (12:00 MSK)")
         
         # === LEARNING ANALYTICS JOB ===
         try:

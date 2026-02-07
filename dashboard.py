@@ -1377,6 +1377,7 @@ def api_news():
         return jsonify({
             'news': [],
             'sentiment': {'score': 0, 'trend': 'NEUTRAL'},
+            'bob_index': {'value': 5, 'label': 'NEUTRAL', 'factors': {}},
             'error': 'News analyzer not connected',
             'timestamp': to_moscow_time()
         })
@@ -1387,6 +1388,7 @@ def api_news():
             return jsonify({
                 'news': [],
                 'sentiment': {'score': 0, 'trend': 'NEUTRAL'},
+                'bob_index': {'value': 5, 'label': 'NEUTRAL', 'factors': {}},
                 'error': 'News events not available',
                 'timestamp': to_moscow_time()
             })
@@ -1415,6 +1417,14 @@ def api_news():
         # Get market sentiment
         sentiment = _news_analyzer.get_market_sentiment()
         
+        # BOB index (Bearish or Bullish 1-10)
+        try:
+            import asyncio
+            bob_index = asyncio.run(_news_analyzer.calculate_bob_index())
+        except Exception as e:
+            logger.debug(f"[DASHBOARD] BOB index error: {e}")
+            bob_index = {'value': 5, 'label': 'NEUTRAL', 'factors': {}}
+        
         return jsonify({
             'news': news_list,
             'count': len(news_list),
@@ -1423,6 +1433,7 @@ def api_news():
                 'trend': sentiment.get('trend', 'NEUTRAL'),
                 'last_update': sentiment.get('last_update').isoformat() if sentiment.get('last_update') else None
             },
+            'bob_index': bob_index,
             'timestamp': to_moscow_time()
         })
     except Exception as e:
@@ -1430,6 +1441,7 @@ def api_news():
         return jsonify({
             'news': [],
             'sentiment': {'score': 0, 'trend': 'NEUTRAL'},
+            'bob_index': {'value': 5, 'label': 'NEUTRAL', 'factors': {}},
             'error': str(e),
             'timestamp': to_moscow_time()
         })
@@ -1459,8 +1471,8 @@ def api_ai():
         recent_analyses = list(analyzer.recent_analyses)[-20:]
         recent_analyses.reverse()
         
-        # Get learned rules (last 50)
-        learned_rules = memory.learned_rules[-50:]
+        # Get learned rules (last 200 for dashboard visibility)
+        learned_rules = memory.learned_rules[-200:]
         learned_rules.reverse()
         
         # Get market insights (last 30)
