@@ -1748,10 +1748,10 @@
                         <!-- Recent Trade Analyses -->
                         <div class="panel">
                             <div class="panel-header">
-                                <span class="panel-title"><span class="panel-title-icon">🔬</span> Recent Trade Analyses</span>
+                                <span class="panel-title"><span class="panel-title-icon">🔬</span> Trade Analyses</span>
                                 <span class="panel-badge" id="aiAnalysesCount">0</span>
                             </div>
-                            <div class="panel-content" id="aiAnalysesList" style="max-height: 400px; overflow-y: auto;">
+                            <div class="panel-content" id="aiAnalysesList" style="max-height: 500px; overflow-y: auto;">
                                 <div class="no-data">No analyses yet</div>
                             </div>
                         </div>
@@ -1762,7 +1762,7 @@
                                 <span class="panel-title"><span class="panel-title-icon">🧠</span> Learned Rules</span>
                                 <span class="panel-badge" id="aiRulesCount">0</span>
                             </div>
-                            <div class="panel-content" id="aiRulesList" style="max-height: 400px; overflow-y: auto;">
+                            <div class="panel-content" id="aiRulesList" style="max-height: 500px; overflow-y: auto;">
                                 <div class="no-data">No rules learned yet</div>
                             </div>
                         </div>
@@ -2618,7 +2618,10 @@
         
         function renderAIAnalyses(analyses) {
             const container = document.getElementById('aiAnalysesList');
-            document.getElementById('aiAnalysesCount').textContent = analyses.length;
+            const totalCount = aiData?.total_analyses_count || analyses.length;
+            document.getElementById('aiAnalysesCount').textContent = totalCount > analyses.length 
+                ? `last ${analyses.length} of ${totalCount}` 
+                : analyses.length;
             
             if (!analyses || analyses.length === 0) {
                 container.innerHTML = '<div class="no-data">No trade analyses yet. AI will analyze each closed trade.</div>';
@@ -2630,38 +2633,26 @@
                 const isWin = a.is_win;
                 const pnlClass = isWin ? 'pnl-positive' : 'pnl-negative';
                 const icon = isWin ? '✅' : '❌';
+                const timeStr = a.timestamp ? formatTimeAgo(a.timestamp) : '';
                 
-                html += `<div class="analysis-item" style="padding: 12px; background: var(--bg-card); border-radius: 8px; margin-bottom: 8px; border-left: 3px solid ${isWin ? 'var(--positive)' : 'var(--negative)'};">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="font-weight: 600; color: var(--accent);">${icon} ${a.symbol}</span>
-                        <span class="${pnlClass}" style="font-family: 'JetBrains Mono', monospace;">${formatPnl(a.pnl)}</span>
+                // Compact card
+                html += `<div style="padding: 10px 12px; background: var(--bg-card); border-radius: 8px; margin-bottom: 6px; border-left: 3px solid ${isWin ? 'var(--positive)' : 'var(--negative)'};">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                        <span style="font-weight: 600; color: var(--accent); font-size: 0.85rem;">${icon} ${a.symbol} <span style="font-weight:400;color:var(--text-muted);font-size:0.72rem;">${a.direction}</span></span>
+                        <span class="${pnlClass}" style="font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;">${formatPnl(a.pnl)}</span>
                     </div>
-                    <div style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 6px;">
-                        ${a.direction} | Entry: $${a.entry_price?.toFixed(4) || '?'} → Exit: $${a.exit_price?.toFixed(4) || '?'}
+                    <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 4px;">
+                        <span>$${a.entry_price?.toFixed(4) || '?'} → $${a.exit_price?.toFixed(4) || '?'}</span>
+                        <span>${timeStr}</span>
                     </div>
-                    <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 6px;">
-                        ${a.timestamp ? (typeof formatTimeAgo === 'function' ? formatTimeAgo(a.timestamp) : new Date(a.timestamp).toLocaleString()) : ''}
-                    </div>
-                    <div style="display: flex; gap: 8px; margin-bottom: 6px;">
-                        <span class="badge" style="background: var(--accent-bg); color: var(--accent);">Entry: ${a.entry_quality}/10</span>
-                        <span class="badge" style="background: var(--accent-bg); color: var(--accent);">Exit: ${a.exit_quality}/10</span>
+                    <div style="display: flex; gap: 6px; margin-bottom: 4px;">
+                        <span class="badge" style="background: var(--accent-bg); color: var(--accent); font-size: 0.65rem;">Entry: ${a.entry_quality}/10</span>
+                        <span class="badge" style="background: var(--accent-bg); color: var(--accent); font-size: 0.65rem;">Exit: ${a.exit_quality}/10</span>
                     </div>`;
                 
                 if (a.lessons_learned && a.lessons_learned.length > 0) {
-                    html += `<div style="font-size: 0.75rem; margin-top: 6px;">
-                        <strong style="color: var(--warning);">📚 Lessons:</strong>
-                        <ul style="margin: 4px 0 0 16px; color: var(--text-secondary);">
-                            ${a.lessons_learned.slice(0, 2).map(l => `<li>${escapeHtml(l)}</li>`).join('')}
-                        </ul>
-                    </div>`;
-                }
-                
-                if (a.recommendations && a.recommendations.length > 0) {
-                    html += `<div style="font-size: 0.75rem; margin-top: 6px;">
-                        <strong style="color: var(--info);">💡 Recommendations:</strong>
-                        <ul style="margin: 4px 0 0 16px; color: var(--text-secondary);">
-                            ${a.recommendations.slice(0, 2).map(r => `<li>${escapeHtml(r)}</li>`).join('')}
-                        </ul>
+                    html += `<div style="font-size: 0.72rem; margin-top: 4px; color: var(--text-secondary);">
+                        <strong style="color: var(--warning);">📚</strong> ${escapeHtml(a.lessons_learned[0])}
                     </div>`;
                 }
                 
@@ -2672,7 +2663,10 @@
         
         function renderAIRules(rules) {
             const container = document.getElementById('aiRulesList');
-            document.getElementById('aiRulesCount').textContent = rules.length;
+            const totalCount = aiData?.total_rules_count || rules.length;
+            document.getElementById('aiRulesCount').textContent = totalCount > rules.length 
+                ? `last ${rules.length} of ${totalCount}` 
+                : rules.length;
             
             if (!rules || rules.length === 0) {
                 container.innerHTML = '<div class="no-data">AI is learning rules from each trade. Rules will appear here.</div>';
@@ -2684,12 +2678,18 @@
                 const rule = rules[i];
                 const isNewsRule = rule.startsWith('[NEWS]');
                 const icon = isNewsRule ? '📰' : '📊';
-                const bgColor = isNewsRule ? 'rgba(168, 85, 247, 0.1)' : 'var(--bg-card)';
+                const bgColor = isNewsRule ? 'rgba(168, 85, 247, 0.06)' : 'var(--bg-card)';
                 const borderColor = isNewsRule ? 'var(--purple)' : 'var(--accent)';
                 
-                html += `<div style="padding: 10px 12px; background: ${bgColor}; border-radius: 6px; margin-bottom: 6px; border-left: 2px solid ${borderColor}; font-size: 0.85rem;">
-                    <span style="margin-right: 6px;">${icon}</span>
-                    <span style="color: var(--text-primary);">${escapeHtml(rule.replace('[NEWS] ', ''))}</span>
+                // Truncate long rules to 150 chars for readability
+                let ruleText = rule.replace('[NEWS] ', '');
+                const isTruncated = ruleText.length > 150;
+                const shortText = isTruncated ? ruleText.slice(0, 150) + '...' : ruleText;
+                
+                html += `<div style="padding: 8px 10px; background: ${bgColor}; border-radius: 6px; margin-bottom: 4px; border-left: 2px solid ${borderColor}; font-size: 0.78rem; line-height: 1.4; cursor: ${isTruncated ? 'pointer' : 'default'};" ${isTruncated ? `onclick="this.querySelector('.rule-full').style.display = this.querySelector('.rule-full').style.display === 'none' ? 'block' : 'none'; this.querySelector('.rule-short').style.display = this.querySelector('.rule-short').style.display === 'none' ? 'block' : 'none';"` : ''}>
+                    <span style="margin-right: 4px;">${icon}</span>
+                    <span class="rule-short" style="color: var(--text-primary);">${escapeHtml(shortText)}</span>
+                    ${isTruncated ? `<span class="rule-full" style="color: var(--text-primary); display: none;">${escapeHtml(ruleText)}</span>` : ''}
                 </div>`;
             }
             container.innerHTML = html;

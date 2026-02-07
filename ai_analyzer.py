@@ -659,10 +659,10 @@ class DeepSeekAnalyzer:
     "market_alignment_score": 1-10,
     "entry_quality": 1-10,
     "exit_quality": 1-10,
-    "lessons_learned": ["урок1", "урок2"],
-    "recommendations": ["рекомендация1"],
+    "lessons_learned": ["короткий урок (макс 80 символов)", "ещё один"],
+    "recommendations": ["краткая рекомендация (макс 80 символов)"],
     "confidence_score": 0.0-1.0,
-    "new_rule": "одно КОНКРЕТНОЕ правило для запоминания: обязательно укажи символ, направление (LONG/SHORT), режим рынка или время — не давай общих фраз. Или пустая строка если нового правила нет."
+    "new_rule": "КОРОТКОЕ правило (макс 100 символов). Формат: СИМВОЛ + УСЛОВИЕ → ДЕЙСТВИЕ. Пример: 'WLD LONG в RANGING → убыток если нет divergence'. Без длинных объяснений. Пустая строка если нечего нового."
 }"""
 
             user_prompt = f"""Проанализируй эту сделку:
@@ -947,7 +947,7 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
 {
     "patterns_identified": ["паттерн1", "паттерн2"],
     "why_this_impact": "почему новость повлияла так",
-    "future_prediction_rule": "правило для похожих новостей",
+    "future_prediction_rule": "КОРОТКОЕ правило (макс 100 символов). Формат: СОБЫТИЕ → РЕАКЦИЯ. Пример: 'Fed rate hold → BTC нейтрально, altcoins -2%'",
     "confidence_in_pattern": 0.0-1.0,
     "category": "regulatory/partnership/technical/market/other"
 }"""

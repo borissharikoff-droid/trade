@@ -1588,8 +1588,9 @@ def api_ai():
         stats = get_ai_stats()
         memory = analyzer.memory
         
-        # Get recent trade analyses
-        recent_analyses = list(analyzer.recent_analyses)[-20:]
+        # Get recent trade analyses (last 50 shown, total count tracked)
+        total_analyses_count = len(analyzer.recent_analyses)
+        recent_analyses = list(analyzer.recent_analyses)[-50:]
         recent_analyses.reverse()
         
         # Aggregate win/loss factors (fundamental market reasons) from AI analyses
@@ -1611,8 +1612,9 @@ def api_ai():
         win_factors_sorted = dict(sorted(win_factors_agg.items(), key=lambda x: x[1], reverse=True)[:10])
         loss_factors_sorted = dict(sorted(loss_factors_agg.items(), key=lambda x: x[1], reverse=True)[:10])
         
-        # Get learned rules (last 200 for dashboard visibility)
-        learned_rules = memory.learned_rules[-200:]
+        # Get learned rules (last 50 shown, total count tracked)
+        total_rules_count = len(memory.learned_rules)
+        learned_rules = memory.learned_rules[-50:]
         learned_rules.reverse()
         
         # Get market insights (last 30)
@@ -1694,7 +1696,9 @@ def api_ai():
                 'today_rules_count': today_rules_count
             },
             'recent_analyses': recent_analyses,
+            'total_analyses_count': total_analyses_count,
             'learned_rules': learned_rules,
+            'total_rules_count': total_rules_count,
             'insights': insights,
             'pattern_summary': pattern_summary,
             'news_patterns': news_patterns,
