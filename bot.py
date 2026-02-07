@@ -5607,6 +5607,16 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     loss_streak=loss_streak
                 )
                 
+                # Apply drawdown/streak position size multiplier
+                try:
+                    state_mult = smart.state.get_position_size_multiplier(auto_balance)
+                    if state_mult < 1.0:
+                        old_bet = auto_bet
+                        auto_bet = auto_bet * state_mult
+                        logger.info(f"[AUTO_TRADE] User {auto_user_id}: size multiplier {state_mult:.2f} (${old_bet:.2f} -> ${auto_bet:.2f})")
+                except Exception:
+                    pass
+                
                 # Проверяем резерв баланса
                 if auto_balance - auto_bet < MIN_BALANCE_RESERVE:
                     auto_bet = max(0, auto_balance - MIN_BALANCE_RESERVE)
@@ -7672,7 +7682,10 @@ Bybit синхронизация
                                     pos['entry'],
                                     pos['direction'],
                                     atr,
-                                    pos['sl']
+                                    pos['sl'],
+                                    tp1=pos.get('tp1'),
+                                    tp2=pos.get('tp2'),
+                                    tp3=pos.get('tp3')
                                 )
                             
                             # Обновляем трейлинг-стоп

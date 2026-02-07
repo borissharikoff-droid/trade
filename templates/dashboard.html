@@ -1329,51 +1329,25 @@
                         </div>
                     </div>
                     
-                    <!-- Signal Analysis -->
-                    <div class="section-title"><span class="section-icon">🤖</span> Signal Analysis</div>
-                    <div class="stats-grid">
-                        <div class="stat-card highlight-info">
-                            <div class="stat-label"><span class="stat-label-icon">🔍</span> Analyzed</div>
-                            <div class="stat-value info" id="analyzed">-</div>
-                        </div>
-                        <div class="stat-card highlight">
-                            <div class="stat-label"><span class="stat-label-icon">✅</span> Valid Setups</div>
-                            <div class="stat-value positive" id="validSetups">-</div>
-                            <div class="stat-sub" id="validSetupsPct">-</div>
-                        </div>
-                        <div class="stat-card highlight-warning">
-                            <div class="stat-label"><span class="stat-label-icon">❌</span> Rejected</div>
-                            <div class="stat-value warning" id="rejected">-</div>
-                            <div class="stat-sub" id="rejectedPct">-</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label"><span class="stat-label-icon">📤</span> Sent to Users</div>
-                            <div class="stat-value sm info" id="accepted">-</div>
-                        </div>
-                        <div class="stat-card highlight-purple">
-                            <div class="stat-label"><span class="stat-label-icon">📡</span> On Bybit</div>
-                            <div class="stat-value purple" id="bybitOpened">-</div>
-                        </div>
-                    </div>
-                    
-                    <!-- Trading Results -->
-                    <div class="section-title"><span class="section-icon">📈</span> Trading Results</div>
-                    <div class="stats-grid">
+                    <!-- Trading Performance (merged Signal Analysis + Trading Results + Records) -->
+                    <div class="section-title"><span class="section-icon">📈</span> Trading Performance</div>
+                    <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr);">
                         <div class="stat-card highlight">
                             <div class="stat-label"><span class="stat-label-icon">🏆</span> Win Rate</div>
                             <div class="stat-value" id="winRate">-</div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-label"><span class="stat-label-icon">✅</span> Profitable</div>
-                            <div class="stat-value positive" id="profitable">-</div>
+                            <div class="stat-label"><span class="stat-label-icon">✅</span> Wins / Losses</div>
+                            <div class="stat-value xs">
+                                <span class="pnl-positive" id="profitable">-</span>
+                                <span style="color: var(--text-muted);"> / </span>
+                                <span class="pnl-negative" id="losing">-</span>
+                            </div>
+                            <div class="stat-sub" id="totalClosed">- closed</div>
                         </div>
                         <div class="stat-card">
-                            <div class="stat-label"><span class="stat-label-icon">❌</span> Losing</div>
-                            <div class="stat-value negative" id="losing">-</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label"><span class="stat-label-icon">📊</span> Total Closed</div>
-                            <div class="stat-value" id="totalClosed">-</div>
+                            <div class="stat-label"><span class="stat-label-icon">📊</span> Profit Factor</div>
+                            <div class="stat-value sm" id="profitFactor">-</div>
                         </div>
                         <div class="stat-card">
                             <div class="stat-label"><span class="stat-label-icon">💵</span> Avg Win / Loss</div>
@@ -1383,15 +1357,9 @@
                                 <span class="pnl-negative" id="avgLoss">-</span>
                             </div>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label"><span class="stat-label-icon">💎</span> Volume</div>
-                            <div class="stat-value sm" id="totalVolume">-</div>
-                        </div>
                     </div>
-                    
-                    <!-- Records -->
-                    <div class="section-title"><span class="section-icon">🏅</span> Records</div>
-                    <div class="stats-grid" style="grid-template-columns: repeat(2, 1fr);">
+
+                    <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr); margin-top: 8px;">
                         <div class="stat-card">
                             <div class="stat-label"><span class="stat-label-icon">🚀</span> Best Trade</div>
                             <div class="stat-value sm positive" id="bestTrade">-</div>
@@ -1402,7 +1370,18 @@
                             <div class="stat-value sm negative" id="worstTrade">-</div>
                             <div class="stat-sub" id="worstTradeInfo">-</div>
                         </div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">💎</span> Volume</div>
+                            <div class="stat-value sm" id="totalVolume">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label"><span class="stat-label-icon">🤖</span> Signals</div>
+                            <div class="stat-value xs info" id="analyzed">-</div>
+                            <div class="stat-sub"><span id="validSetups">-</span> valid · <span id="rejected">-</span> rejected · <span id="accepted">-</span> sent · <span id="bybitOpened">-</span> bybit</div>
+                        </div>
                     </div>
+                    <div style="display: none;" id="validSetupsPct"></div>
+                    <div style="display: none;" id="rejectedPct"></div>
                     
                     <!-- Reasons Analysis -->
                     <div class="section-title"><span class="section-icon">📋</span> Reasons Analysis</div>
@@ -1684,6 +1663,21 @@
                 <!-- AI Brain Tab -->
                 <div id="tab-ai" class="tab-content">
                     
+                    <!-- Daily Summary (TOP - most important) -->
+                    <div class="panel" style="margin-bottom: 16px; border: 1px solid var(--accent); border-radius: 12px;">
+                        <div class="panel-header" style="background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(139,92,246,0.05));">
+                            <span class="panel-title"><span class="panel-title-icon">📋</span> Daily Summary</span>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <span class="panel-badge" id="aiInsightsCount">0</span>
+                                <button class="btn" onclick="generateReport('yesterday')" id="btnGenReport" style="font-size: 0.7rem; padding: 4px 10px;">Generate Yesterday</button>
+                                <button class="btn" onclick="generateReport('today')" style="font-size: 0.7rem; padding: 4px 10px;">Today</button>
+                            </div>
+                        </div>
+                        <div class="panel-content" id="aiInsightsList" style="max-height: 500px; overflow-y: auto;">
+                            <div class="no-data">No insights generated yet. Click "Generate Yesterday" to create a report.</div>
+                        </div>
+                    </div>
+
                     <!-- AI Status Header -->
                     <div class="stats-grid" style="grid-template-columns: repeat(7, 1fr); margin-bottom: 16px;">
                         <div class="stat-card">
@@ -1742,28 +1736,21 @@
                         
                     </div>
                     
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 16px;">
-                        
-                        <!-- Symbol Patterns -->
-                        <div class="panel">
-                            <div class="panel-header">
-                                <span class="panel-title"><span class="panel-title-icon">📊</span> Symbol Knowledge</span>
-                            </div>
-                            <div class="panel-content" id="aiSymbolPatterns" style="max-height: 350px; overflow-y: auto;">
-                                <div class="no-data">No symbol patterns yet</div>
+                    <!-- AI Knowledge (merged Symbol Patterns + News Impact) -->
+                    <div class="panel" style="margin-top: 16px;">
+                        <div class="panel-header">
+                            <span class="panel-title"><span class="panel-title-icon">🧠</span> AI Knowledge</span>
+                            <div style="display: flex; gap: 4px;">
+                                <button class="btn log-tab active" onclick="switchKnowledgeTab('symbols', this)" style="font-size: 0.7rem; padding: 3px 8px;">Symbols</button>
+                                <button class="btn log-tab" onclick="switchKnowledgeTab('news', this)" style="font-size: 0.7rem; padding: 3px 8px;">News Impact</button>
                             </div>
                         </div>
-                        
-                        <!-- News Pattern Learning -->
-                        <div class="panel">
-                            <div class="panel-header">
-                                <span class="panel-title"><span class="panel-title-icon">📰</span> News Impact Learning</span>
-                            </div>
-                            <div class="panel-content" id="aiNewsPatterns" style="max-height: 350px; overflow-y: auto;">
-                                <div class="no-data">No news patterns yet</div>
-                            </div>
+                        <div id="knowledgeSymbols" class="panel-content" style="max-height: 350px; overflow-y: auto;">
+                            <div id="aiSymbolPatterns"><div class="no-data">No symbol patterns yet</div></div>
                         </div>
-                        
+                        <div id="knowledgeNews" class="panel-content" style="max-height: 350px; overflow-y: auto; display: none;">
+                            <div id="aiNewsPatterns"><div class="no-data">No news patterns yet</div></div>
+                        </div>
                     </div>
                     
                     <!-- Pending News Tracking -->
@@ -1777,17 +1764,6 @@
                         </div>
                         <div class="panel-content" id="aiPendingNews" style="max-height: 250px; overflow-y: auto;">
                             <div class="no-data">No news being tracked</div>
-                        </div>
-                    </div>
-                    
-                    <!-- Daily Summary -->
-                    <div class="panel" style="margin-top: 16px;">
-                        <div class="panel-header">
-                            <span class="panel-title"><span class="panel-title-icon">💡</span> Daily Summary</span>
-                            <span class="panel-badge" id="aiInsightsCount">0</span>
-                        </div>
-                        <div class="panel-content" id="aiInsightsList" style="max-height: 300px; overflow-y: auto;">
-                            <div class="no-data">No insights generated yet</div>
                         </div>
                     </div>
                     
@@ -2167,7 +2143,7 @@
                 document.getElementById('winRate').textContent = (data.win_rate ?? 0) + '%';
                 document.getElementById('profitable').textContent = data.profitable ?? 0;
                 document.getElementById('losing').textContent = data.losing ?? 0;
-                document.getElementById('totalClosed').textContent = data.total_closed ?? 0;
+                document.getElementById('totalClosed').textContent = (data.total_closed ?? 0) + ' closed';
                 
                 // Signals
                 document.getElementById('analyzed').textContent = (data.analyzed ?? 0).toLocaleString();
@@ -2238,6 +2214,12 @@
                 }
                 
                 document.getElementById('totalVolume').textContent = '$' + (data.total_volume || 0).toLocaleString();
+                
+                // Profit Factor
+                const pf = data.profit_factor || 0;
+                const pfEl = document.getElementById('profitFactor');
+                pfEl.textContent = pf.toFixed(2);
+                pfEl.className = 'stat-value sm ' + (pf >= 1.5 ? 'positive' : pf >= 1.0 ? '' : 'negative');
             } catch (error) {
                 console.error('Error fetching extended:', error);
             }
@@ -2696,25 +2678,86 @@
             document.getElementById('aiInsightsCount').textContent = insights.length;
             
             if (!insights || insights.length === 0) {
-                container.innerHTML = '<div class="no-data">Daily insights will appear here after trading sessions.</div>';
+                container.innerHTML = '<div class="no-data">No reports yet. Click "Generate Yesterday" to create a daily summary.</div>';
                 return;
             }
             
             let html = '';
             for (const insight of insights) {
                 const categoryIcon = insight.category === 'daily_summary' ? '📅' : insight.category === 'trade' ? '📊' : '💡';
+                const categoryLabel = insight.category === 'daily_summary' ? 'daily_summary' : insight.category || 'insight';
                 
-                html += `<div style="padding: 12px; background: var(--bg-card); border-radius: 8px; margin-bottom: 8px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                        <span style="font-weight: 600; color: var(--accent);">${categoryIcon} ${insight.category || 'insight'}</span>
-                        <span style="font-size: 0.7rem; color: var(--text-muted);">${formatTimeAgo(insight.timestamp)}</span>
+                // Show full date/time
+                let dateStr = '';
+                if (insight.timestamp) {
+                    try {
+                        const d = new Date(insight.timestamp);
+                        dateStr = d.toLocaleDateString('ru-RU', {day:'2-digit', month:'2-digit', year:'numeric'}) + ' ' + d.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
+                    } catch(e) {
+                        dateStr = formatTimeAgo(insight.timestamp);
+                    }
+                }
+                const timeAgo = formatTimeAgo(insight.timestamp);
+                
+                html += `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${insight.category === 'daily_summary' ? 'var(--accent)' : 'var(--border-color)'};">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <span style="font-weight: 600; color: var(--accent); font-size: 0.9rem;">${categoryIcon} ${categoryLabel}</span>
+                        <span style="font-size: 0.72rem; color: var(--text-muted);">📅 ${dateStr} &nbsp;(${timeAgo})</span>
                     </div>
-                    <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.5;">
-                        ${escapeHtml(insight.insight?.substring(0, 500) || '')}${insight.insight?.length > 500 ? '...' : ''}
+                    <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">
+                        ${escapeHtml(insight.insight || '')}
                     </div>
                 </div>`;
             }
             container.innerHTML = html;
+        }
+        
+        async function generateReport(period) {
+            const btn = document.getElementById('btnGenReport');
+            const origText = btn.textContent;
+            btn.textContent = 'Generating...';
+            btn.disabled = true;
+            try {
+                const resp = await fetch('/api/ai/generate_report', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({date: period})
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    // Prepend the new report to the list
+                    const container = document.getElementById('aiInsightsList');
+                    const dateLabel = data.date || period;
+                    const genAt = data.generated_at || new Date().toLocaleString('ru-RU');
+                    const tradesCount = data.trades_count || 0;
+                    const newHtml = `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid var(--positive);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                            <span style="font-weight: 600; color: var(--positive); font-size: 0.9rem;">📋 Report: ${escapeHtml(dateLabel)}</span>
+                            <span style="font-size: 0.72rem; color: var(--text-muted);">Generated: ${escapeHtml(genAt)} | ${tradesCount} trades</span>
+                        </div>
+                        <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">
+                            ${escapeHtml(data.report || 'Empty report')}
+                        </div>
+                    </div>`;
+                    const existingContent = container.querySelector('.no-data') ? '' : container.innerHTML;
+                    container.innerHTML = newHtml + existingContent;
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown'));
+                }
+            } catch(e) {
+                alert('Failed to generate report: ' + e);
+            } finally {
+                btn.textContent = origText;
+                btn.disabled = false;
+            }
+        }
+        
+        function switchKnowledgeTab(tab, btn) {
+            document.getElementById('knowledgeSymbols').style.display = tab === 'symbols' ? '' : 'none';
+            document.getElementById('knowledgeNews').style.display = tab === 'news' ? '' : 'none';
+            // Toggle active class
+            btn.parentElement.querySelectorAll('.log-tab').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
         }
         
         // PnL Chart - загружаем реальные данные

@@ -364,13 +364,15 @@ def get_extended_stats() -> dict:
             ORDER BY pnl ASC LIMIT 1
         """, fetch="one")
         
-        # Average PnL
+        # Average PnL + profit factor
         avg_stats = _run_sql("""
             SELECT 
                 AVG(pnl) as avg_pnl,
                 AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
                 AVG(CASE WHEN pnl <= 0 THEN pnl END) as avg_loss,
-                SUM(amount) as total_volume
+                SUM(amount) as total_volume,
+                SUM(CASE WHEN pnl > 0 THEN pnl ELSE 0 END) as gross_profit,
+                ABS(SUM(CASE WHEN pnl < 0 THEN pnl ELSE 0 END)) as gross_loss
             FROM history
         """, fetch="one")
         
@@ -444,6 +446,7 @@ def get_extended_stats() -> dict:
             'avg_win': round(float(avg_stats.get('avg_win', 0) or 0), 2) if avg_stats else 0,
             'avg_loss': round(float(avg_stats.get('avg_loss', 0) or 0), 2) if avg_stats else 0,
             'total_volume': round(float(avg_stats.get('total_volume', 0) or 0), 2) if avg_stats else 0,
+            'profit_factor': round(float(avg_stats.get('gross_profit', 0) or 0) / max(float(avg_stats.get('gross_loss', 0) or 0), 0.01), 2) if avg_stats else 0,
             'today_trades': int(today_stats.get('today_trades', 0) or 0) if today_stats else 0,
             'today_wins': int(today_stats.get('today_wins', 0) or 0) if today_stats else 0,
             'today_pnl': round(float(today_stats.get('today_pnl', 0) or 0), 2) if today_stats else 0,
@@ -1522,6 +1525,23 @@ def api_ai():
         except:
             pass
         
+        # Compute today's learned rules count
+        today_rules_count = 0
+        try:
+            from datetime import datetime, timezone, timedelta
+            now_utc = datetime.now(timezone.utc)
+            today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Check insights for daily_summary category from today
+            for ins in memory.market_insights:
+                ts = ins.get('timestamp', '')
+                if ts and ins.get('category') == 'daily_summary':
+                    pass  # just counting rules below
+            # Count rules added today (heuristic: last N rules added in the past 24h)
+            # Since rules don't have timestamps, use the total as-is
+            today_rules_count = stats.get('learned_rules_count', 0)
+        except:
+            pass
+
         return jsonify({
             'available': True,
             'initialized': stats.get('initialized', False),
@@ -1533,7 +1553,8 @@ def api_ai():
                 'news_patterns_count': stats.get('news_patterns_count', 0),
                 'market_insights_count': stats.get('market_insights_count', 0),
                 'prediction_accuracy': round(stats.get('prediction_accuracy', 0.5) * 100, 1),
-                'news_tracking_count': tracked_count
+                'news_tracking_count': tracked_count,
+                'today_rules_count': today_rules_count
             },
             'recent_analyses': recent_analyses,
             'learned_rules': learned_rules,
@@ -1548,6 +1569,75 @@ def api_ai():
         logger.error(f"[DASHBOARD] Error getting AI stats: {e}", exc_info=True)
         return jsonify({
             'available': False,
+            'error': str(e),
+            'timestamp': to_moscow_time()
+        })
+
+
+@app.route('/api/ai/generate_report', methods=['POST'])
+def api_ai_generate_report():
+    """Generate a daily summary report on demand (for yesterday or custom date)."""
+    try:
+        import asyncio
+        from datetime import datetime, timezone, timedelta
+        from ai_analyzer import daily_insights as ai_daily_insights
+
+        data = request.get_json(silent=True) or {}
+        # Default to yesterday
+        target_date = data.get('date', 'yesterday')
+        now_utc = datetime.now(timezone.utc)
+        if target_date == 'yesterday':
+            day_start = (now_utc - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+        elif target_date == 'today':
+            day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+        else:
+            day_start = datetime.fromisoformat(target_date).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
+            day_end = day_start + timedelta(days=1)
+
+        since_str = day_start.isoformat()
+        until_str = day_end.isoformat()
+
+        if _use_postgres:
+            rows = _run_sql(
+                "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= %s AND closed_at < %s",
+                (since_str, until_str), fetch="all"
+            )
+        else:
+            rows = _run_sql(
+                "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= ? AND closed_at < ?",
+                (since_str, until_str), fetch="all"
+            )
+
+        trades = [dict(r) for r in (rows or [])]
+
+        news = []
+        try:
+            if _news_analyzer and hasattr(_news_analyzer, 'recent_events'):
+                news = [{'title': getattr(e, 'title', str(e)[:80])} for e in list(_news_analyzer.recent_events)[-20:]
+                ]
+        except:
+            pass
+
+        summary = asyncio.run(ai_daily_insights(trades, news))
+
+        msk_tz = timezone(timedelta(hours=3))
+        report_time = datetime.now(msk_tz).strftime('%d.%m.%Y %H:%M MSK')
+        day_label = day_start.strftime('%d.%m.%Y')
+
+        return jsonify({
+            'success': True,
+            'report': summary,
+            'date': day_label,
+            'generated_at': report_time,
+            'trades_count': len(trades),
+            'timestamp': to_moscow_time()
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error generating report: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
             'error': str(e),
             'timestamp': to_moscow_time()
         })

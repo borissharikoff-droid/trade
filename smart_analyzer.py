@@ -229,7 +229,7 @@ class TradingState:
         return self.ADAPTIVE_DAILY_TRADES.get(regime_key, self.MAX_DAILY_TRADES)
     
     def can_trade(self, balance: float, market_regime: str = None) -> Tuple[bool, str]:
-        """Можно ли открывать новую сделку (без бана на убытки - торгуем всегда)."""
+        """Можно ли открывать новую сделку. Includes loss-streak cooldown & daily drawdown protection."""
         self.reset_daily()
         
         now = datetime.now(timezone.utc)
@@ -239,13 +239,47 @@ class TradingState:
         if self.daily_trades >= max_trades:
             return False, f"Лимит сделок в день ({self.daily_trades}/{max_trades})"
         
+        # === LOSS STREAK COOLDOWN ===
+        # After 3+ consecutive losses, add escalating cooldown to prevent tilt trading
+        if self.consecutive_losses >= 3 and self.last_trade_time:
+            cooldown_minutes = self.MIN_TIME_BETWEEN_TRADES + (self.consecutive_losses - 2) * 10  # +10 min per extra loss
+            cooldown_minutes = min(cooldown_minutes, 60)  # Max 1 hour cooldown
+            minutes_since_last = (now - self.last_trade_time).total_seconds() / 60
+            if minutes_since_last < cooldown_minutes:
+                remaining = int(cooldown_minutes - minutes_since_last)
+                return False, f"Loss streak cooldown ({self.consecutive_losses} losses, {remaining} мин осталось)"
+        
+        # === DAILY DRAWDOWN PROTECTION ===
+        # If daily PnL < -5% of balance, stop trading for the day
+        if balance > 0 and self.daily_pnl < 0:
+            drawdown_pct = abs(self.daily_pnl) / balance * 100
+            if drawdown_pct >= 5.0:
+                return False, f"Daily drawdown limit ({drawdown_pct:.1f}% > 5%)"
+        
         # Проверка времени между сделками
         if self.last_trade_time:
-            minutes_since_last = (now - self.last_trade_time).seconds // 60
+            minutes_since_last = (now - self.last_trade_time).total_seconds() / 60
             if minutes_since_last < self.MIN_TIME_BETWEEN_TRADES:
-                return False, f"Cooldown ({self.MIN_TIME_BETWEEN_TRADES - minutes_since_last} мин)"
+                return False, f"Cooldown ({int(self.MIN_TIME_BETWEEN_TRADES - minutes_since_last)} мин)"
         
         return True, "OK"
+    
+    def get_position_size_multiplier(self, balance: float) -> float:
+        """Get position size multiplier based on recent performance. Reduces size on drawdown/loss streaks."""
+        mult = 1.0
+        # Loss streak: reduce size
+        if self.consecutive_losses >= 2:
+            mult *= max(0.5, 1.0 - self.consecutive_losses * 0.1)  # -10% per loss, min 50%
+        # Daily drawdown: reduce size
+        if balance > 0 and self.daily_pnl < 0:
+            dd_pct = abs(self.daily_pnl) / balance * 100
+            if dd_pct >= 2.0:
+                mult *= max(0.5, 1.0 - dd_pct * 0.1)  # Proportional reduction
+        # Win streak: small bonus (max +20%)
+        recent_wr = self.get_recent_winrate()
+        if recent_wr > 0.7 and len(self.recent_trades) >= 5:
+            mult *= min(1.2, 1.0 + (recent_wr - 0.7))
+        return round(max(0.3, min(1.5, mult)), 2)
 
 
 # ==================== SMART ANALYZER ====================
@@ -276,48 +310,49 @@ class SmartAnalyzer:
         self.MIN_RISK_REWARD = 1.0         # Снижено с 1.3 до 1.0
         self.MIN_CONFIDENCE = 0.45         # Снижено с 0.50 до 0.45
         
-        # АДАПТИВНЫЕ ПОРОГИ по режиму рынка (ОСЛАБЛЕНЫ для большего количества сделок)
+        # АДАПТИВНЫЕ ПОРОГИ по режиму рынка v3.1 (BALANCED: quality over quantity)
+        # Key insight: 49% WR with 53 trades = thresholds too loose. Tighten to improve WR.
         # Формат: {режим: (min_quality, min_rr, min_confidence)}
         self.ADAPTIVE_THRESHOLDS = {
-            # Сильный тренд - ОЧЕНЬ АГРЕССИВНЫЕ настройки
+            # Сильный тренд - most permissive (trend gives edge)
             MarketRegime.STRONG_UPTREND: {
-                'min_quality': SetupQuality.C,   # C-сетапы ОК
-                'min_rr': 0.8,                    # R/R 1:0.8 (даже немного ниже 1:1)
-                'min_confidence': 0.40            # 40% уверенности
+                'min_quality': SetupQuality.C,   # C-сетапы ОК в сильном тренде
+                'min_rr': 1.2,                    # R/R 1:1.2 (raised from 0.8)
+                'min_confidence': 0.50            # 50% уверенности (raised from 40%)
             },
             MarketRegime.STRONG_DOWNTREND: {
                 'min_quality': SetupQuality.C,
-                'min_rr': 0.8,
-                'min_confidence': 0.40
+                'min_rr': 1.2,
+                'min_confidence': 0.50
             },
-            # Обычный тренд - АГРЕССИВНЫЕ настройки
+            # Обычный тренд - moderate
             MarketRegime.UPTREND: {
-                'min_quality': SetupQuality.C,   # C-сетапы ОК
-                'min_rr': 1.0,                    # R/R 1:1
-                'min_confidence': 0.45            # 45% уверенности
+                'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
+                'min_rr': 1.3,                    # R/R 1:1.3 (raised from 1.0)
+                'min_confidence': 0.50            # 50% уверенности (raised from 45%)
             },
             MarketRegime.DOWNTREND: {
-                'min_quality': SetupQuality.C,
-                'min_rr': 1.0,
-                'min_confidence': 0.45
+                'min_quality': SetupQuality.B,
+                'min_rr': 1.3,
+                'min_confidence': 0.50
             },
-            # Рейндж - АГРЕССИВНЫЕ настройки (для большего количества сделок)
+            # Рейндж - tighter (range trades are harder)
             MarketRegime.RANGING: {
-                'min_quality': SetupQuality.C,   # C-сетапы ОК (снижено с B)
-                'min_rr': 1.0,                    # R/R 1:1 (снижено с 1.2)
-                'min_confidence': 0.40            # 40% уверенности (снижено с 50%)
+                'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
+                'min_rr': 1.5,                    # R/R 1:1.5 (raised from 1.0)
+                'min_confidence': 0.55            # 55% уверенности (raised from 40%)
             },
-            # Высокая волатильность - АГРЕССИВНЫЕ настройки (мемы и хайп!)
+            # Высокая волатильность - tight (dangerous)
             MarketRegime.HIGH_VOLATILITY: {
-                'min_quality': SetupQuality.C,   # C-сетапы ОК (снижено с A)
-                'min_rr': 1.0,                    # R/R 1:1 (снижено с 1.3)
-                'min_confidence': 0.40            # 40% уверенности (снижено с 55%)
+                'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
+                'min_rr': 1.5,                    # R/R 1:1.5 (raised from 1.0)
+                'min_confidence': 0.55            # 55% уверенности (raised from 40%)
             },
-            # Неизвестный режим - АГРЕССИВНЫЕ настройки
+            # Неизвестный режим - cautious
             MarketRegime.UNKNOWN: {
-                'min_quality': SetupQuality.C,   # C-сетапы ОК (снижено с B)
-                'min_rr': 1.0,
-                'min_confidence': 0.40
+                'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
+                'min_rr': 1.3,
+                'min_confidence': 0.50
             }
         }
         
@@ -2169,6 +2204,19 @@ class SmartAnalyzer:
         elif risk_reward < 1.5:
             score -= 15  # Строже для низкого R/R
         
+        # === WINRATE BOOST: Hard reject weak setups ===
+        # If no volume AND no MTF alignment AND no key level -> too weak
+        if not volume_confirmation and not mtf_aligned and not at_key_level:
+            score -= 15
+            logger.info(f"[QUALITY] Weak setup penalty -15 (no volume, MTF, level)")
+        
+        # If counter-trend without strong reversal signals -> penalty
+        counter_trend = (direction == "LONG" and market_regime in [MarketRegime.DOWNTREND, MarketRegime.STRONG_DOWNTREND]) or \
+                        (direction == "SHORT" and market_regime in [MarketRegime.UPTREND, MarketRegime.STRONG_UPTREND])
+        if counter_trend and not liquidity_swept and not has_divergence:
+            score -= 20
+            logger.info(f"[QUALITY] Counter-trend without reversal signal penalty -20")
+        
         # Определяем качество и confidence - УЛУЧШЕННАЯ формула
         # A_PLUS (80+) -> 78-95%
         # A (65-79) -> 68-77%
@@ -2858,15 +2906,15 @@ class SmartAnalyzer:
                         bearish_signals += 1
         
         # === ДИСБАЛАНС-ЛОГИКА: Если нет сигнала по тренду, но есть сильный дисбаланс ===
-        # Снижен порог с 3 до 2 сигналов
-        if direction is None and (bullish_signals >= 2 or bearish_signals >= 2):
-            # Дисбаланс может создать сигнал
-            if bullish_signals >= 2 and bullish_signals > bearish_signals:
+        # Raised from 2 to 4 signals: only trade imbalance on STRONG conviction
+        if direction is None and (bullish_signals >= 4 or bearish_signals >= 4):
+            # Дисбаланс может создать сигнал - but only with multiple confluences
+            if bullish_signals >= 4 and bullish_signals > bearish_signals + 1:
                 direction = "LONG"
                 signal_type = SignalType.TREND_REVERSAL
                 reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перепроданность")
                 logger.info(f"[SMART] IMBALANCE LONG: {bullish_signals} vs {bearish_signals}")
-            elif bearish_signals >= 2 and bearish_signals > bullish_signals:
+            elif bearish_signals >= 4 and bearish_signals > bullish_signals + 1:
                 direction = "SHORT"
                 signal_type = SignalType.TREND_REVERSAL
                 reasoning.insert(0, "🔥 ДИСБАЛАНС: Сильная перекупленность")
