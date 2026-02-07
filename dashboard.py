@@ -491,6 +491,26 @@ def get_extended_stats() -> dict:
                 WHERE DATE(closed_at) = DATE('now')
             """, fetch="one")
         
+        # Yesterday's stats for comparison
+        if _use_postgres:
+            yesterday_stats = _run_sql("""
+                SELECT 
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as pnl
+                FROM history
+                WHERE DATE(closed_at) = CURRENT_DATE - INTERVAL '1 day'
+            """, fetch="one")
+        else:
+            yesterday_stats = _run_sql("""
+                SELECT 
+                    COUNT(*) as trades,
+                    SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(pnl) as pnl
+                FROM history
+                WHERE DATE(closed_at) = DATE('now', '-1 day')
+            """, fetch="one")
+        
         # Streak calculation
         streak_rows = _run_sql("""
             SELECT pnl FROM history 
@@ -545,6 +565,9 @@ def get_extended_stats() -> dict:
             'today_trades': int(today_stats.get('today_trades', 0) or 0) if today_stats else 0,
             'today_wins': int(today_stats.get('today_wins', 0) or 0) if today_stats else 0,
             'today_pnl': round(float(today_stats.get('today_pnl', 0) or 0), 2) if today_stats else 0,
+            'yesterday_trades': int(yesterday_stats.get('trades', 0) or 0) if yesterday_stats else 0,
+            'yesterday_wins': int(yesterday_stats.get('wins', 0) or 0) if yesterday_stats else 0,
+            'yesterday_pnl': round(float(yesterday_stats.get('pnl', 0) or 0), 2) if yesterday_stats else 0,
             'current_streak': current_streak,
             'streak_type': streak_type,
             'total_users': int(users_stats.get('total_users', 0) or 0) if users_stats else 0,

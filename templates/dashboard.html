@@ -192,6 +192,24 @@
         .quick-stat-value.positive { color: var(--positive); }
         .quick-stat-value.negative { color: var(--negative); }
         
+        .quick-stat-delta {
+            font-size: 0.65rem;
+            font-family: 'JetBrains Mono', monospace;
+            margin-top: 2px;
+            min-height: 14px;
+        }
+        .quick-stat-delta.up { color: var(--positive); }
+        .quick-stat-delta.down { color: var(--negative); }
+        .quick-stat-delta.neutral { color: var(--text-muted); }
+        
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        .btn.spinning svg {
+            animation: spin 0.8s linear infinite;
+        }
+        
         .header-actions {
             display: flex;
             align-items: center;
@@ -1195,12 +1213,14 @@
             
             <div class="header-center">
                 <div class="quick-stat">
-                    <div class="quick-stat-label">Win Rate</div>
+                    <div class="quick-stat-label">Win Rate <span style="color:var(--text-muted);font-size:0.65rem;">(all time)</span></div>
                     <div class="quick-stat-value positive" id="headerWinRate">-</div>
+                    <div class="quick-stat-delta" id="headerWinRateDelta"></div>
                 </div>
                 <div class="quick-stat">
-                    <div class="quick-stat-label">Today PnL</div>
+                    <div class="quick-stat-label">Today PnL <span style="color:var(--text-muted);font-size:0.65rem;">(today)</span></div>
                     <div class="quick-stat-value" id="headerTodayPnl">-</div>
+                    <div class="quick-stat-delta" id="headerTodayPnlDelta"></div>
                 </div>
                 <div class="quick-stat">
                     <div class="quick-stat-label">Open Pos</div>
@@ -1211,7 +1231,7 @@
             <div class="header-actions">
                 <span class="time-display" id="lastUpdate">-</span>
                 
-                <button class="btn" onclick="refreshAll()">
+                <button class="btn" onclick="refreshAll()" id="btnRefresh">
                     <svg viewBox="0 0 16 16" fill="currentColor">
                         <path d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
                         <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966a.25.25 0 0 1 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
@@ -1240,7 +1260,7 @@
                     </div>
                 </div>
                 
-                <button class="btn btn-primary" onclick="shareStats()">
+                <button class="btn btn-primary" onclick="shareStats()" id="btnShare">
                     <svg viewBox="0 0 16 16" fill="currentColor">
                         <path d="M13.5 1a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM11 2.5a2.5 2.5 0 1 1 .603 1.628l-6.718 3.12a2.499 2.499 0 0 1 0 1.504l6.718 3.12a2.5 2.5 0 1 1-.488.876l-6.718-3.12a2.5 2.5 0 1 1 0-3.256l6.718-3.12A2.5 2.5 0 0 1 11 2.5z"/>
                     </svg>
@@ -2267,6 +2287,35 @@
                 headerTodayEl.textContent = formatPnl(todayPnl);
                 headerTodayEl.className = 'quick-stat-value ' + (todayPnl >= 0 ? 'positive' : 'negative');
                 
+                // Today PnL delta vs yesterday
+                const yesterdayPnl = parseFloat(data.yesterday_pnl || 0);
+                const todayDeltaEl = document.getElementById('headerTodayPnlDelta');
+                if (yesterdayPnl !== 0) {
+                    const pnlChange = todayPnl - yesterdayPnl;
+                    const pnlChangePct = ((pnlChange / Math.abs(yesterdayPnl)) * 100).toFixed(0);
+                    const sign = pnlChange >= 0 ? '+' : '';
+                    todayDeltaEl.textContent = `vs yest: ${sign}${pnlChangePct}%`;
+                    todayDeltaEl.className = 'quick-stat-delta ' + (pnlChange >= 0 ? 'up' : 'down');
+                } else {
+                    todayDeltaEl.textContent = '';
+                }
+                
+                // Win Rate delta: today's WR vs all-time WR
+                const todayTrades = data.today_trades || 0;
+                const todayWins = data.today_wins || 0;
+                const todayWR = todayTrades > 0 ? (todayWins / todayTrades * 100) : 0;
+                const allTimeWR = currentStats?.win_rate || 0;
+                const wrDeltaEl = document.getElementById('headerWinRateDelta');
+                if (todayTrades > 0) {
+                    const wrDiff = todayWR - allTimeWR;
+                    const wrSign = wrDiff >= 0 ? '+' : '';
+                    wrDeltaEl.textContent = `today: ${todayWR.toFixed(0)}% (${wrSign}${wrDiff.toFixed(0)}%)`;
+                    wrDeltaEl.className = 'quick-stat-delta ' + (wrDiff >= 0 ? 'up' : 'down');
+                } else {
+                    wrDeltaEl.textContent = 'today: no trades';
+                    wrDeltaEl.className = 'quick-stat-delta neutral';
+                }
+                
                 document.getElementById('avgWin').textContent = '+$' + (data.avg_win || 0).toFixed(2);
                 document.getElementById('avgLoss').textContent = '-$' + Math.abs(data.avg_loss || 0).toFixed(2);
                 
@@ -3236,12 +3285,14 @@
             shareCard.style.position = 'absolute';
             shareCard.style.zIndex = '-1';
             
+            const shareBtn = document.getElementById('btnShare');
+            const origShareText = shareBtn.innerHTML;
+            
             try {
                 const canvas = await html2canvas(shareCard, { backgroundColor: '#080c10', scale: 2 });
                 canvas.toBlob(async (blob) => {
                     try {
                         await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-                        alert('Screenshot copied to clipboard!');
                     } catch (e) {
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement('a');
@@ -3250,10 +3301,14 @@
                         a.click();
                         URL.revokeObjectURL(url);
                     }
+                    // Show "Taken" on the button briefly
+                    shareBtn.innerHTML = '✅ Taken';
+                    setTimeout(() => { shareBtn.innerHTML = origShareText; }, 2000);
                 }, 'image/png');
             } catch (error) {
                 console.error('Error creating screenshot:', error);
-                alert('Error creating screenshot');
+                shareBtn.innerHTML = '❌ Error';
+                setTimeout(() => { shareBtn.innerHTML = origShareText; }, 2000);
             }
             
             shareCard.style.left = '-9999px';
@@ -3261,13 +3316,20 @@
         
         // Refresh
         function refreshAll() {
-            fetchStats();
-            fetchExtended();
-            fetchTrades();
-            fetchLogs();
-            fetchAlerts();
-            fetchPositions();
-            fetchNews();
+            const btn = document.getElementById('btnRefresh');
+            btn.classList.add('spinning');
+            
+            Promise.all([
+                fetchStats(),
+                fetchExtended(),
+                fetchTrades(),
+                fetchLogs(),
+                fetchAlerts(),
+                fetchPositions(),
+                fetchNews()
+            ]).finally(() => {
+                setTimeout(() => btn.classList.remove('spinning'), 600);
+            });
         }
         
         // Initial load
