@@ -130,6 +130,9 @@ class BybitHedger:
         # Маппинг позиций: {user_position_id: bybit_order_id}
         self.hedge_positions: Dict[int, str] = {}
         
+        # Dynamic instrument info cache: {symbol: {"precision": int, "min_qty": float, "fetched_at": float}}
+        self._instrument_cache: Dict[str, dict] = {}
+        
         if not self.api_key or not self.api_secret:
             logger.warning("[BYBIT] API ключи не настроены! Хеджирование отключено.")
         else:
@@ -217,11 +220,15 @@ class BybitHedger:
         
         # Ошибки, которые стоит повторить
         retryable_codes = {
-            10001,  # Request timeout
-            10002,  # Request parameter error (может быть временная)
             10006,  # Too many requests
             10016,  # Server error
         }
+        
+        # 10001 ("Qty invalid", "params error") and 10002 — parameter errors, retry won't help
+        param_error_codes = {10001, 10002}
+        
+        # Non-critical "errors" that are actually OK (e.g., leverage already set)
+        ignorable_codes = {110043}
         
         last_error = None
         
@@ -256,6 +263,11 @@ class BybitHedger:
                 if ret_code == 0:
                     return data.get("result")
                 
+                # Ignorable "errors" (e.g., leverage already set) — treat as success
+                if ret_code in ignorable_codes:
+                    logger.debug(f"[BYBIT] Ignorable response {ret_code}: {ret_msg}")
+                    return data.get("result", {})
+                
                 # Non-retryable errors
                 if ret_code in non_retryable_codes:
                     if ret_code == 10003:
@@ -268,6 +280,12 @@ class BybitHedger:
                         logger.error(f"[BYBIT] ❌ TP/SL слишком близко к цене!")
                     elif ret_code == 110017:
                         logger.error(f"[BYBIT] ❌ Слишком маленький размер ордера!")
+                    return None
+                
+                # Parameter errors (Qty invalid, params error) — don't retry, same params will fail again
+                if ret_code in param_error_codes:
+                    logger.error(f"[BYBIT] ❌ Parameter error {ret_code}: {ret_msg} — not retrying")
+                    logger.error(f"[BYBIT] Params: {params}")
                     return None
                 
                 # Retryable errors
@@ -317,6 +335,56 @@ class BybitHedger:
         
         return bybit_symbol
     
+    async def get_instrument_spec(self, symbol: str) -> dict:
+        """
+        Fetch instrument spec from Bybit API (qtyStep, minOrderQty).
+        Falls back to hardcoded BYBIT_SPECS if API fails.
+        Caches results for 1 hour.
+        """
+        coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
+        
+        # Check cache first (1 hour TTL)
+        cached = self._instrument_cache.get(coin)
+        if cached and (time.time() - cached.get('fetched_at', 0)) < 3600:
+            return {"precision": cached["precision"], "min_qty": cached["min_qty"]}
+        
+        # Try fetching from Bybit API
+        bybit_symbol = self._to_bybit_symbol(symbol)
+        try:
+            session = await self._get_session()
+            url = f"{self.base_url}/v5/market/instruments-info"
+            params = {"category": "linear", "symbol": bybit_symbol}
+            
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                data = await resp.json()
+                if data.get("retCode") == 0:
+                    instruments = data.get("result", {}).get("list", [])
+                    if instruments:
+                        lot_filter = instruments[0].get("lotSizeFilter", {})
+                        qty_step = lot_filter.get("qtyStep", "1")
+                        min_order_qty = lot_filter.get("minOrderQty", "1")
+                        
+                        # Calculate precision from qtyStep (e.g., "0.001" -> 3, "1" -> 0, "0.1" -> 1)
+                        qty_step_f = float(qty_step)
+                        if qty_step_f >= 1:
+                            precision = 0
+                        else:
+                            precision = len(qty_step.rstrip('0').split('.')[-1]) if '.' in qty_step else 0
+                        
+                        min_qty = float(min_order_qty)
+                        
+                        spec = {"precision": precision, "min_qty": min_qty, "fetched_at": time.time()}
+                        self._instrument_cache[coin] = spec
+                        logger.info(f"[BYBIT] Fetched instrument spec for {coin}: precision={precision}, min_qty={min_qty}, qtyStep={qty_step}")
+                        return {"precision": precision, "min_qty": min_qty}
+        except Exception as e:
+            logger.warning(f"[BYBIT] Failed to fetch instrument info for {bybit_symbol}: {e}")
+        
+        # Fallback to hardcoded specs
+        spec = self.BYBIT_SPECS.get(coin, self.DEFAULT_SPEC)
+        logger.info(f"[BYBIT] Using hardcoded spec for {coin}: precision={spec['precision']}, min_qty={spec['min_qty']}")
+        return spec
+
     async def get_price(self, symbol: str) -> Optional[float]:
         """Получить текущую цену"""
         bybit_symbol = self._to_bybit_symbol(symbol)
@@ -433,9 +501,9 @@ class BybitHedger:
         # Количество в базовой валюте
         qty = amount_usd / price
         
-        # Определяем спецификации для монеты из класса
+        # Определяем спецификации для монеты (динамически с Bybit API, fallback на хардкод)
         coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
-        spec = self.BYBIT_SPECS.get(coin, self.DEFAULT_SPEC)
+        spec = await self.get_instrument_spec(symbol)
         logger.info(f"[HEDGE] Coin {coin}: precision={spec['precision']}, min_qty={spec['min_qty']}")
         
         qty = round(qty, spec["precision"])
@@ -553,9 +621,8 @@ class BybitHedger:
         # Сторона для закрытия (противоположная)
         close_side = "Sell" if direction == "LONG" else "Buy"
         
-        # Определяем precision для монеты из класса
-        coin = symbol.split("/")[0] if "/" in symbol else symbol.replace("USDT", "")
-        spec = self.BYBIT_SPECS.get(coin, self.DEFAULT_SPEC)
+        # Определяем precision для монеты (динамически с Bybit API, fallback на хардкод)
+        spec = await self.get_instrument_spec(symbol)
         precision = spec["precision"]
         min_qty = spec["min_qty"]
         

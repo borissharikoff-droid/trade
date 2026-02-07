@@ -1384,7 +1384,7 @@
                     <div style="display: none;" id="rejectedPct"></div>
                     
                     <!-- Reasons Analysis -->
-                    <div class="section-title"><span class="section-icon">📋</span> Reasons Analysis</div>
+                    <div class="section-title"><span class="section-icon">📋</span> Close Reasons</div>
                     <div class="reasons-grid">
                         <div class="reasons-list">
                             <h3 class="wins"><span>✅</span> Winning Reasons</h3>
@@ -1855,6 +1855,29 @@
             const sign = num >= 0 ? '+' : '';
             return sign + '$' + num.toFixed(2);
         }
+
+        function formatReasonLabel(raw) {
+            if (!raw) return '-';
+            let r = raw.toUpperCase().trim();
+            // Strip prefixes
+            for (const pfx of ['LINKED_', 'WS_', 'BYBIT_']) {
+                if (r.startsWith(pfx)) { r = r.slice(pfx.length); break; }
+            }
+            const MAP = {
+                'TP': '🎯 Take Profit', 'TP1': '🎯 TP1', 'TP2': '🎯 TP2', 'TP3': '🎯 TP3',
+                'SL': '🛑 Stop Loss',
+                'MANUAL': '👤 Manual', 'MANUAL_CLOSE': '👤 Manual',
+                'CLOSE_ALL': '🔄 Close All',
+                'CLOSED': '📊 Exchange Close',
+                'TRAILING': '📈 Trailing', 'TRAILING_STOP': '📈 Trailing',
+                'PHANTOM_CLEANUP': '🔧 Cleanup', 'PHANTOM_OLD': '🔧 Cleanup',
+                'MANUAL_PHANTOM_CLEANUP': '🔧 Cleanup', 'FULLY_CLOSED': '🔧 Cleanup',
+                'MICRO_CLOSE': '🔧 Cleanup', 'FORCE_CLEANUP': '🔧 Cleanup'
+            };
+            if (MAP[r]) return MAP[r];
+            if (r.startsWith('EARLY_EXIT')) return '🤖 AI Exit';
+            return raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
         
         function toMoscowTime(date) {
             const moscowOffset = 3 * 60;
@@ -1949,6 +1972,18 @@
         }
         
         // Render Functions
+        const REASON_ICONS = {
+            'Take Profit': '🎯',
+            'Stop Loss': '🛑',
+            'Manual Close': '👤',
+            'Close All': '🔄',
+            'AI Early Exit': '🤖',
+            'Exchange Close': '📊',
+            'System Cleanup': '🔧',
+            'Trailing Stop': '📈',
+            'Unknown': '❓'
+        };
+
         function renderReasons(reasons, containerId, isWin = true) {
             const container = document.getElementById(containerId);
             if (!reasons || Object.keys(reasons).length === 0) {
@@ -1956,16 +1991,19 @@
                 return;
             }
             
+            const total = Object.values(reasons).reduce((a, b) => a + b, 0);
             const maxCount = Math.max(...Object.values(reasons));
             let html = '';
-            for (const [reason, count] of Object.entries(reasons).slice(0, 6)) {
+            for (const [reason, count] of Object.entries(reasons).slice(0, 8)) {
                 const pct = (count / maxCount * 100).toFixed(0);
+                const share = total > 0 ? (count / total * 100).toFixed(1) : '0';
+                const icon = REASON_ICONS[reason] || '📋';
                 html += `<div class="reason-item">
-                    <span class="reason-name">${reason || 'Unknown'}</span>
+                    <span class="reason-name">${icon} ${reason || 'Unknown'}</span>
                     <div class="reason-bar">
                         <div class="reason-bar-fill ${isWin ? 'win' : 'loss'}" style="width: ${pct}%"></div>
                     </div>
-                    <span class="reason-count">${count}</span>
+                    <span class="reason-count">${count} <span style="color:var(--text-muted);font-size:0.75em">(${share}%)</span></span>
                 </div>`;
             }
             container.innerHTML = html;
@@ -1996,7 +2034,7 @@
                     <td><span class="badge ${dirClass}">${trade.direction || '-'}</span></td>
                     <td style="font-family: 'JetBrains Mono', monospace;">$${(trade.amount || 0).toFixed(2)}</td>
                     <td class="${pnlClass}">${formatPnl(pnl)}</td>
-                    <td>${trade.reason || '-'}</td>
+                    <td>${formatReasonLabel(trade.reason)}</td>
                     <td style="color: var(--text-muted);">${formatTime(trade.closed_at)}</td>
                 </tr>`;
             }

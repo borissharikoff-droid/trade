@@ -188,19 +188,45 @@ def get_positions_stats() -> dict:
         return default
 
 
+_positions_has_is_auto = None  # Cached: True/False/None (not checked yet)
+
 def get_open_positions_details() -> list:
     """Get details of all open positions"""
+    global _positions_has_is_auto
     if not _run_sql:
         logger.warning("[DASHBOARD] get_open_positions_details: _run_sql is None")
         return []
     try:
-        # Include bybit_qty to show Bybit status on dashboard
-        positions = _run_sql("""
-            SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id, bybit_qty, is_auto
-            FROM positions
-            ORDER BY opened_at DESC
-            LIMIT 50
-        """, fetch="all")
+        # Check if is_auto column exists (cached after first check)
+        if _positions_has_is_auto is None:
+            try:
+                _check = _run_sql("""
+                    SELECT column_name FROM information_schema.columns 
+                    WHERE table_name = 'positions' AND column_name = 'is_auto'
+                """, fetch="one")
+                _positions_has_is_auto = bool(_check)
+            except Exception:
+                try:
+                    _cols = _run_sql("PRAGMA table_info(positions)", fetch="all")
+                    _positions_has_is_auto = any(c.get('name') == 'is_auto' for c in (_cols or []))
+                except Exception:
+                    _positions_has_is_auto = False
+            logger.info(f"[DASHBOARD] positions.is_auto column exists: {_positions_has_is_auto}")
+        
+        if _positions_has_is_auto:
+            positions = _run_sql("""
+                SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id, bybit_qty, is_auto
+                FROM positions
+                ORDER BY opened_at DESC
+                LIMIT 50
+            """, fetch="all")
+        else:
+            positions = _run_sql("""
+                SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id, bybit_qty
+                FROM positions
+                ORDER BY opened_at DESC
+                LIMIT 50
+            """, fetch="all")
         
         logger.debug(f"[DASHBOARD] Raw positions query returned: {len(positions) if positions else 0} rows")
         
@@ -225,6 +251,73 @@ def get_open_positions_details() -> list:
     except Exception as e:
         logger.error(f"[DASHBOARD] Error getting positions details: {e}", exc_info=True)
         return []
+
+
+def normalize_reason(raw_reason: str) -> str:
+    """Normalize raw close reason into a clean, human-readable category.
+    
+    Groups internal technical reasons (BYBIT_TP, WS_SL, LINKED_TP, etc.)
+    into meaningful trading categories for dashboard analytics.
+    """
+    if not raw_reason:
+        return "Unknown"
+    
+    r = raw_reason.upper().strip()
+    
+    # Strip prefixes: LINKED_, WS_, BYBIT_ to get the core reason
+    for prefix in ('LINKED_', 'WS_', 'BYBIT_'):
+        if r.startswith(prefix):
+            r = r[len(prefix):]
+            break
+    
+    # Take Profit variants
+    if r in ('TP', 'TP1', 'TP2', 'TP3'):
+        return "Take Profit"
+    
+    # Stop Loss
+    if r in ('SL',):
+        return "Stop Loss"
+    
+    # Manual close by user
+    if r in ('MANUAL', 'MANUAL_CLOSE'):
+        return "Manual Close"
+    
+    # Close All command
+    if r in ('CLOSE_ALL',):
+        return "Close All"
+    
+    # AI Early Exit
+    if r.startswith('EARLY_EXIT'):
+        return "AI Early Exit"
+    
+    # Bybit detected closure (position closed on exchange, e.g. liquidation or TP/SL set on exchange)
+    if r in ('CLOSED',):
+        return "Exchange Close"
+    
+    # System/technical cleanup — phantom, micro, fully closed
+    if r in ('PHANTOM_CLEANUP', 'PHANTOM_OLD', 'MANUAL_PHANTOM_CLEANUP', 
+             'FULLY_CLOSED', 'MICRO_CLOSE', 'FORCE_CLEANUP'):
+        return "System Cleanup"
+    
+    # Trailing stop
+    if r in ('TRAILING', 'TRAILING_STOP'):
+        return "Trailing Stop"
+    
+    # Fallback: return cleaned-up version
+    return raw_reason.replace('_', ' ').title()
+
+
+def _aggregate_reasons(rows: list) -> dict:
+    """Aggregate raw reason rows into normalized categories."""
+    aggregated = {}
+    for row in (rows or []):
+        raw = row.get('reason')
+        if not raw:
+            continue
+        category = normalize_reason(raw)
+        aggregated[category] = aggregated.get(category, 0) + int(row['count'])
+    # Sort by count descending
+    return dict(sorted(aggregated.items(), key=lambda x: x[1], reverse=True))
 
 
 def get_history_stats() -> dict:
@@ -276,7 +369,7 @@ def get_history_stats() -> dict:
             GROUP BY reason
             ORDER BY count DESC
         """, fetch="all")
-        win_reasons = {row['reason']: int(row['count']) for row in (win_reasons_rows or []) if row.get('reason')}
+        win_reasons = _aggregate_reasons(win_reasons_rows)
         
         # Get loss reasons breakdown
         loss_reasons_rows = _run_sql("""
@@ -286,7 +379,7 @@ def get_history_stats() -> dict:
             GROUP BY reason
             ORDER BY count DESC
         """, fetch="all")
-        loss_reasons = {row['reason']: int(row['count']) for row in (loss_reasons_rows or []) if row.get('reason')}
+        loss_reasons = _aggregate_reasons(loss_reasons_rows)
         
         return {
             'total': total,
