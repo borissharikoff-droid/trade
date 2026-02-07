@@ -194,9 +194,9 @@ def get_open_positions_details() -> list:
         logger.warning("[DASHBOARD] get_open_positions_details: _run_sql is None")
         return []
     try:
-        # Basic query without optional columns that may not exist
+        # Include bybit_qty to show Bybit status on dashboard
         positions = _run_sql("""
-            SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id
+            SELECT symbol, direction, entry, current, pnl, amount, opened_at, user_id, bybit_qty, is_auto
             FROM positions
             ORDER BY opened_at DESC
             LIMIT 50
@@ -207,6 +207,7 @@ def get_open_positions_details() -> list:
         # Format positions for API response
         result = []
         for pos in (positions or []):
+            bybit_qty = float(pos.get('bybit_qty', 0) or 0)
             result.append({
                 'symbol': pos.get('symbol', ''),
                 'direction': pos.get('direction', ''),
@@ -216,8 +217,9 @@ def get_open_positions_details() -> list:
                 'amount': round(float(pos.get('amount', 0) or 0), 2),
                 'opened_at': pos.get('opened_at'),
                 'user_id': pos.get('user_id'),
-                'is_auto': False,
-                'on_bybit': False
+                'is_auto': bool(pos.get('is_auto', False)),
+                'on_bybit': bybit_qty > 0,
+                'bybit_qty': bybit_qty
             })
         return result
     except Exception as e:

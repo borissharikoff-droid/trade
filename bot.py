@@ -4243,8 +4243,8 @@ async def sync_bybit_positions(user_id: int, context: ContextTypes.DEFAULT_TYPE,
                     close_reason = "DIRECTION_MISMATCH"
             else:
                 # bybit_qty = 0 - проверяем не фантомная ли
-                # Если позиция старше 30 минут и её нет на Bybit - закрываем
-                if pos_age_minutes > 30 and position_missing_on_bybit:
+                # Если позиция старше 10 минут и её нет на Bybit - закрываем
+                if pos_age_minutes > 10 and position_missing_on_bybit:
                     should_close = True
                     close_reason = "PHANTOM_OLD"
                     logger.info(f"[SYNC] Found phantom position {pos['id']}: {bybit_symbol}, age={pos_age_minutes:.0f}min")
@@ -4865,87 +4865,23 @@ async def show_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             pass
         
-        # === СНАЧАЛА показываем сообщение "Загрузка", ПОТОМ синхронизируем ===
-        loading_text = "<b>⏳ Загрузка позиций...</b>\n\nСинхронизация с Bybit..."
+        # === Загружаем актуальные позиции из БД (background sync keeps them up-to-date) ===
+        loading_text = "<b>⏳ Загрузка позиций...</b>"
         try:
             await query.edit_message_text(loading_text, parse_mode="HTML")
         except Exception:
             pass
         
-        # === Синхронизируем с Bybit ===
-        try:
-            synced = await asyncio.wait_for(sync_bybit_positions(user_id, context, notify=False), timeout=5.0)
-            if synced > 0:
-                logger.info(f"[TRADES] Synced {synced} positions for user {user_id}")
-        except asyncio.TimeoutError:
-            logger.warning(f"[TRADES] Sync timeout for user {user_id}")
-        except Exception as e:
-            logger.warning(f"[TRADES] Sync error for user {user_id}: {e}")
-        
-        # Обновляем данные пользователя (баланс мог измениться после синхронизации)
+        # Read fresh from DB -- background update_positions (every 15s) keeps this in sync with Bybit
         user = get_user(user_id)
-        
-        # Теперь загружаем актуальные позиции из БД (после синхронизации)
         try:
             user_positions = db_get_positions(user_id)
+            positions_cache.set(user_id, user_positions)  # refresh cache
         except Exception as e:
             logger.error(f"[TRADES] Error getting positions: {e}")
             user_positions = []
         
-        # === ПРИНУДИТЕЛЬНАЯ ОЧИСТКА ФАНТОМНЫХ ПОЗИЦИЙ ===
-        # Проверяем что позиции с bybit_qty > 0 реально есть на Bybit
-        has_bybit_positions = any(pos.get('bybit_qty', 0) > 0 for pos in user_positions)
-        
-        if has_bybit_positions:
-            try:
-                bybit_positions = await asyncio.wait_for(hedger.get_all_positions(), timeout=3.0)
-                bybit_symbols = {p['symbol'] for p in bybit_positions}
-                logger.info(f"[TRADES] Bybit has {len(bybit_symbols)} positions: {bybit_symbols}")
-                
-                cleaned_positions = []
-                for pos in user_positions:
-                    bybit_symbol = pos['symbol'].replace("/", "")
-                    has_bybit_qty = pos.get('bybit_qty', 0) > 0
-                    
-                    # Если позиция была на Bybit (bybit_qty > 0) но её там нет - удаляем
-                    if has_bybit_qty and bybit_symbol not in bybit_symbols:
-                        logger.warning(f"[TRADES] 🗑️ Force-closing phantom position {pos['id']}: {pos['symbol']} not on Bybit!")
-                        
-                        # Пытаемся найти реальный PnL из закрытых сделок
-                        real_pnl = 0
-                        try:
-                            closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=10)
-                            if closed_trades:
-                                real_pnl = closed_trades[0].get('closed_pnl', 0)
-                                logger.info(f"[TRADES] Found closed PnL: ${real_pnl:.2f}")
-                        except Exception:
-                            pass
-                        
-                        # Возвращаем деньги
-                        returned = pos['amount'] + real_pnl
-                        async with get_user_lock(user_id):
-                            user = get_user(user_id)
-                            user['balance'] = sanitize_balance(user['balance'] + returned)
-                            user['total_profit'] = (user.get('total_profit', 0) or 0) + real_pnl
-                            save_user(user_id)
-                        
-                        accumulated_pnl = pos.get('realized_pnl', 0) or 0
-                        db_close_position(pos['id'], pos.get('current', pos['entry']), real_pnl + accumulated_pnl, 'FORCE_CLEANUP')
-                        continue
-                    
-                    cleaned_positions.append(pos)
-                
-                user_positions = cleaned_positions
-            except Exception as e:
-                logger.warning(f"[TRADES] Error during force cleanup: {e}")
-        
-        # Обновляем user после возможной очистки
-        user = get_user(user_id)
-        
-        # Обновляем кэш с очищенными позициями
-        positions_cache.set(user_id, user_positions)
-        
-        # Clean up zero-amount positions
+        # Clean up zero-amount positions only (safe, no Bybit calls)
         zero_amount = [p for p in user_positions if p.get('amount', 0) <= 0]
         if zero_amount:
             for zero_pos in zero_amount:
@@ -7412,10 +7348,25 @@ async def _update_positions_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.warning(f"[BYBIT_SYNC] Ошибка получения позиций: {e}")
                 trade_logger.log_error(f"Error getting Bybit positions: {e}", error=e)
         
-        # Process users in batches with locking
-        user_ids = list(positions_cache.keys())
+        # Process ALL users with positions from DB (not just cached ones)
+        # This ensures positions are always synced even if not in cache
+        try:
+            all_pos_users = run_sql("SELECT DISTINCT user_id FROM positions", fetch="all")
+            db_user_ids = {row['user_id'] for row in (all_pos_users or [])}
+        except Exception:
+            db_user_ids = set()
+        cached_user_ids = set(positions_cache.keys())
+        user_ids = list(db_user_ids | cached_user_ids)
+        
+        # Pre-populate cache for users that have DB positions but aren't cached
+        for uid in db_user_ids - cached_user_ids:
+            try:
+                positions_cache.set(uid, db_get_positions(uid))
+            except Exception:
+                pass
+        
         total_positions = sum(len(positions_cache.get(uid, [])) for uid in user_ids)
-        logger.debug(f"[UPDATE_POSITIONS] Обработка {len(user_ids)} пользователей, {total_positions} позиций")
+        logger.debug(f"[UPDATE_POSITIONS] Обработка {len(user_ids)} пользователей ({len(db_user_ids)} from DB), {total_positions} позиций")
         BATCH_SIZE = 10  # Process 10 users at a time
         
         for batch_start in range(0, len(user_ids), BATCH_SIZE):
@@ -7502,13 +7453,13 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                             except:
                                 pos_age_minutes = 60  # Assume old if can't parse
                         
-                        if pos_age_minutes > 5:
-                            # Phantom позиция - закрываем МГНОВЕННО, без API запроса к Bybit
+                        if pos_age_minutes > 10:
+                            # Phantom позиция - закрываем без API запроса к Bybit
                             real_pnl = 0
                             reason = "PHANTOM_CLEANUP"
-                            logger.info(f"[BYBIT_SYNC] PHANTOM {pos['id']}: {bybit_symbol}, age={pos_age_minutes:.0f}min - INSTANT CLOSE (no API call)")
+                            logger.info(f"[BYBIT_SYNC] PHANTOM {pos['id']}: {bybit_symbol}, age={pos_age_minutes:.0f}min - CLOSE (no API call)")
                         else:
-                            continue  # Слишком молодая, подождём
+                            continue  # Слишком молодая, подождём (< 10 min)
                     else:
                         # МЕДЛЕННЫЙ ПУТЬ: позиция БЫЛА на Bybit (bybit_qty>0) - запрашиваем PnL
                         try:
@@ -11066,8 +11017,29 @@ def main() -> None:
                     if has_bybit_qty:
                         continue
                     
-                    # Phantom: bybit_qty=0, нет на Bybit - удаляем мгновенно
+                    # Phantom: bybit_qty=0, нет на Bybit - only close if older than 10 min
+                    # to avoid race conditions with freshly-opened positions
                     try:
+                        pos_age_minutes = 0
+                        try:
+                            opened_at = pos.get('opened_at')
+                            if opened_at:
+                                from datetime import datetime as dt_cls, timezone as tz_cls
+                                if isinstance(opened_at, str):
+                                    opened_dt = dt_cls.fromisoformat(opened_at.replace('Z', '+00:00'))
+                                else:
+                                    opened_dt = opened_at
+                                now_utc = dt_cls.now(tz_cls.utc)
+                                if opened_dt.tzinfo is None:
+                                    opened_dt = opened_dt.replace(tzinfo=tz_cls.utc)
+                                pos_age_minutes = (now_utc - opened_dt).total_seconds() / 60
+                        except Exception:
+                            pos_age_minutes = 60  # If we can't determine, assume old
+                        
+                        # Don't touch positions younger than 10 minutes
+                        if pos_age_minutes < 10:
+                            continue
+                        
                         amount = float(pos.get('amount', 0))
                         user_id = pos['user_id']
                         
