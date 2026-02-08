@@ -1169,7 +1169,8 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
     
     async def generate_daily_insights(self, trades: List[Dict], news: List[Dict]) -> str:
         """
-        Генерация ежедневных инсайтов на основе сделок и новостей
+        Генерация ежедневных инсайтов на основе сделок, анализов и новостей.
+        Включает: анализ каждой сделки, почему были ошибки, как ИИ учится.
         """
         try:
             # Статистика за день
@@ -1179,80 +1180,249 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             
             # Топ символы
             symbol_pnl = {}
+            symbol_trades = {}
             for t in trades:
                 sym = t.get('symbol', 'UNK')
-                symbol_pnl[sym] = symbol_pnl.get(sym, 0) + float(t.get('pnl', 0))
+                pnl_val = float(t.get('pnl', 0))
+                symbol_pnl[sym] = symbol_pnl.get(sym, 0) + pnl_val
+                if sym not in symbol_trades:
+                    symbol_trades[sym] = {'wins': 0, 'losses': 0, 'total': 0}
+                symbol_trades[sym]['total'] += 1
+                if pnl_val > 0:
+                    symbol_trades[sym]['wins'] += 1
+                else:
+                    symbol_trades[sym]['losses'] += 1
             
             top_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1], reverse=True)[:5]
             worst_symbols = sorted(symbol_pnl.items(), key=lambda x: x[1])[:5]
             
             losses = total_trades - wins
-            avg_win = sum(float(t.get('pnl', 0)) for t in trades if float(t.get('pnl', 0)) > 0) / max(wins, 1)
-            avg_loss = sum(float(t.get('pnl', 0)) for t in trades if float(t.get('pnl', 0)) < 0) / max(losses, 1)
+            win_pnls = [float(t.get('pnl', 0)) for t in trades if float(t.get('pnl', 0)) > 0]
+            loss_pnls = [float(t.get('pnl', 0)) for t in trades if float(t.get('pnl', 0)) < 0]
+            avg_win = sum(win_pnls) / max(len(win_pnls), 1)
+            avg_loss = sum(loss_pnls) / max(len(loss_pnls), 1)
+            max_win = max(win_pnls) if win_pnls else 0
+            max_loss = min(loss_pnls) if loss_pnls else 0
             
-            system_prompt = """Ты - трейдинг-коуч. Сформируй дневное саммари.
+            # === АНАЛИЗ СДЕЛОК ИЗ AI ПАМЯТИ ===
+            # Собираем все анализы сделок за этот период
+            analyses = self.memory.recent_analyses[-100:]  # последние 100
+            
+            # Группируем факторы победы и поражения
+            all_win_factors = []
+            all_loss_factors = []
+            all_lessons = []
+            entry_qualities = []
+            exit_qualities = []
+            pattern_types = {}
+            regime_stats = {}
+            
+            for a in analyses:
+                # Собираем факторы
+                for f in (a.get('win_factors') or []):
+                    all_win_factors.append(f)
+                for f in (a.get('loss_factors') or []):
+                    all_loss_factors.append(f)
+                for l in (a.get('lessons_learned') or []):
+                    all_lessons.append(l)
+                
+                eq = a.get('entry_quality', 0)
+                xq = a.get('exit_quality', 0)
+                if eq: entry_qualities.append(eq)
+                if xq: exit_qualities.append(xq)
+            
+            # Считаем частоту факторов
+            def count_factors(factors, top_n=8):
+                from collections import Counter
+                cleaned = [f.strip()[:120] for f in factors if f and len(f.strip()) > 3]
+                return Counter(cleaned).most_common(top_n)
+            
+            top_win_factors = count_factors(all_win_factors)
+            top_loss_factors = count_factors(all_loss_factors)
+            top_lessons = count_factors(all_lessons, top_n=10)
+            avg_entry_q = sum(entry_qualities) / max(len(entry_qualities), 1)
+            avg_exit_q = sum(exit_qualities) / max(len(exit_qualities), 1)
+            
+            # === КОНКРЕТНЫЕ ПРИМЕРЫ УБЫТОЧНЫХ СДЕЛОК ===
+            losing_trades_detail = []
+            for t in sorted(trades, key=lambda x: float(x.get('pnl', 0)))[:8]:  # 8 худших
+                pnl_val = float(t.get('pnl', 0))
+                if pnl_val >= 0:
+                    continue
+                sym = t.get('symbol', '?')
+                direction = t.get('direction', '?')
+                entry = float(t.get('entry', 0))
+                exit_p = float(t.get('exit_price', 0))
+                reason = t.get('reason', '?')
+                losing_trades_detail.append(
+                    f"  {sym} {direction}: вход ${entry:.4f} → выход ${exit_p:.4f}, PnL ${pnl_val:.2f}, причина: {reason}"
+                )
+            
+            # === КОНКРЕТНЫЕ ПРИМЕРЫ ПРИБЫЛЬНЫХ СДЕЛОК ===
+            winning_trades_detail = []
+            for t in sorted(trades, key=lambda x: float(x.get('pnl', 0)), reverse=True)[:5]:
+                pnl_val = float(t.get('pnl', 0))
+                if pnl_val <= 0:
+                    continue
+                sym = t.get('symbol', '?')
+                direction = t.get('direction', '?')
+                entry = float(t.get('entry', 0))
+                exit_p = float(t.get('exit_price', 0))
+                reason = t.get('reason', '?')
+                winning_trades_detail.append(
+                    f"  {sym} {direction}: вход ${entry:.4f} → выход ${exit_p:.4f}, PnL +${pnl_val:.2f}, причина: {reason}"
+                )
+            
+            # === ПАТТЕРНЫ ВРЕМЕНИ И РЕЖИМА ===
+            time_patterns_str = ""
+            if self.memory.time_patterns:
+                best_hours = []
+                for hour, counts in sorted(self.memory.time_patterns.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+                    w, l = counts.get('wins', 0), counts.get('losses', 0)
+                    total = w + l
+                    if total >= 3:
+                        wr = (w / total * 100)
+                        best_hours.append((hour, wr, w, l))
+                best_hours.sort(key=lambda x: x[1], reverse=True)
+                if best_hours:
+                    time_patterns_str = "\n".join(f"  UTC {h}:00 — WR {wr:.0f}% ({w}W/{l}L)" for h, wr, w, l in best_hours[:6])
+            
+            regime_patterns_str = ""
+            if self.memory.regime_patterns:
+                parts = []
+                for regime, counts in self.memory.regime_patterns.items():
+                    w, l = counts.get('wins', 0), counts.get('losses', 0)
+                    total = w + l
+                    if total >= 3:
+                        wr = (w / total * 100)
+                        parts.append(f"  {regime}: WR {wr:.0f}% ({w}W/{l}L)")
+                if parts:
+                    regime_patterns_str = "\n".join(parts)
+            
+            # === ACCURACY STATS ===
+            accuracy = self.memory.prediction_accuracy
+            pred_total = accuracy.get('total_predictions', 0)
+            pred_correct = accuracy.get('correct_predictions', 0)
+            pred_accuracy = (pred_correct / pred_total * 100) if pred_total > 0 else 0
+            
+            system_prompt = """Ты - трейдинг-коуч и аналитик ИИ-торговой системы. Ты пишешь отчёт для владельца бота.
 
-СТРУКТУРА ОТЧЁТА (используй Markdown-форматирование: ### для заголовков, **жирный** для акцентов, - для списков, --- для разделителей):
+СТРУКТУРА ОТЧЁТА (Markdown: ### заголовки, **жирный**, - списки, --- разделители):
 
 ### 1. КРАТКИЙ ОБЗОР
-PnL, винрейт, сколько сделок, что было хорошо/плохо.
+PnL, винрейт, сделки, что было хорошо/плохо. 2-3 предложения.
 
-### 2. ЧТО ИИ УЗНАЛ СЕГОДНЯ
-Конкретные новые правила, паттерны, выводы из сделок. Какие фундаментальные знания получены о рынке.
+---
 
-### 3. ДЕТАЛЬНАЯ СТАТИСТИКА
-Все числа — сделки, выигрыши, проигрыши, средний профит, средний убыток, лучшие/худшие символы.
+### 2. РАЗБОР ОШИБОК — ПОЧЕМУ БЫЛИ УБЫТКИ
+Проанализируй конкретные убыточные сделки. Для каждой из топ-3 худших сделок:
+- Какая ошибка была допущена (вход против тренда, плохой тайминг, игнорирование сигнала)?
+- Была ли техническая причина (SL слишком близко, вход на максимуме/минимуме)?
+- Фундаментальная причина (рынок в risk-off, новость повлияла)?
+Группируй повторяющиеся ошибки: "67 из 72 убытков — повторяющийся паттерн: X".
 
-### 4. ФУНДАМЕНТАЛЬНЫЙ АНАЛИЗ
-Почему рынок двигался так, какие события повлияли, какие макро-факторы были в игре.
+---
 
-### 5. РЕКОМЕНДАЦИИ НА ЗАВТРА
-Конкретные правила и стратегические советы.
+### 3. ЧТО ИИ ВЫУЧИЛ ИЗ КАЖДОЙ СДЕЛКИ
+Конкретные уроки, извлечённые ИИ из анализа результатов сделок (не из новостей):
+- Какие торговые паттерны подтвердились/опровергнуты
+- Какие входы были качественными и почему
+- Какие правила ИИ добавил в свою базу знаний
+- Как эти уроки БУДУТ ИНТЕГРИРОВАНЫ в будущие решения (например: "ИИ теперь будет снижать размер позиции при WR < 20% за последний час")
 
-Пиши по делу, с цифрами. Используй Markdown: ### заголовки, **жирный текст**, - списки, --- разделители."""
+---
+
+### 4. КАК ИИ ИНТЕГРИРУЕТ ОБУЧЕНИЕ В ТРЕЙДИНГ
+Опиши механизм обучения:
+- Сколько правил всего выучено и какие новые добавлены сегодня
+- Как ИИ использует анализ прошлых сделок при принятии новых решений
+- Точность предсказаний ИИ (из статистики)
+- Какие конкретные изменения в стратегии произведены на основе сегодняшних данных
+
+---
+
+### 5. ДЕТАЛЬНАЯ СТАТИСТИКА
+Все числа: сделки, W/L, avg profit/loss, лучшие/худшие символы, качество входов/выходов.
+
+---
+
+### 6. ФУНДАМЕНТАЛЬНЫЙ АНАЛИЗ РЫНКА
+Почему рынок двигался так, макро-факторы, новости.
+
+---
+
+### 7. ПЛАН НА ЗАВТРА
+Конкретные правила на основе выученного. Что ИИ будет делать по-другому.
+
+Пиши ПОДРОБНО, с цифрами, примерами конкретных сделок. Это не общие фразы — это разбор каждой ошибки."""
 
             wr_pct = (wins / total_trades * 100) if total_trades else 0
-            user_prompt = f"""Дневное саммари:
+            
+            user_prompt = f"""ДНЕВНОЙ ОТЧЁТ ИИ-ТОРГОВОЙ СИСТЕМЫ
 
-=== ПОЛНАЯ СТАТИСТИКА ===
+=== СТАТИСТИКА ДНЯ ===
 Всего сделок: {total_trades}
 Прибыльных: {wins} | Убыточных: {losses}
 Win Rate: {wr_pct:.1f}%
 Общий PnL: ${total_pnl:.2f}
-Средний выигрыш: ${avg_win:.2f}
-Средний убыток: ${avg_loss:.2f}
+Средний выигрыш: ${avg_win:.2f} | Средний убыток: ${avg_loss:.2f}
+Макс. выигрыш: ${max_win:.2f} | Макс. убыток: ${max_loss:.2f}
+Средн. качество входа: {avg_entry_q:.1f}/10 | Средн. качество выхода: {avg_exit_q:.1f}/10
 
-=== ТОП ПРИБЫЛЬНЫЕ СИМВОЛЫ ===
-{chr(10).join(f'{s}: ${p:.2f}' for s, p in top_symbols) if top_symbols else 'Нет'}
+=== ТОП ПРИБЫЛЬНЫЕ ===
+{chr(10).join(f'{s}: ${p:.2f} ({symbol_trades.get(s, {}).get("wins", 0)}W/{symbol_trades.get(s, {}).get("losses", 0)}L)' for s, p in top_symbols) if top_symbols else 'Нет'}
 
-=== САМЫЕ УБЫТОЧНЫЕ СИМВОЛЫ ===
-{chr(10).join(f'{s}: ${p:.2f}' for s, p in worst_symbols) if worst_symbols else 'Нет'}
+=== САМЫЕ УБЫТОЧНЫЕ ===
+{chr(10).join(f'{s}: ${p:.2f} ({symbol_trades.get(s, {}).get("wins", 0)}W/{symbol_trades.get(s, {}).get("losses", 0)}L)' for s, p in worst_symbols) if worst_symbols else 'Нет'}
+
+=== ДЕТАЛИ ХУДШИХ СДЕЛОК (разбери каждую!) ===
+{chr(10).join(losing_trades_detail) if losing_trades_detail else 'Нет убыточных сделок'}
+
+=== ДЕТАЛИ ЛУЧШИХ СДЕЛОК ===
+{chr(10).join(winning_trades_detail) if winning_trades_detail else 'Нет прибыльных сделок'}
+
+=== ТОП ПРИЧИНЫ ПОБЕД (из AI анализа сделок) ===
+{chr(10).join(f'  [{cnt}x] {f}' for f, cnt in top_win_factors) if top_win_factors else 'Нет данных'}
+
+=== ТОП ПРИЧИНЫ УБЫТКОВ (из AI анализа сделок) ===
+{chr(10).join(f'  [{cnt}x] {f}' for f, cnt in top_loss_factors) if top_loss_factors else 'Нет данных'}
+
+=== УРОКИ ИЗ АНАЛИЗА СДЕЛОК ===
+{chr(10).join(f'  [{cnt}x] {l}' for l, cnt in top_lessons) if top_lessons else 'Нет данных'}
+
+=== ТОЧНОСТЬ ПРЕДСКАЗАНИЙ ИИ ===
+Всего предсказаний: {pred_total} | Верных: {pred_correct} | Точность: {pred_accuracy:.1f}%
+
+=== ПАТТЕРНЫ ПО ВРЕМЕНИ (UTC) ===
+{time_patterns_str if time_patterns_str else 'Мало данных'}
+
+=== ПАТТЕРНЫ ПО РЕЖИМУ РЫНКА ===
+{regime_patterns_str if regime_patterns_str else 'Мало данных'}
 
 === НОВОСТИ ДНЯ ===
-{chr(10).join(n.get('title', '')[:60] for n in news[:10]) if news else 'Нет значимых новостей'}
+{chr(10).join(n.get('title', '')[:80] for n in news[:10]) if news else 'Нет значимых новостей'}
 
-=== ВЫУЧЕННЫЕ ПРАВИЛА (всего: {len(self.memory.learned_rules)}) ===
-{chr(10).join(self.memory.learned_rules[-10:])}
+=== БАЗА ЗНАНИЙ ИИ ===
+Всего выученных правил: {len(self.memory.learned_rules)}
+Последние 5 правил:
+{chr(10).join('  - ' + r for r in self.memory.learned_rules[-5:]) if self.memory.learned_rules else 'Нет правил'}
 
-=== ВЫУЧЕННЫЕ ПРАВИЛА СЕГОДНЯ ===
-{chr(10).join(self.memory.learned_rules[-3:]) if self.memory.learned_rules else 'Нет новых правил'}
-
-Сформируй отчёт по структуре из системного промпта. Обязательно включи ВСЕ цифры и фундаментальный анализ рынка."""
+Проанализируй ВСЁ. Разбери конкретные убыточные сделки. Объясни ПОЧЕМУ были ошибки. Покажи как ИИ учится на каждой сделке и интегрирует это в решения."""
 
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            response = await self._call_deepseek(messages, max_tokens=2000)
+            response = await self._call_deepseek(messages, max_tokens=3000)
             
             if response:
                 # Build a PnL-based title for the summary (e.g. "+$107.63" or "-$52.40")
                 pnl_sign = '+' if total_pnl >= 0 else ''
                 summary_title = f"{pnl_sign}${total_pnl:.2f} | {total_trades} trades | WR {wr_pct:.0f}%"
                 
-                # Сохраняем инсайт
-                self.memory.add_insight(response[:2000], 'daily_summary', title=summary_title)
+                # Сохраняем инсайт (до 4000 символов для полного отчёта)
+                self.memory.add_insight(response[:4000], 'daily_summary', title=summary_title)
                 self.memory.save()
             
             return response or "Не удалось сгенерировать инсайты"
