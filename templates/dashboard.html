@@ -1706,7 +1706,7 @@
                                 <button class="btn" onclick="generateReport('today')" style="font-size: 0.7rem; padding: 4px 10px;">Today</button>
                             </div>
                         </div>
-                        <div class="panel-content" id="aiInsightsList" style="max-height: 500px; overflow-y: auto;">
+                        <div class="panel-content" id="aiInsightsList" style="max-height: 700px; overflow-y: auto;">
                             <div class="no-data">No insights generated yet. Click "Generate Yesterday" to create a report.</div>
                         </div>
                     </div>
@@ -1954,6 +1954,29 @@
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+        
+        function renderMarkdown(text) {
+            if (!text) return '';
+            let html = escapeHtml(text);
+            // Headings: ### Title
+            html = html.replace(/^###\s*\*\*(.+?)\*\*/gm, '<h4 style="color:var(--accent);margin:12px 0 6px;font-size:0.9rem;">$1</h4>');
+            html = html.replace(/^###\s+(.+)/gm, '<h4 style="color:var(--accent);margin:12px 0 6px;font-size:0.9rem;">$1</h4>');
+            // Bold: **text**
+            html = html.replace(/\*\*(.+?)\*\*/g, '<strong style="color:var(--text-primary);">$1</strong>');
+            // Italic: *text*
+            html = html.replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, '<em>$1</em>');
+            // Horizontal rule: ---
+            html = html.replace(/^---$/gm, '<hr style="border:none;border-top:1px solid var(--border-color);margin:8px 0;">');
+            // List items: - item or * item
+            html = html.replace(/^[\-\*]\s+(.+)/gm, '<div style="padding-left:12px;margin:2px 0;">• $1</div>');
+            // Numbered list: 1. item
+            html = html.replace(/^\d+\.\s+(.+)/gm, '<div style="padding-left:12px;margin:2px 0;">$&</div>');
+            // Line breaks
+            html = html.replace(/\n/g, '<br>');
+            // Clean up multiple <br>
+            html = html.replace(/(<br>){3,}/g, '<br><br>');
+            return html;
         }
         
         // Dropdown
@@ -2801,6 +2824,25 @@
             container.innerHTML = html;
         }
         
+        let _insightExpandState = {};
+        
+        function toggleInsight(id) {
+            const preview = document.getElementById('insight-preview-' + id);
+            const full = document.getElementById('insight-full-' + id);
+            const btn = document.getElementById('insight-btn-' + id);
+            if (full.style.display === 'none') {
+                full.style.display = 'block';
+                preview.style.display = 'none';
+                btn.textContent = '▲ Collapse';
+                _insightExpandState[id] = true;
+            } else {
+                full.style.display = 'none';
+                preview.style.display = 'block';
+                btn.textContent = '▼ Expand';
+                _insightExpandState[id] = false;
+            }
+        }
+        
         function renderAIInsights(insights) {
             const container = document.getElementById('aiInsightsList');
             document.getElementById('aiInsightsCount').textContent = insights.length;
@@ -2811,7 +2853,8 @@
             }
             
             let html = '';
-            for (const insight of insights) {
+            for (let idx = 0; idx < insights.length; idx++) {
+                const insight = insights[idx];
                 const isDailySummary = insight.category === 'daily_summary';
                 const categoryIcon = isDailySummary ? '📅' : insight.category === 'trade' ? '📊' : '💡';
                 
@@ -2820,7 +2863,6 @@
                 if (insight.title) {
                     displayTitle = insight.title;
                 } else if (isDailySummary) {
-                    // Try to extract PnL from the content for older summaries
                     const pnlMatch = (insight.insight || '').match(/PnL[:\s]*([+-]?\$[\d,.]+)/i);
                     displayTitle = pnlMatch ? `Daily Report ${pnlMatch[1]}` : 'Daily Report';
                 } else {
@@ -2844,18 +2886,47 @@
                     ? (insight.title && insight.title.startsWith('-') ? 'var(--negative)' : 'var(--positive)')
                     : 'var(--accent)';
                 
+                // Render content with markdown
+                const fullContent = renderMarkdown(insight.insight || '');
+                const rawText = insight.insight || '';
+                
+                // Preview: first 200 chars, plain text
+                const previewLen = 200;
+                const needsExpand = rawText.length > previewLen;
+                const previewText = needsExpand ? rawText.slice(0, previewLen).replace(/\n/g, ' ') + '...' : '';
+                
+                const isExpanded = _insightExpandState[idx] || false;
+                
                 html += `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${isDailySummary ? titleColor : 'var(--border-color)'};">
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                         <span style="font-weight: 600; color: ${titleColor}; font-size: 0.9rem;">${categoryIcon} ${escapeHtml(displayTitle)}</span>
                         <span style="font-size: 0.72rem; color: var(--text-muted);">📅 ${dateStr} &nbsp;(${timeAgo})</span>
+                    </div>`;
+                
+                if (needsExpand) {
+                    html += `
+                    <div id="insight-preview-${idx}" style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; display: ${isExpanded ? 'none' : 'block'};">
+                        ${escapeHtml(previewText)}
                     </div>
-                    <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">
-                        ${escapeHtml(insight.insight || '')}
+                    <div id="insight-full-${idx}" style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6; display: ${isExpanded ? 'block' : 'none'};">
+                        ${fullContent}
                     </div>
-                </div>`;
+                    <button id="insight-btn-${idx}" onclick="toggleInsight(${idx})" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.75rem;padding:6px 0 0;font-family:inherit;">
+                        ${isExpanded ? '▲ Collapse' : '▼ Expand'}
+                    </button>`;
+                } else {
+                    html += `
+                    <div style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
+                        ${fullContent}
+                    </div>`;
+                }
+                
+                html += '</div>';
             }
             container.innerHTML = html;
         }
+        
+        let _genReportIdx = 9000; // unique IDs for newly generated reports
         
         async function generateReport(period) {
             const btn = document.getElementById('btnGenReport');
@@ -2870,24 +2941,46 @@
                 });
                 const data = await resp.json();
                 if (data.success) {
-                    // Prepend the new report to the list
                     const container = document.getElementById('aiInsightsList');
                     const dateLabel = data.date || period;
                     const genAt = data.generated_at || new Date().toLocaleString('ru-RU');
                     const reportTitle = data.title || `Report ${dateLabel}`;
                     const pnl = data.total_pnl || 0;
                     const pnlColor = pnl >= 0 ? 'var(--positive)' : 'var(--negative)';
-                    const newHtml = `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${pnlColor};">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    const rawReport = data.report || 'Empty report';
+                    const fullContent = renderMarkdown(rawReport);
+                    const idx = _genReportIdx++;
+                    const needsExpand = rawReport.length > 200;
+                    const previewText = needsExpand ? rawReport.slice(0, 200).replace(/\n/g, ' ') + '...' : '';
+                    
+                    let newHtml = `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${pnlColor};">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                             <span style="font-weight: 600; color: ${pnlColor}; font-size: 0.9rem;">📅 ${escapeHtml(reportTitle)}</span>
                             <span style="font-size: 0.72rem; color: var(--text-muted);">📅 ${escapeHtml(dateLabel)} &nbsp;|&nbsp; ${escapeHtml(genAt)}</span>
+                        </div>`;
+                    
+                    if (needsExpand) {
+                        newHtml += `
+                        <div id="insight-preview-${idx}" style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; display: none;">
+                            ${escapeHtml(previewText)}
                         </div>
-                        <div style="font-size: 0.85rem; color: var(--text-secondary); white-space: pre-wrap; line-height: 1.6;">
-                            ${escapeHtml(data.report || 'Empty report')}
+                        <div id="insight-full-${idx}" style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6; display: block;">
+                            ${fullContent}
                         </div>
-                    </div>`;
+                        <button id="insight-btn-${idx}" onclick="toggleInsight(${idx})" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.75rem;padding:6px 0 0;font-family:inherit;">
+                            ▲ Collapse
+                        </button>`;
+                    } else {
+                        newHtml += `
+                        <div style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
+                            ${fullContent}
+                        </div>`;
+                    }
+                    newHtml += '</div>';
+                    
                     const existingContent = container.querySelector('.no-data') ? '' : container.innerHTML;
                     container.innerHTML = newHtml + existingContent;
+                    _insightExpandState[idx] = true;
                 } else {
                     alert('Error: ' + (data.error || 'Unknown'));
                 }

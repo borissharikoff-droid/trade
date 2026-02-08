@@ -7317,10 +7317,10 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     Errors are isolated to prevent one user's failure from affecting others
     """
     try:
-        # Общий timeout для всей функции - 25 секунд (интервал 30 сек)
-        await asyncio.wait_for(_update_positions_impl(context), timeout=25.0)
+        # Общий timeout для всей функции - 45 секунд
+        await asyncio.wait_for(_update_positions_impl(context), timeout=45.0)
     except asyncio.TimeoutError:
-        logger.error("[UPDATE_POSITIONS] ⚠️ TIMEOUT - функция выполнялась дольше 25 секунд!")
+        logger.error("[UPDATE_POSITIONS] ⚠️ TIMEOUT - функция выполнялась дольше 45 секунд!")
     except Exception as e:
         logger.error(f"[UPDATE_POSITIONS] Critical error: {e}", exc_info=True)
 
@@ -7458,6 +7458,23 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                             real_pnl = 0
                             reason = "PHANTOM_CLEANUP"
                             logger.info(f"[BYBIT_SYNC] PHANTOM {pos['id']}: {bybit_symbol}, age={pos_age_minutes:.0f}min - CLOSE (no API call)")
+                            
+                            # Возвращаем баланс пользователю (amount + 0 PnL)
+                            returned = pos['amount']
+                            async with get_user_lock(user_id):
+                                user = get_user(user_id)
+                                user['balance'] = sanitize_balance(user['balance'] + returned)
+                                save_user(user_id)
+                            
+                            # Закрываем в БД
+                            accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                            db_close_position(pos['id'], pos.get('current', pos['entry']), accumulated_pnl, reason)
+                            
+                            # Обновляем кэш
+                            update_positions_cache(user_id, db_get_positions(user_id))
+                            user_positions = get_positions(user_id)
+                            logger.info(f"[BYBIT_SYNC] Phantom {pos['id']} closed, returned ${returned:.2f} to user {user_id}")
+                            continue
                         else:
                             continue  # Слишком молодая, подождём (< 10 min)
                     else:
@@ -7561,17 +7578,30 @@ Bybit синхронизация
                             logger.error(f"[BYBIT_SYNC] Notify error: {e}")
                         continue
         
+        # Cache Bybit prices per symbol to avoid duplicate API calls
+        _bybit_price_cache = {}
+        hedging_on = await is_hedging_enabled()
+        
         for pos in user_positions[:]:  # копия для безопасного удаления
             real_price = None
             
-            # Если хеджирование включено - берём markPrice с Bybit (точнее для PnL)
-            if await is_hedging_enabled():
-                bybit_data = await hedger.get_position_data(pos['symbol'])
-                if bybit_data and bybit_data.get('current'):
-                    real_price = bybit_data['current']  # markPrice с Bybit
-                    logger.debug(f"[UPDATE] {pos['symbol']}: using Bybit price ${real_price:.4f}")
+            # Only fetch Bybit price for positions that are actually ON Bybit (bybit_qty > 0)
+            if hedging_on and pos.get('bybit_qty', 0) > 0:
+                sym = pos['symbol']
+                if sym not in _bybit_price_cache:
+                    try:
+                        bybit_data = await asyncio.wait_for(
+                            hedger.get_position_data(sym), timeout=5.0
+                        )
+                        _bybit_price_cache[sym] = bybit_data.get('current') if bybit_data else None
+                    except (asyncio.TimeoutError, Exception) as e:
+                        logger.warning(f"[UPDATE] Timeout/error getting Bybit price for {sym}: {e}")
+                        _bybit_price_cache[sym] = None
+                real_price = _bybit_price_cache.get(sym)
+                if real_price:
+                    logger.debug(f"[UPDATE] {sym}: using Bybit price ${real_price:.4f}")
             
-            # Fallback на Binance если Bybit недоступен
+            # Fallback на Binance для phantom positions (bybit_qty=0) или если Bybit недоступен
             if not real_price:
                 real_price = await get_cached_price(pos['symbol'])
             
