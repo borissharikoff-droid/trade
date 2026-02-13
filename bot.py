@@ -2519,9 +2519,28 @@ def format_price(price: float) -> str:
 def get_user(user_id: int) -> Dict:
     """Получить пользователя (с кэшированием, thread-safe)"""
     user = users_cache.get(user_id)
+
+    # Защита: если кэш поврежден/содержит неожиданный тип, восстанавливаем из БД.
+    if user is not None and not isinstance(user, dict):
+        logger.error(f"[CACHE] Corrupted user cache for {user_id}: {type(user).__name__}, reloading from DB")
+        users_cache.pop(user_id, None)
+        user = None
+
     if user is None:
         user = db_get_user(user_id)
         users_cache.set(user_id, user)
+
+    # Гарантируем ключи, чтобы избежать падений в авто-трейде на частично старых записях.
+    user.setdefault('balance', 0.0)
+    user.setdefault('total_deposit', 0.0)
+    user.setdefault('total_profit', 0.0)
+    user.setdefault('trading', False)
+    user.setdefault('auto_trade', False)
+    user.setdefault('auto_trade_max_daily', 10)
+    user.setdefault('auto_trade_min_winrate', 70)
+    user.setdefault('auto_trade_today', 0)
+    user.setdefault('auto_trade_last_reset', None)
+    user.setdefault('referrer_id', None)
     return user
 
 def save_user(user_id: int):
@@ -5660,7 +5679,22 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     # КРИТИЧЕСКАЯ ОШИБКА: позиция не создалась
                     # НЕ списываем баланс, просто пропускаем
                     logger.critical(f"[AUTO_TRADE] ❌ CRITICAL: Position creation failed for user {auto_user_id}: {pos_error}")
-                    trade_logger.log_error(f"Auto-trade position creation failed for user {auto_user_id}", error=pos_error, user_id=auto_user_id)
+                    trade_logger.log_error(
+                        f"Auto-trade position creation failed for user {auto_user_id}",
+                        error=pos_error,
+                        user_id=auto_user_id,
+                        symbol=symbol,
+                        context={
+                            'error': str(pos_error),
+                            'error_type': type(pos_error).__name__,
+                            'entry': entry,
+                            'sl': sl,
+                            'tp1': tp1,
+                            'tp2': tp2,
+                            'tp3': tp3,
+                            'auto_bet': auto_bet,
+                        }
+                    )
                     continue  # Пропускаем этого юзера - баланс не тронут!
                 
                 # Отправляем уведомление
@@ -9362,8 +9396,10 @@ User ID: {AUTO_TRADE_USER_ID}
             new_balance = float(args[1])
             run_sql("UPDATE users SET balance = ? WHERE user_id = ?", (new_balance, AUTO_TRADE_USER_ID))
             # Обновляем кэш
-            if AUTO_TRADE_USER_ID in users_cache:
-                users_cache[AUTO_TRADE_USER_ID]['balance'] = new_balance
+            cached_auto_user = users_cache.get(AUTO_TRADE_USER_ID)
+            if isinstance(cached_auto_user, dict):
+                cached_auto_user['balance'] = new_balance
+                users_cache.set(AUTO_TRADE_USER_ID, cached_auto_user)
             audit_log(user_id, "SET_AUTO_TRADE_BALANCE", f"balance=${new_balance:.0f}", target_user=AUTO_TRADE_USER_ID)
             await update.message.reply_text(f"<b>✅ Баланс установлен</b>\n\n<b>${new_balance:.2f}</b>", parse_mode="HTML")
         except ValueError:
@@ -9640,8 +9676,10 @@ async def reset_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         
         # Установить баланс
         db_update_user(target_id, balance=balance)
-        if target_id in users_cache:
-            users_cache[target_id]['balance'] = balance
+        cached_target_user = users_cache.get(target_id)
+        if isinstance(cached_target_user, dict):
+            cached_target_user['balance'] = balance
+            users_cache.set(target_id, cached_target_user)
         
         await update.message.reply_text(f"<b>✅ Готово</b>\n\n👤 User: {target_id}\n💰 Баланс: <b>${balance:.2f}</b>\n📊 Позиции: закрыты", parse_mode="HTML")
         
