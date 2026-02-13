@@ -382,13 +382,14 @@ class AIMemory:
         
         self.total_news_analyzed += 1
     
-    def add_insight(self, insight: str, category: str = "general", title: str = ""):
+    def add_insight(self, insight: str, category: str = "general", title: str = "", metadata: Optional[Dict] = None):
         """Добавить инсайт"""
         self.market_insights.append({
             'insight': insight,
             'category': category,
             'title': title,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat(),
+            'meta': metadata or {}
         })
     
     def _rule_similarity(self, a: str, b: str) -> float:
@@ -1167,7 +1168,7 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
     
     # ==================== LEARNING & INSIGHTS ====================
     
-    async def generate_daily_insights(self, trades: List[Dict], news: List[Dict]) -> str:
+    async def generate_daily_insights(self, trades: List[Dict], news: List[Dict], report_date: Optional[str] = None) -> str:
         """
         Генерация ежедневных инсайтов на основе сделок, анализов и новостей.
         Включает: анализ каждой сделки, почему были ошибки, как ИИ учится.
@@ -1358,7 +1359,11 @@ PnL, винрейт, сделки, что было хорошо/плохо. 2-3 
 
             wr_pct = (wins / total_trades * 100) if total_trades else 0
             
+            report_date_text = report_date or datetime.now().date().isoformat()
             user_prompt = f"""ДНЕВНОЙ ОТЧЁТ ИИ-ТОРГОВОЙ СИСТЕМЫ
+
+=== ДАТА ОТЧЁТА ===
+{report_date_text}
 
 === СТАТИСТИКА ДНЯ ===
 Всего сделок: {total_trades}
@@ -1419,10 +1424,20 @@ Win Rate: {wr_pct:.1f}%
             if response:
                 # Build a PnL-based title for the summary (e.g. "+$107.63" or "-$52.40")
                 pnl_sign = '+' if total_pnl >= 0 else ''
-                summary_title = f"{pnl_sign}${total_pnl:.2f} | {total_trades} trades | WR {wr_pct:.0f}%"
+                summary_title = f"{pnl_sign}${total_pnl:.2f} | {total_trades} trades | WR {wr_pct:.0f}% | {report_date_text}"
                 
                 # Сохраняем инсайт (до 4000 символов для полного отчёта)
-                self.memory.add_insight(response[:4000], 'daily_summary', title=summary_title)
+                self.memory.add_insight(
+                    response[:4000],
+                    'daily_summary',
+                    title=summary_title,
+                    metadata={
+                        'report_date': report_date_text,
+                        'trades_count': total_trades,
+                        'total_pnl': round(total_pnl, 2),
+                        'win_rate': round(wr_pct, 1),
+                    }
+                )
                 self.memory.save()
             
             return response or "Не удалось сгенерировать инсайты"
@@ -1490,10 +1505,10 @@ async def predict_news(news: Dict) -> Dict:
     return await analyzer.predict_news_impact(news)
 
 
-async def daily_insights(trades: List[Dict], news: List[Dict]) -> str:
+async def daily_insights(trades: List[Dict], news: List[Dict], report_date: Optional[str] = None) -> str:
     """Генерировать ежедневные инсайты"""
     analyzer = get_ai_analyzer()
-    return await analyzer.generate_daily_insights(trades, news)
+    return await analyzer.generate_daily_insights(trades, news, report_date=report_date)
 
 
 def get_ai_stats() -> Dict:

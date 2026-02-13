@@ -7457,9 +7457,10 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                 for pos in user_positions[:]:
                     bybit_symbol = pos['symbol'].replace('/', '')
                     has_bybit_qty = pos.get('bybit_qty', 0) > 0
-                    
-                    # Если нет bybit_qty И позиция в открытых на Bybit - пропускаем
-                    if not has_bybit_qty and bybit_symbol in bybit_open_symbols:
+
+                    # Локальные позиции (bybit_qty=0) НЕ должны закрываться через Bybit sync.
+                    # Они управляются обычной логикой TP/SL/ручного закрытия.
+                    if not has_bybit_qty:
                         continue
                     
                     # Если позиция ещё на Bybit - всё ок, пропускаем
@@ -7473,128 +7474,89 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
                     exit_price = pos.get('current', pos.get('entry', 0))
                     reason = "CLOSED"
                     
-                    # БЫСТРЫЙ ПУТЬ: phantom позиции (bybit_qty=0) - закрываем СРАЗУ без API
-                    if not has_bybit_qty:
-                        pos_opened = pos.get('opened_at')
-                        pos_age_minutes = 0
-                        if pos_opened:
-                            try:
-                                if isinstance(pos_opened, str):
-                                    pos_time = datetime.fromisoformat(pos_opened.replace('Z', '+00:00'))
-                                else:
-                                    pos_time = pos_opened
-                                pos_age_minutes = (datetime.now(pos_time.tzinfo) - pos_time).total_seconds() / 60 if pos_time.tzinfo else (datetime.now() - pos_time).total_seconds() / 60
-                            except:
-                                pos_age_minutes = 60  # Assume old if can't parse
-                        
-                        if pos_age_minutes > 10:
-                            # Phantom позиция - закрываем без API запроса к Bybit
-                            real_pnl = 0
-                            reason = "PHANTOM_CLEANUP"
-                            logger.info(f"[BYBIT_SYNC] PHANTOM {pos['id']}: {bybit_symbol}, age={pos_age_minutes:.0f}min - CLOSE (no API call)")
-                            
-                            # Возвращаем баланс пользователю (amount + 0 PnL)
-                            returned = pos['amount']
-                            async with get_user_lock(user_id):
-                                user = get_user(user_id)
-                                user['balance'] = sanitize_balance(user['balance'] + returned)
-                                save_user(user_id)
-                            
-                            # Закрываем в БД
-                            accumulated_pnl = pos.get('realized_pnl', 0) or 0
-                            db_close_position(pos['id'], pos.get('current', pos['entry']), accumulated_pnl, reason)
-                            
-                            # Обновляем кэш
-                            update_positions_cache(user_id, db_get_positions(user_id))
-                            user_positions = get_positions(user_id)
-                            logger.info(f"[BYBIT_SYNC] Phantom {pos['id']} closed, returned ${returned:.2f} to user {user_id}")
-                            continue
-                        else:
-                            continue  # Слишком молодая, подождём (< 10 min)
-                    else:
-                        # МЕДЛЕННЫЙ ПУТЬ: позиция БЫЛА на Bybit (bybit_qty>0) - запрашиваем PnL
-                        try:
-                            closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=10)
-                            if closed_trades:
-                                bybit_pnl = closed_trades[0]['closed_pnl']
-                                bybit_exit = closed_trades[0]['exit_price']
-                                bybit_time = closed_trades[0].get('updated_time', 0)
-                                
-                                import time as time_module
-                                current_time_ms = int(time_module.time() * 1000)
-                                time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
-                                
-                                logger.info(f"[BYBIT_SYNC] Bybit closed trade found: pnl=${bybit_pnl:.2f}, time_diff={time_diff:.0f}s")
-                                
-                                if time_diff < 600:  # 10 мин для sync
-                                    # Распределяем Bybit PnL пропорционально amount (несколько бот-позиций = одна на Bybit)
-                                    key = (pos['symbol'], pos['direction'])
-                                    if key not in _bybit_pnl_remaining:
-                                        total_amt = sum(p['amount'] for p in user_positions if p['symbol'] == pos['symbol'] and p['direction'] == pos['direction'])
-                                        _bybit_pnl_remaining[key] = float(bybit_pnl) if total_amt > 0 else 0.0
+                    # МЕДЛЕННЫЙ ПУТЬ: позиция БЫЛА на Bybit (bybit_qty>0) - запрашиваем PnL
+                    try:
+                        closed_trades = await hedger.get_closed_pnl(pos['symbol'], limit=10)
+                        if closed_trades:
+                            bybit_pnl = closed_trades[0]['closed_pnl']
+                            bybit_exit = closed_trades[0]['exit_price']
+                            bybit_time = closed_trades[0].get('updated_time', 0)
+
+                            import time as time_module
+                            current_time_ms = int(time_module.time() * 1000)
+                            time_diff = (current_time_ms - bybit_time) / 1000 if bybit_time else 999999
+
+                            logger.info(f"[BYBIT_SYNC] Bybit closed trade found: pnl=${bybit_pnl:.2f}, time_diff={time_diff:.0f}s")
+
+                            if time_diff < 600:  # 10 мин для sync
+                                # Распределяем Bybit PnL пропорционально amount (несколько бот-позиций = одна на Bybit)
+                                key = (pos['symbol'], pos['direction'])
+                                if key not in _bybit_pnl_remaining:
                                     total_amt = sum(p['amount'] for p in user_positions if p['symbol'] == pos['symbol'] and p['direction'] == pos['direction'])
-                                    if total_amt > 0 and _bybit_pnl_remaining.get(key, 0) != 0:
-                                        share = _bybit_pnl_remaining[key] * (pos['amount'] / total_amt)
-                                        real_pnl = share
-                                        _bybit_pnl_remaining[key] -= share
-                                    else:
-                                        real_pnl = _bybit_pnl_remaining.pop(key, 0.0)
-                                    exit_price = bybit_exit
-                                    reason = "TP" if real_pnl > 0 else "SL"
-                                    logger.info(f"[BYBIT_SYNC] Using Bybit PnL (share): ${real_pnl:.2f}")
+                                    _bybit_pnl_remaining[key] = float(bybit_pnl) if total_amt > 0 else 0.0
+                                total_amt = sum(p['amount'] for p in user_positions if p['symbol'] == pos['symbol'] and p['direction'] == pos['direction'])
+                                if total_amt > 0 and _bybit_pnl_remaining.get(key, 0) != 0:
+                                    share = _bybit_pnl_remaining[key] * (pos['amount'] / total_amt)
+                                    real_pnl = share
+                                    _bybit_pnl_remaining[key] -= share
                                 else:
-                                    logger.warning(f"[BYBIT_SYNC] Bybit trade too old ({time_diff:.0f}s), using local PnL")
-                        except Exception as e:
-                            logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
-                        
-                        logger.info(f"[BYBIT_SYNC] Position {bybit_symbol} closed on Bybit! bybit_qty={pos.get('bybit_qty', 0)}")
-                        
-                        # Возвращаем деньги пользователю (с локом для защиты от race conditions)
-                        returned = pos['amount'] + real_pnl
-                        async with get_user_lock(user_id):
-                            user = get_user(user_id)  # Re-read with lock
-                            user['balance'] = sanitize_balance(user['balance'] + returned)
-                            user['total_profit'] = (user.get('total_profit', 0) or 0) + real_pnl
-                            save_user(user_id)
-                        
-                        # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
-                        accumulated_pnl = pos.get('realized_pnl', 0) or 0
-                        total_pnl_for_history = real_pnl + accumulated_pnl
-                        db_close_position(pos['id'], exit_price, total_pnl_for_history, f'BYBIT_{reason}')
-                        
-                        # Перезагружаем кэш из БД для консистентности
-                        update_positions_cache(user_id, db_get_positions(user_id))
-                        user_positions = get_positions(user_id)  # Refresh local reference
-                        logger.info(f"[BYBIT_SYNC] Position {pos['id']} closed, cache reloaded")
-                        
-                        # === ВАЖНО: закрываем ВСЕ связанные авто-позиции других юзеров ===
-                        # Рассчитываем PnL% для linked позиций
-                        if pos['entry'] > 0:
-                            pnl_percent = real_pnl / (pos['amount'] * LEVERAGE) if pos['amount'] > 0 else 0
-                        else:
-                            pnl_percent = 0
-                        
-                        # Закрываем все связанные авто-позиции
-                        await close_linked_auto_positions(
-                            symbol=pos['symbol'],
-                            direction=pos['direction'],
-                            exit_price=exit_price,
-                            pnl_percent=pnl_percent,
-                            reason=reason,
-                            exclude_user_id=user_id,
-                            context=context
-                        )
-                        
-                        # Уведомление - с учётом авто-трейда
-                        pnl_abs = abs(real_pnl)
-                        pnl_sign = "+" if real_pnl >= 0 else "-"
-                        pnl_emoji = "✅" if real_pnl >= 0 else "📉"
-                        is_auto = pos.get('is_auto', False)
-                        
-                        try:
-                            if is_auto:
-                                # Уведомление для авто-трейда
-                                text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
+                                    real_pnl = _bybit_pnl_remaining.pop(key, 0.0)
+                                exit_price = bybit_exit
+                                reason = "TP" if real_pnl > 0 else "SL"
+                                logger.info(f"[BYBIT_SYNC] Using Bybit PnL (share): ${real_pnl:.2f}")
+                            else:
+                                logger.warning(f"[BYBIT_SYNC] Bybit trade too old ({time_diff:.0f}s), using local PnL")
+                    except Exception as e:
+                        logger.warning(f"[BYBIT_SYNC] Ошибка получения closed PnL: {e}")
+
+                    logger.info(f"[BYBIT_SYNC] Position {bybit_symbol} closed on Bybit! bybit_qty={pos.get('bybit_qty', 0)}")
+
+                    # Возвращаем деньги пользователю (с локом для защиты от race conditions)
+                    returned = pos['amount'] + real_pnl
+                    async with get_user_lock(user_id):
+                        user = get_user(user_id)  # Re-read with lock
+                        user['balance'] = sanitize_balance(user['balance'] + returned)
+                        user['total_profit'] = (user.get('total_profit', 0) or 0) + real_pnl
+                        save_user(user_id)
+
+                    # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
+                    accumulated_pnl = pos.get('realized_pnl', 0) or 0
+                    total_pnl_for_history = real_pnl + accumulated_pnl
+                    db_close_position(pos['id'], exit_price, total_pnl_for_history, f'BYBIT_{reason}')
+
+                    # Перезагружаем кэш из БД для консистентности
+                    update_positions_cache(user_id, db_get_positions(user_id))
+                    user_positions = get_positions(user_id)  # Refresh local reference
+                    logger.info(f"[BYBIT_SYNC] Position {pos['id']} closed, cache reloaded")
+
+                    # === ВАЖНО: закрываем ВСЕ связанные авто-позиции других юзеров ===
+                    # Рассчитываем PnL% для linked позиций
+                    if pos['entry'] > 0:
+                        pnl_percent = real_pnl / (pos['amount'] * LEVERAGE) if pos['amount'] > 0 else 0
+                    else:
+                        pnl_percent = 0
+
+                    # Закрываем все связанные авто-позиции
+                    await close_linked_auto_positions(
+                        symbol=pos['symbol'],
+                        direction=pos['direction'],
+                        exit_price=exit_price,
+                        pnl_percent=pnl_percent,
+                        reason=reason,
+                        exclude_user_id=user_id,
+                        context=context
+                    )
+
+                    # Уведомление - с учётом авто-трейда
+                    pnl_abs = abs(real_pnl)
+                    pnl_sign = "+" if real_pnl >= 0 else "-"
+                    pnl_emoji = "✅" if real_pnl >= 0 else "📉"
+                    is_auto = pos.get('is_auto', False)
+
+                    try:
+                        if is_auto:
+                            # Уведомление для авто-трейда
+                            text = f"""<b>🤖 АВТО-СДЕЛКА ЗАКРЫТА</b>
 
 <b>{pnl_sign}${pnl_abs:.2f}</b> | {reason} {pnl_emoji}
 
@@ -7602,15 +7564,15 @@ async def process_user_positions(user_id: int, bybit_sync_available: bool,
 Bybit синхронизация
 
 💰 Баланс: ${user['balance']:.2f}"""
-                            else:
-                                text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\n{pos['direction']} | {reason}\n{pnl_emoji} {pnl_sign}${pnl_abs:.2f}\n\n💰 Баланс: ${user['balance']:.2f}"
-                            
-                            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
-                            await context.bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
-                            logger.info(f"[BYBIT_SYNC] User {user_id}: {ticker} closed on Bybit, PnL=${real_pnl:.2f} (auto={is_auto})")
-                        except Exception as e:
-                            logger.error(f"[BYBIT_SYNC] Notify error: {e}")
-                        continue
+                        else:
+                            text = f"<b>📡 Bybit</b>\n\n{ticker} закрыт\n{pos['direction']} | {reason}\n{pnl_emoji} {pnl_sign}${pnl_abs:.2f}\n\n💰 Баланс: ${user['balance']:.2f}"
+
+                        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Домой", callback_data="menu")]])
+                        await context.bot.send_message(user_id, text, parse_mode="HTML", reply_markup=keyboard)
+                        logger.info(f"[BYBIT_SYNC] User {user_id}: {ticker} closed on Bybit, PnL=${real_pnl:.2f} (auto={is_auto})")
+                    except Exception as e:
+                        logger.error(f"[BYBIT_SYNC] Notify error: {e}")
+                    continue
         
         # Cache Bybit prices per symbol to avoid duplicate API calls
         _bybit_price_cache = {}
@@ -11056,13 +11018,16 @@ def main() -> None:
         async def phantom_cleanup_job(context):
             """Быстрая очистка phantom позиций прямо в БД - без API запросов к Bybit"""
             try:
+                # Без хеджирования понятие phantom (по Bybit) не применимо.
+                if not await is_hedging_enabled():
+                    return
+
                 # Получаем реальные позиции с Bybit
                 bybit_open_symbols = set()
                 try:
-                    if await is_hedging_enabled():
-                        bybit_positions = await hedger.get_all_positions()
-                        for p in bybit_positions:
-                            bybit_open_symbols.add(p['symbol'])
+                    bybit_positions = await hedger.get_all_positions()
+                    for p in bybit_positions:
+                        bybit_open_symbols.add(p['symbol'])
                 except:
                     return  # Если Bybit недоступен - не чистим
                 
@@ -11152,9 +11117,14 @@ def main() -> None:
             except Exception as e:
                 logger.error(f"[PHANTOM_JOB] Error: {e}")
         
-        # Запускаем phantom cleanup каждые 60 секунд, старт через 45 сек
-        app.job_queue.run_repeating(phantom_cleanup_job, interval=60, first=45)
-        logger.info("[JOBS] Phantom cleanup job registered (every 60s)")
+        # Авто-phantom cleanup отключен по умолчанию:
+        # слишком агрессивная очистка может закрывать нормальные локальные позиции как PHANTOM_CLEANUP.
+        # При необходимости можно включить переменной окружения ENABLE_PHANTOM_CLEANUP_JOB=1.
+        if os.getenv("ENABLE_PHANTOM_CLEANUP_JOB", "0") == "1":
+            app.job_queue.run_repeating(phantom_cleanup_job, interval=60, first=45)
+            logger.info("[JOBS] Phantom cleanup job registered (every 60s)")
+        else:
+            logger.info("[JOBS] Phantom cleanup job disabled (set ENABLE_PHANTOM_CLEANUP_JOB=1 to enable)")
         
         # === AI ANALYZER INITIALIZATION ===
         if AI_FEATURES:
@@ -11177,22 +11147,28 @@ def main() -> None:
                 try:
                     from datetime import datetime, timezone, timedelta
                     now = datetime.now(timezone.utc)
-                    since = (now - timedelta(hours=24)).isoformat()
+                    # Строго за прошлый календарный день (UTC), а не скользящие 24 часа.
+                    # Это устраняет почти одинаковые отчеты между соседними запусками.
+                    day_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    day_start = day_end - timedelta(days=1)
+                    since = day_start.isoformat()
+                    until = day_end.isoformat()
+                    report_date = day_start.date().isoformat()
                     if USE_POSTGRES:
                         rows = run_sql(
-                            "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= %s",
-                            (since,), fetch="all"
+                            "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= %s AND closed_at < %s",
+                            (since, until), fetch="all"
                         )
                     else:
                         rows = run_sql(
-                            "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= ?",
-                            (since,), fetch="all"
+                            "SELECT user_id, symbol, direction, entry, exit_price, pnl, reason, closed_at FROM history WHERE closed_at >= ? AND closed_at < ?",
+                            (since, until), fetch="all"
                         )
                     trades = [dict(r) for r in (rows or [])]
                     news = []
                     if NEWS_FEATURES and news_analyzer and getattr(news_analyzer, 'recent_events', None):
                         news = [{'title': getattr(e, 'title', str(e)[:80])} for e in list(news_analyzer.recent_events)[-20:]]
-                    summary = await ai_daily_insights(trades, news)
+                    summary = await ai_daily_insights(trades, news, report_date=report_date)
                     logger.info(f"[AI] Daily summary generated: {len(trades)} trades, summary length {len(summary or '')}")
                 except Exception as e:
                     logger.error(f"[AI] Daily summary job error: {e}", exc_info=True)

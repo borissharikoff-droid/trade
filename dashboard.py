@@ -1617,9 +1617,27 @@ def api_ai():
         learned_rules = memory.learned_rules[-50:]
         learned_rules.reverse()
         
-        # Get market insights (last 30)
-        insights = memory.market_insights[-30:]
-        insights.reverse()
+        # Get market insights (latest first) with de-duplication for daily summaries by report date.
+        raw_insights = list(memory.market_insights)
+        raw_insights.reverse()
+        insights = []
+        seen_daily_keys = set()
+        for ins in raw_insights:
+            if not isinstance(ins, dict):
+                continue
+            if ins.get('category') == 'daily_summary':
+                meta = ins.get('meta') if isinstance(ins.get('meta'), dict) else {}
+                report_key = meta.get('report_date')
+                if not report_key:
+                    ts = str(ins.get('timestamp', ''))
+                    report_key = ts[:10] if len(ts) >= 10 else ''
+                if report_key and report_key in seen_daily_keys:
+                    continue
+                if report_key:
+                    seen_daily_keys.add(report_key)
+            insights.append(ins)
+            if len(insights) >= 30:
+                break
         
         # Get trade patterns summary per symbol
         pattern_summary = {}
@@ -1768,7 +1786,7 @@ def api_ai_generate_report():
         except:
             pass
 
-        summary = asyncio.run(ai_daily_insights(trades, news))
+        summary = asyncio.run(ai_daily_insights(trades, news, report_date=day_start.date().isoformat()))
 
         msk_tz = timezone(timedelta(hours=3))
         report_time = datetime.now(msk_tz).strftime('%d.%m.%Y %H:%M MSK')
