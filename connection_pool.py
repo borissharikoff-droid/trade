@@ -95,6 +95,12 @@ class ConnectionPool:
                     cursor = conn.cursor()
                     cursor.execute("SELECT 1")
                     cursor.close()
+                    # psycopg2 starts a transaction even for SELECT when autocommit=False.
+                    # Reset state so later set_session/autocommit changes won't fail.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                     return conn
                 except Exception as e:
                     last_error = e
@@ -144,6 +150,11 @@ class ConnectionPool:
         
         if self.use_postgres:
             if self._pool:
+                try:
+                    # Always return clean PostgreSQL connection to pool.
+                    conn.rollback()
+                except Exception:
+                    pass
                 self._pool.putconn(conn)
         else:
             # SQLite - return to queue if not full
