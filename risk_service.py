@@ -27,3 +27,15 @@ def validate_daily_limit(today_count: int, max_daily: int) -> Tuple[bool, str]:
         return False, "daily_limit_reached"
     return True, "ok"
 
+
+def validate_risk_per_trade(amount: float, balance: float, risk_percent: float) -> Tuple[bool, str]:
+    amt = float(amount or 0)
+    bal = float(balance or 0)
+    risk = float(risk_percent or 0)
+    if risk <= 0:
+        return False, "risk_percent_invalid"
+    max_amount = bal * risk
+    if amt > max_amount:
+        return False, "amount_exceeds_risk_limit"
+    return True, "ok"
+

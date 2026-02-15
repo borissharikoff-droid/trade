@@ -31,6 +31,14 @@ from dashboard import init_dashboard, start_dashboard_thread
 from position_service import build_auto_position, calculate_close_outcome
 from balance_service import apply_close_delta
 from risk_service import validate_position_open, validate_daily_limit
+from risk_guard import (
+    check_risk_per_trade,
+    check_daily_stop_loss,
+    check_consecutive_losses,
+    update_daily_pnl,
+)
+from metrics_calculator import update_user_metrics, ensure_user_metrics_table
+from auto_reports import ensure_reports_table, refresh_reports_for_all_users
 from http_client import get_json_with_retry
 
 load_dotenv()
@@ -366,7 +374,7 @@ def init_db():
         if USE_POSTGRES:
             c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS leverage_mode TEXT DEFAULT 'auto'")
             c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_leverage INTEGER DEFAULT 50")
-            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS risk_per_trade REAL DEFAULT 0.02")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS risk_per_trade REAL DEFAULT 0.015")
         else:
             c.execute("PRAGMA table_info(users)")
             columns = [col[1] for col in c.fetchall()]
@@ -375,11 +383,50 @@ def init_db():
             if 'max_leverage' not in columns:
                 c.execute("ALTER TABLE users ADD COLUMN max_leverage INTEGER DEFAULT 50")
             if 'risk_per_trade' not in columns:
-                c.execute("ALTER TABLE users ADD COLUMN risk_per_trade REAL DEFAULT 0.02")
+                c.execute("ALTER TABLE users ADD COLUMN risk_per_trade REAL DEFAULT 0.015")
         conn.commit()
         logger.info("[DB] Migration: leverage columns ensured")
     except Exception as e:
         logger.warning(f"[DB] Migration warning (leverage): {e}")
+
+    # Миграция: risk-guard поля пользователя
+    try:
+        if USE_POSTGRES:
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_stop_loss REAL DEFAULT -0.03")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS max_consecutive_losses INTEGER DEFAULT 5")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_pnl REAL DEFAULT 0")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS consecutive_losses INTEGER DEFAULT 0")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_trade_date TEXT")
+        else:
+            c.execute("PRAGMA table_info(users)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'daily_stop_loss' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN daily_stop_loss REAL DEFAULT -0.03")
+            if 'max_consecutive_losses' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN max_consecutive_losses INTEGER DEFAULT 5")
+            if 'daily_pnl' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN daily_pnl REAL DEFAULT 0")
+            if 'consecutive_losses' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN consecutive_losses INTEGER DEFAULT 0")
+            if 'last_trade_date' not in columns:
+                c.execute("ALTER TABLE users ADD COLUMN last_trade_date TEXT")
+        c.execute("UPDATE users SET risk_per_trade = 0.015 WHERE risk_per_trade IS NULL OR risk_per_trade <= 0")
+        c.execute("UPDATE users SET daily_stop_loss = -0.03 WHERE daily_stop_loss IS NULL")
+        c.execute("UPDATE users SET max_consecutive_losses = 5 WHERE max_consecutive_losses IS NULL OR max_consecutive_losses <= 0")
+        c.execute("UPDATE users SET daily_pnl = 0 WHERE daily_pnl IS NULL")
+        c.execute("UPDATE users SET consecutive_losses = 0 WHERE consecutive_losses IS NULL")
+        conn.commit()
+        logger.info("[DB] Migration: risk-guard columns ensured")
+    except Exception as e:
+        logger.warning(f"[DB] Migration warning (risk-guard): {e}")
+
+    # Миграция: таблицы метрик и отчетов
+    try:
+        ensure_user_metrics_table()
+        ensure_reports_table()
+        logger.info("[DB] Migration: user_metrics and reports tables ensured")
+    except Exception as e:
+        logger.warning(f"[DB] Migration warning (metrics/reports): {e}")
     
     # Миграция: добавляем поля для авто-трейда пользователя
     try:
@@ -521,7 +568,9 @@ def db_get_user(user_id: int) -> Dict:
     row = run_sql("""
         SELECT balance, total_deposit, total_profit, trading,
                auto_trade, auto_trade_max_daily, auto_trade_min_winrate,
-               auto_trade_today, auto_trade_last_reset, referrer_id
+               auto_trade_today, auto_trade_last_reset, referrer_id,
+               risk_per_trade, daily_stop_loss, max_consecutive_losses,
+               daily_pnl, consecutive_losses, last_trade_date
         FROM users WHERE user_id = ?
     """, (user_id,), fetch="one")
 
@@ -532,7 +581,9 @@ def db_get_user(user_id: int) -> Dict:
         return {
             'balance': 0.0, 'total_deposit': 0.0, 'total_profit': 0.0, 'trading': False,
             'auto_trade': False, 'auto_trade_max_daily': 10, 'auto_trade_min_winrate': 70,
-            'auto_trade_today': 0, 'auto_trade_last_reset': None, 'referrer_id': None
+            'auto_trade_today': 0, 'auto_trade_last_reset': None, 'referrer_id': None,
+            'risk_per_trade': 0.015, 'daily_stop_loss': -0.03, 'max_consecutive_losses': 5,
+            'daily_pnl': 0.0, 'consecutive_losses': 0, 'last_trade_date': None
         }
 
     return {
@@ -545,7 +596,13 @@ def db_get_user(user_id: int) -> Dict:
         'auto_trade_min_winrate': int(row['auto_trade_min_winrate'] or 70),
         'auto_trade_today': int(row['auto_trade_today'] or 0),
         'auto_trade_last_reset': row['auto_trade_last_reset'],
-        'referrer_id': row.get('referrer_id')
+        'referrer_id': row.get('referrer_id'),
+        'risk_per_trade': float(row.get('risk_per_trade') or 0.015),
+        'daily_stop_loss': float(row.get('daily_stop_loss') if row.get('daily_stop_loss') is not None else -0.03),
+        'max_consecutive_losses': int(row.get('max_consecutive_losses') or 5),
+        'daily_pnl': float(row.get('daily_pnl') or 0),
+        'consecutive_losses': int(row.get('consecutive_losses') or 0),
+        'last_trade_date': row.get('last_trade_date'),
     }
 
 # Whitelist of allowed columns for user updates (SQL injection prevention)
@@ -553,7 +610,9 @@ ALLOWED_USER_COLUMNS = {
     'balance', 'total_deposit', 'total_profit', 'trading', 'referrer_id',
     'auto_trade', 'auto_trade_max_daily', 'auto_trade_min_winrate',
     'auto_trade_today', 'auto_trade_last_reset',
-    'leverage_mode', 'max_leverage', 'risk_per_trade'
+    'leverage_mode', 'max_leverage', 'risk_per_trade',
+    'daily_stop_loss', 'max_consecutive_losses', 'daily_pnl',
+    'consecutive_losses', 'last_trade_date'
 }
 
 def db_update_user(user_id: int, **kwargs):
@@ -721,6 +780,18 @@ def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     
     # Записываем результат для статистики smart analyzer
     record_trade_result(pnl)
+
+    # Обновляем risk-guard состояние пользователя
+    try:
+        update_daily_pnl(pos['user_id'], pnl)
+    except Exception as e:
+        logger.warning(f"[RISK_GUARD] Failed to update daily counters for {pos['user_id']}: {e}")
+
+    # Обновляем агрегированные метрики пользователя
+    try:
+        update_user_metrics(pos['user_id'])
+    except Exception as e:
+        logger.warning(f"[METRICS] Failed to refresh metrics for {pos['user_id']}: {e}")
     
     # Comprehensive logging (не критично, если не сработает)
     try:
@@ -2548,6 +2619,12 @@ def get_user(user_id: int) -> Dict:
     user.setdefault('auto_trade_today', 0)
     user.setdefault('auto_trade_last_reset', None)
     user.setdefault('referrer_id', None)
+    user.setdefault('risk_per_trade', 0.015)
+    user.setdefault('daily_stop_loss', -0.03)
+    user.setdefault('max_consecutive_losses', 5)
+    user.setdefault('daily_pnl', 0.0)
+    user.setdefault('consecutive_losses', 0)
+    user.setdefault('last_trade_date', None)
     return user
 
 def save_user(user_id: int):
@@ -2566,7 +2643,13 @@ def save_user(user_id: int):
             auto_trade_max_daily=user.get('auto_trade_max_daily', 10),
             auto_trade_min_winrate=user.get('auto_trade_min_winrate', 70),
             auto_trade_today=user.get('auto_trade_today', 0),
-            auto_trade_last_reset=user.get('auto_trade_last_reset')
+            auto_trade_last_reset=user.get('auto_trade_last_reset'),
+            risk_per_trade=user.get('risk_per_trade', 0.015),
+            daily_stop_loss=user.get('daily_stop_loss', -0.03),
+            max_consecutive_losses=user.get('max_consecutive_losses', 5),
+            daily_pnl=user.get('daily_pnl', 0.0),
+            consecutive_losses=user.get('consecutive_losses', 0),
+            last_trade_date=user.get('last_trade_date')
         )
         
         logger.debug(f"[SAVE_USER] User {user_id} saved: balance=${balance:.2f}, deposit=${total_deposit:.2f}")
@@ -5586,6 +5669,21 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if not valid_open:
                     logger.info(f"[AUTO_TRADE] User {auto_user_id}: risk validation blocked open")
                     continue
+
+                risk_ok, risk_reason = check_risk_per_trade(auto_user_id, auto_bet, auto_balance)
+                if not risk_ok:
+                    logger.info(f"[AUTO_TRADE] User {auto_user_id}: risk-guard blocked ({risk_reason})")
+                    continue
+
+                daily_ok, daily_reason = check_daily_stop_loss(auto_user_id)
+                if not daily_ok:
+                    logger.info(f"[AUTO_TRADE] User {auto_user_id}: daily stop-loss blocked ({daily_reason})")
+                    continue
+
+                streak_ok, streak_reason = check_consecutive_losses(auto_user_id)
+                if not streak_ok:
+                    logger.info(f"[AUTO_TRADE] User {auto_user_id}: loss streak blocked ({streak_reason})")
+                    continue
                 
                 ticker = symbol.split("/")[0]
                 
@@ -5985,6 +6083,40 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     ticker = symbol.split("/")[0] if "/" in symbol else symbol
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
+
+    # === RISK GUARD CHECKS ===
+    risk_ok, risk_reason = check_risk_per_trade(user_id, amount, user.get('balance', 0))
+    if not risk_ok:
+        await query.edit_message_text(
+            "<b>⛔ Риск-лимит на сделку</b>\n\n"
+            "Сумма сделки превышает разрешенный риск на одну позицию.\n"
+            "Уменьшите размер входа.",
+            parse_mode="HTML",
+        )
+        logger.info(f"[RISK_GUARD] User {user_id}: blocked by risk_per_trade ({risk_reason})")
+        return
+
+    daily_ok, daily_reason = check_daily_stop_loss(user_id)
+    if not daily_ok:
+        await query.edit_message_text(
+            "<b>⛔ Дневной стоп-лосс достигнут</b>\n\n"
+            "Торговля на сегодня временно остановлена.\n"
+            "Попробуйте снова завтра.",
+            parse_mode="HTML",
+        )
+        logger.info(f"[RISK_GUARD] User {user_id}: blocked by daily_stop_loss ({daily_reason})")
+        return
+
+    streak_ok, streak_reason = check_consecutive_losses(user_id)
+    if not streak_ok:
+        await query.edit_message_text(
+            "<b>⛔ Лимит убыточных сделок подряд</b>\n\n"
+            "Достигнут лимит убыточной серии.\n"
+            "Сделайте паузу перед новым входом.",
+            parse_mode="HTML",
+        )
+        logger.info(f"[RISK_GUARD] User {user_id}: blocked by consecutive losses ({streak_reason})")
+        return
 
     # === ЗАЩИТА: Не добавлять к убыточной позиции ===
     for p in user_positions:
@@ -11021,6 +11153,17 @@ def main() -> None:
         # Запускаем при старте (через 30 сек) и каждый час
         app.job_queue.run_once(_safe_job("auto_profit_sync_job_once", auto_profit_sync_job, timeout=60.0), when=30)
         app.job_queue.run_repeating(_safe_job("auto_profit_sync_job", auto_profit_sync_job, timeout=60.0), interval=3600, first=3630)  # Каждый час
+
+        # === REPORT SNAPSHOTS JOB (dashboard-only) ===
+        async def reports_refresh_job(context):
+            try:
+                refreshed = refresh_reports_for_all_users()
+                logger.info(f"[REPORTS] Refreshed reports for {refreshed.get('refreshed_users', 0)} users")
+            except Exception as e:
+                logger.warning(f"[REPORTS] Refresh error: {e}")
+
+        app.job_queue.run_once(_safe_job("reports_refresh_job_once", reports_refresh_job, timeout=120.0), when=40)
+        app.job_queue.run_repeating(_safe_job("reports_refresh_job", reports_refresh_job, timeout=120.0), interval=21600, first=21600)  # Every 6h
         
         # === PHANTOM CLEANUP JOB (быстрая SQL-очистка без Bybit API) ===
         async def phantom_cleanup_job(context):

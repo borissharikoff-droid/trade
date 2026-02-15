@@ -765,6 +765,63 @@ def api_stats():
     })
 
 
+@app.route('/api/metrics')
+def api_metrics():
+    """User metrics endpoint"""
+    user_id = request.args.get('user_id', type=int)
+    period_days = request.args.get('period_days', default=30, type=int)
+    if not user_id:
+        return jsonify({'error': 'user_id is required'}), 400
+    try:
+        from metrics_calculator import get_trade_metrics
+
+        metrics = get_trade_metrics(user_id=user_id, period_days=period_days or 30)
+        metrics['timestamp'] = to_moscow_time()
+        return jsonify(metrics)
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error in /api/metrics: {e}", exc_info=True)
+        return jsonify({'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
+@app.route('/api/risk_guard')
+def api_risk_guard():
+    """Risk-guard state endpoint"""
+    user_id = request.args.get('user_id', type=int)
+    if not user_id:
+        return jsonify({'error': 'user_id is required'}), 400
+    try:
+        from risk_guard import get_risk_status
+
+        status = get_risk_status(user_id=user_id)
+        status['timestamp'] = to_moscow_time()
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error in /api/risk_guard: {e}", exc_info=True)
+        return jsonify({'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
+@app.route('/api/reports/<period>')
+def api_reports(period: str):
+    """Calendar report endpoint: weekly/monthly"""
+    user_id = request.args.get('user_id', type=int)
+    if not user_id:
+        return jsonify({'error': 'user_id is required'}), 400
+
+    normalized_period = (period or '').strip().lower()
+    if normalized_period not in ('weekly', 'monthly'):
+        return jsonify({'error': 'period must be weekly or monthly'}), 400
+
+    try:
+        from auto_reports import generate_weekly_report, generate_monthly_report
+
+        report = generate_weekly_report(user_id) if normalized_period == 'weekly' else generate_monthly_report(user_id)
+        report['timestamp'] = to_moscow_time()
+        return jsonify(report)
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Error in /api/reports/{period}: {e}", exc_info=True)
+        return jsonify({'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
 @app.route('/api/positions')
 def api_positions():
     """Open positions endpoint"""
