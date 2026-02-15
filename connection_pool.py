@@ -82,13 +82,28 @@ class ConnectionPool:
         """Get a connection from the pool"""
         if not self._initialized:
             self.initialize()
-        
+
         if self.use_postgres:
-            if self._pool:
-                return self._pool.getconn()
-            else:
-                # Fallback to direct connection
-                return psycopg2.connect(self.database_url)
+            # Handle transient pool/network issues with short retries.
+            last_error = None
+            for attempt in range(3):
+                try:
+                    if self._pool:
+                        conn = self._pool.getconn()
+                    else:
+                        conn = psycopg2.connect(self.database_url)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1")
+                    cursor.close()
+                    return conn
+                except Exception as e:
+                    last_error = e
+                    if not _is_transient_db_error(e) or attempt >= 2:
+                        raise
+                    time.sleep(0.15 * (2 ** attempt))
+            if last_error:
+                raise last_error
+            raise RuntimeError("Failed to get PostgreSQL connection")
         else:
             # SQLite - get from queue or create new
             try:
@@ -219,6 +234,23 @@ def get_pooled_connection():
             return conn
         else:
             raise RuntimeError("No database driver available and connection pool not initialized")
+
+
+def _is_transient_db_error(error: Exception) -> bool:
+    error_text = str(error).lower()
+    transient_hints = (
+        "timeout",
+        "temporar",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "too many clients",
+        "could not connect",
+        "server closed the connection",
+        "ssl syscall error",
+        "broken pipe",
+    )
+    return any(h in error_text for h in transient_hints)
 
 
 def return_pooled_connection(conn):

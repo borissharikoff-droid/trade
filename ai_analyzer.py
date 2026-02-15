@@ -9,7 +9,7 @@ import os
 import json
 import logging
 import asyncio
-import aiohttp
+from http_client import get_json_with_retry
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
@@ -114,6 +114,16 @@ class AIMemory:
         self.total_news_analyzed: int = 0
         self.prediction_accuracy: float = 0.5
         self._prediction_accuracy_ema_n: int = 0  # для EMA
+        self.schema_validation: Dict[str, int] = {
+            'trade_analysis_ok': 0,
+            'trade_analysis_fail': 0,
+            'trade_decision_ok': 0,
+            'trade_decision_fail': 0,
+            'news_impact_ok': 0,
+            'news_impact_fail': 0,
+            'daily_summary_generated': 0,
+            'daily_summary_failed': 0,
+        }
         
         self._db_initialized = False
         self._init_db()
@@ -209,6 +219,7 @@ class AIMemory:
                         self.total_news_analyzed = data.get('total_news_analyzed', 0)
                         self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
                         self._prediction_accuracy_ema_n = data.get('prediction_accuracy_ema_n', 0)
+                        self.schema_validation = data.get('schema_validation', self.schema_validation) or self.schema_validation
                 
                 logger.info(f"[AI_MEMORY] ✓ Loaded from PostgreSQL: {self.total_trades_analyzed} trades, {len(self.recent_analyses)} recent analyses")
                 return True
@@ -239,6 +250,7 @@ class AIMemory:
                     self.total_news_analyzed = data.get('total_news_analyzed', 0)
                     self.prediction_accuracy = data.get('prediction_accuracy', 0.5)
                     self._prediction_accuracy_ema_n = data.get('prediction_accuracy_ema_n', 0)
+                    self.schema_validation = data.get('schema_validation', self.schema_validation) or self.schema_validation
                 logger.info(f"[AI_MEMORY] Loaded from file: {self.total_trades_analyzed} trades, {len(self.recent_analyses)} recent analyses")
                 
                 # Мигрируем в PostgreSQL если доступен
@@ -284,6 +296,7 @@ class AIMemory:
                         'total_news_analyzed': self.total_news_analyzed,
                         'prediction_accuracy': self.prediction_accuracy,
                         'prediction_accuracy_ema_n': self._prediction_accuracy_ema_n,
+                        'schema_validation': self.schema_validation,
                         'last_saved': datetime.now().isoformat()
                     })
                 ]
@@ -326,6 +339,7 @@ class AIMemory:
                 'total_news_analyzed': self.total_news_analyzed,
                 'prediction_accuracy': self.prediction_accuracy,
                 'prediction_accuracy_ema_n': self._prediction_accuracy_ema_n,
+                'schema_validation': self.schema_validation,
                 'last_saved': datetime.now().isoformat()
             }
             with open(MEMORY_PATH, 'w', encoding='utf-8') as f:
@@ -623,6 +637,78 @@ class DeepSeekAnalyzer:
         except Exception as e:
             logger.error(f"[AI] DeepSeek API error: {e}")
             return None
+
+    def _extract_json(self, response: str) -> Dict[str, Any]:
+        """Extract JSON object from a free-form LLM response."""
+        if not response:
+            return {}
+        try:
+            json_start = response.find('{')
+            json_end = response.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                return json.loads(response[json_start:json_end])
+        except Exception:
+            return {}
+        return {}
+
+    def _mark_schema(self, key: str, ok: bool):
+        ok_key = f"{key}_ok"
+        fail_key = f"{key}_fail"
+        if ok:
+            self.memory.schema_validation[ok_key] = int(self.memory.schema_validation.get(ok_key, 0)) + 1
+        else:
+            self.memory.schema_validation[fail_key] = int(self.memory.schema_validation.get(fail_key, 0)) + 1
+
+    def _validate_trade_analysis_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = dict(payload or {})
+        try:
+            cleaned['win_factors'] = [str(x)[:120] for x in (cleaned.get('win_factors') or []) if str(x).strip()][:8]
+            cleaned['loss_factors'] = [str(x)[:120] for x in (cleaned.get('loss_factors') or []) if str(x).strip()][:8]
+            cleaned['lessons_learned'] = [str(x)[:120] for x in (cleaned.get('lessons_learned') or []) if str(x).strip()][:10]
+            cleaned['recommendations'] = [str(x)[:120] for x in (cleaned.get('recommendations') or []) if str(x).strip()][:10]
+            cleaned['market_conditions'] = str(cleaned.get('market_conditions', ''))[:800]
+            cleaned['entry_quality'] = max(1, min(10, int(float(cleaned.get('entry_quality', 5) or 5))))
+            cleaned['exit_quality'] = max(1, min(10, int(float(cleaned.get('exit_quality', 5) or 5))))
+            conf = float(cleaned.get('confidence_score', 0.5) or 0.5)
+            cleaned['confidence_score'] = max(0.0, min(1.0, conf))
+            self._mark_schema("trade_analysis", True)
+            return cleaned
+        except Exception:
+            self._mark_schema("trade_analysis", False)
+            return {}
+
+    def _validate_trade_decision_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = dict(payload or {})
+        try:
+            cleaned['should_trade'] = bool(cleaned.get('should_trade', True))
+            cleaned['confidence'] = max(0.0, min(1.0, float(cleaned.get('confidence', 0.5) or 0.5)))
+            cleaned['reasoning'] = str(cleaned.get('reasoning', ''))[:500]
+            cleaned['risk_level'] = str(cleaned.get('risk_level', 'medium')).lower()
+            if cleaned['risk_level'] not in ('low', 'medium', 'high'):
+                cleaned['risk_level'] = 'medium'
+            psm = float(cleaned.get('position_size_multiplier', 1.0) or 1.0)
+            cleaned['position_size_multiplier'] = max(0.5, min(1.5, psm))
+            cleaned['key_concerns'] = [str(x)[:100] for x in (cleaned.get('key_concerns') or [])][:8]
+            cleaned['key_strengths'] = [str(x)[:100] for x in (cleaned.get('key_strengths') or [])][:8]
+            self._mark_schema("trade_decision", True)
+            return cleaned
+        except Exception:
+            self._mark_schema("trade_decision", False)
+            return {'should_trade': True, 'confidence': 0.5}
+
+    def _validate_news_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = dict(payload or {})
+        try:
+            cleaned['patterns_identified'] = [str(x)[:120] for x in (cleaned.get('patterns_identified') or [])][:10]
+            cleaned['category'] = str(cleaned.get('category', 'other')).lower()
+            if cleaned['category'] not in ('regulatory', 'partnership', 'technical', 'market', 'other'):
+                cleaned['category'] = 'other'
+            cleaned['future_prediction_rule'] = str(cleaned.get('future_prediction_rule', ''))[:120]
+            self._mark_schema("news_impact", True)
+            return cleaned
+        except Exception:
+            self._mark_schema("news_impact", False)
+            return {}
     
     # ==================== TRADE ANALYSIS ====================
     
@@ -699,19 +785,7 @@ PnL: ${pnl:.2f} ({'ПРИБЫЛЬ ✅' if is_win else 'УБЫТОК ❌'})
             if not response:
                 return None
             
-            # Парсим JSON ответ
-            try:
-                # Извлекаем JSON из ответа
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    analysis_data = json.loads(response[json_start:json_end])
-                else:
-                    logger.warning(f"[AI] Could not parse JSON from response")
-                    analysis_data = {}
-            except json.JSONDecodeError:
-                logger.warning(f"[AI] Invalid JSON in response")
-                analysis_data = {}
+            analysis_data = self._validate_trade_analysis_payload(self._extract_json(response))
             
             # Создаём TradeAnalysis
             analysis = TradeAnalysis(
@@ -875,16 +949,7 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
                     'position_size_multiplier': 1.0
                 }
             
-            # Парсим ответ
-            try:
-                json_start = response.find('{')
-                json_end = response.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    decision = json.loads(response[json_start:json_end])
-                else:
-                    decision = {'should_trade': True, 'confidence': 0.5}
-            except json.JSONDecodeError:
-                decision = {'should_trade': True, 'confidence': 0.5}
+            decision = self._validate_trade_decision_payload(self._extract_json(response))
             
             result = {
                 'should_trade': decision.get('should_trade', True),
@@ -982,15 +1047,7 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             
             response = await self._call_deepseek(messages, max_tokens=600)
             
-            analysis_data = {}
-            if response:
-                try:
-                    json_start = response.find('{')
-                    json_end = response.rfind('}') + 1
-                    if json_start >= 0 and json_end > json_start:
-                        analysis_data = json.loads(response[json_start:json_end])
-                except json.JSONDecodeError:
-                    pass
+            analysis_data = self._validate_news_payload(self._extract_json(response or ""))
             
             # Создаём NewsImpact
             news_hash = hashlib.md5(title.encode()).hexdigest()[:16]
@@ -1206,8 +1263,31 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
             max_loss = min(loss_pnls) if loss_pnls else 0
             
             # === АНАЛИЗ СДЕЛОК ИЗ AI ПАМЯТИ ===
-            # Собираем все анализы сделок за этот период
-            analyses = self.memory.recent_analyses[-100:]  # последние 100
+            # Берем только анализы, относящиеся к дате отчета, иначе сводки разных дней похожи.
+            from datetime import timezone as dt_timezone
+            analyses = []
+            report_day = None
+            if report_date:
+                try:
+                    report_day = datetime.fromisoformat(str(report_date)).date()
+                except Exception:
+                    report_day = None
+
+            for a in self.memory.recent_analyses[-300:]:
+                if report_day is None:
+                    analyses.append(a)
+                    continue
+                ts_raw = a.get('timestamp')
+                if not ts_raw:
+                    continue
+                try:
+                    dt_val = datetime.fromisoformat(str(ts_raw).replace('Z', '+00:00'))
+                except Exception:
+                    continue
+                if dt_val.tzinfo is None:
+                    dt_val = dt_val.replace(tzinfo=dt_timezone.utc)
+                if dt_val.date() == report_day:
+                    analyses.append(a)
             
             # Группируем факторы победы и поражения
             all_win_factors = []
@@ -1301,10 +1381,10 @@ Winrate провайдера: {signal.get('provider_winrate', 'N/A')}%
                     regime_patterns_str = "\n".join(parts)
             
             # === ACCURACY STATS ===
-            accuracy = self.memory.prediction_accuracy
-            pred_total = accuracy.get('total_predictions', 0)
-            pred_correct = accuracy.get('correct_predictions', 0)
-            pred_accuracy = (pred_correct / pred_total * 100) if pred_total > 0 else 0
+            # В памяти хранится EMA float, не dict.
+            pred_accuracy = float(self.memory.prediction_accuracy or 0) * 100
+            pred_total = int(self.memory._prediction_accuracy_ema_n or 0)
+            pred_correct = int(round((pred_accuracy / 100) * pred_total)) if pred_total > 0 else 0
             
             system_prompt = """Ты - трейдинг-коуч и аналитик ИИ-торговой системы. Ты пишешь отчёт для владельца бота.
 
@@ -1438,16 +1518,33 @@ Win Rate: {wr_pct:.1f}%
                         'win_rate': round(wr_pct, 1),
                     }
                 )
+                self.memory.schema_validation['daily_summary_generated'] = int(self.memory.schema_validation.get('daily_summary_generated', 0)) + 1
                 self.memory.save()
             
             return response or "Не удалось сгенерировать инсайты"
             
         except Exception as e:
+            self.memory.schema_validation['daily_summary_failed'] = int(self.memory.schema_validation.get('daily_summary_failed', 0)) + 1
             logger.error(f"[AI] Error generating insights: {e}")
             return f"Ошибка: {e}"
     
     def get_stats(self) -> Dict:
         """Получить статистику AI"""
+        validation = self.memory.schema_validation or {}
+        total_schema = (
+            int(validation.get('trade_analysis_ok', 0)) +
+            int(validation.get('trade_analysis_fail', 0)) +
+            int(validation.get('trade_decision_ok', 0)) +
+            int(validation.get('trade_decision_fail', 0)) +
+            int(validation.get('news_impact_ok', 0)) +
+            int(validation.get('news_impact_fail', 0))
+        )
+        schema_ok = (
+            int(validation.get('trade_analysis_ok', 0)) +
+            int(validation.get('trade_decision_ok', 0)) +
+            int(validation.get('news_impact_ok', 0))
+        )
+        summary_total = int(validation.get('daily_summary_generated', 0)) + int(validation.get('daily_summary_failed', 0))
         return {
             'initialized': self._initialized,
             'total_trades_analyzed': self.memory.total_trades_analyzed,
@@ -1457,7 +1554,10 @@ Win Rate: {wr_pct:.1f}%
             'news_patterns_count': len(self.memory.news_patterns),
             'market_insights_count': len(self.memory.market_insights),
             'recent_analyses_count': len(self.recent_analyses),
-            'prediction_accuracy': self.memory.prediction_accuracy
+            'prediction_accuracy': self.memory.prediction_accuracy,
+            'schema_validation': validation,
+            'schema_valid_ratio': round((schema_ok / total_schema), 4) if total_schema else 0.0,
+            'daily_summary_success_ratio': round((int(validation.get('daily_summary_generated', 0)) / summary_total), 4) if summary_total else 0.0,
         }
 
 
@@ -1524,13 +1624,15 @@ async def fetch_coin_price(symbol: str) -> Optional[float]:
     try:
         # Нормализуем символ
         clean_symbol = symbol.upper().replace('/', '').replace('USDT', '') + 'USDT'
-        
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.binance.com/api/v3/ticker/price?symbol={clean_symbol}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return float(data.get('price', 0))
+        data = await get_json_with_retry(
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": clean_symbol},
+            timeout_seconds=5.0,
+            retries=2,
+            retry_delay=0.4,
+        )
+        if data and data.get('price') is not None:
+            return float(data.get('price', 0))
     except Exception as e:
         logger.debug(f"[AI] Price fetch error for {symbol}: {e}")
     return None

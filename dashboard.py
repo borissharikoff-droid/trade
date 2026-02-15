@@ -19,6 +19,8 @@ app.config['JSON_SORT_KEYS'] = False
 
 # Optional auth: set DASHBOARD_SECRET in env to require ?token=SECRET or Authorization: Bearer SECRET
 DASHBOARD_SECRET = os.environ.get("DASHBOARD_SECRET")
+FEATURE_DASHBOARD_PAGINATION = os.environ.get("FEATURE_DASHBOARD_PAGINATION", "1") == "1"
+FEATURE_NEW_LOG_EXPORT = os.environ.get("FEATURE_NEW_LOG_EXPORT", "1") == "1"
 
 
 def _dashboard_auth_ok():
@@ -72,6 +74,50 @@ def to_moscow_time(dt=None):
     else:
         dt = dt.astimezone(MOSCOW_TZ)
     return dt.strftime('%Y-%m-%d %H:%M:%S MSK')
+
+
+def _safe_page_limit(default_limit: int = 50, max_limit: int = 500):
+    if not FEATURE_DASHBOARD_PAGINATION:
+        return 1, default_limit
+    page = request.args.get('page', 1, type=int) or 1
+    limit = request.args.get('limit', default_limit, type=int) or default_limit
+    page = max(1, page)
+    limit = max(1, min(max_limit, limit))
+    return page, limit
+
+
+def _offset(page: int, limit: int) -> int:
+    return (page - 1) * limit
+
+
+def _parse_datetime_arg(value: str):
+    if not value:
+        return None
+    raw = str(value).strip()
+    for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=MOSCOW_TZ)
+        except Exception:
+            pass
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=MOSCOW_TZ)
+        return parsed.astimezone(MOSCOW_TZ)
+    except Exception:
+        return None
+
+
+def _paginate_list(items: list, page: int, limit: int) -> dict:
+    total = len(items)
+    off = _offset(page, limit)
+    return {
+        'items': items[off:off + limit],
+        'total': total,
+        'page': page,
+        'limit': limit,
+        'pages': (total + limit - 1) // limit if limit > 0 else 0,
+    }
 
 
 class DashboardLogHandler(logging.Handler):
@@ -723,11 +769,42 @@ def api_stats():
 def api_positions():
     """Open positions endpoint"""
     try:
+        page, limit = _safe_page_limit(default_limit=50, max_limit=500)
+        symbol = (request.args.get('symbol') or '').strip().upper()
+        direction = (request.args.get('direction') or '').strip().upper()
+        user_id = request.args.get('user_id', type=int)
+        from_dt = _parse_datetime_arg(request.args.get('from'))
+        to_dt = _parse_datetime_arg(request.args.get('to'))
+
         positions = get_open_positions_details()
-        logger.info(f"[DASHBOARD] /api/positions returning {len(positions)} positions")
+        if symbol:
+            positions = [p for p in positions if symbol in str(p.get('symbol', '')).upper()]
+        if direction in ('LONG', 'SHORT'):
+            positions = [p for p in positions if str(p.get('direction', '')).upper() == direction]
+        if user_id is not None:
+            positions = [p for p in positions if int(p.get('user_id', 0) or 0) == user_id]
+        if from_dt or to_dt:
+            filtered = []
+            for p in positions:
+                ts = _parse_datetime_arg(p.get('opened_at'))
+                if ts is None:
+                    continue
+                if from_dt and ts < from_dt:
+                    continue
+                if to_dt and ts > to_dt:
+                    continue
+                filtered.append(p)
+            positions = filtered
+
+        payload = _paginate_list(positions, page, limit)
+        logger.info(f"[DASHBOARD] /api/positions returning {len(payload['items'])}/{payload['total']} positions")
         return jsonify({
-            'count': len(positions),
-            'positions': positions,
+            'count': len(payload['items']),
+            'total': payload['total'],
+            'page': payload['page'],
+            'limit': payload['limit'],
+            'pages': payload['pages'],
+            'positions': payload['items'],
             'timestamp': to_moscow_time()
         })
     except Exception as e:
@@ -743,9 +820,78 @@ def api_positions():
 @app.route('/api/trades')
 def api_trades():
     """Recent trades endpoint"""
-    trades = get_recent_trades(30)
+    page, limit = _safe_page_limit(default_limit=30, max_limit=500)
+    symbol = (request.args.get('symbol') or '').strip().upper()
+    direction = (request.args.get('direction') or '').strip().upper()
+    reason = (request.args.get('reason') or '').strip().upper()
+    min_pnl = request.args.get('min_pnl', type=float)
+    max_pnl = request.args.get('max_pnl', type=float)
+    from_dt = _parse_datetime_arg(request.args.get('from'))
+    to_dt = _parse_datetime_arg(request.args.get('to'))
+
+    if not _run_sql:
+        return jsonify({'count': 0, 'total': 0, 'page': page, 'limit': limit, 'pages': 0, 'trades': [], 'timestamp': to_moscow_time()})
+
+    where_parts = ["1=1"]
+    params = []
+    if symbol:
+        where_parts.append("UPPER(symbol) LIKE ?")
+        params.append(f"%{symbol}%")
+    if direction in ('LONG', 'SHORT'):
+        where_parts.append("UPPER(direction)=?")
+        params.append(direction)
+    if reason:
+        where_parts.append("UPPER(reason) LIKE ?")
+        params.append(f"%{reason}%")
+    if min_pnl is not None:
+        where_parts.append("pnl >= ?")
+        params.append(min_pnl)
+    if max_pnl is not None:
+        where_parts.append("pnl <= ?")
+        params.append(max_pnl)
+    if from_dt:
+        where_parts.append("closed_at >= ?")
+        params.append(from_dt.isoformat())
+    if to_dt:
+        where_parts.append("closed_at <= ?")
+        params.append(to_dt.isoformat())
+
+    where_sql = " AND ".join(where_parts)
+    total_row = _run_sql(f"SELECT COUNT(*) as total FROM history WHERE {where_sql}", tuple(params), fetch="one") or {}
+    total = int(total_row.get('total') or 0)
+    query_params = tuple(params + [limit, _offset(page, limit)])
+    rows = _run_sql(
+        f"""
+        SELECT symbol, direction, entry, exit_price, pnl, reason, amount, closed_at
+        FROM history
+        WHERE {where_sql}
+        ORDER BY closed_at DESC
+        LIMIT ? OFFSET ?
+        """,
+        query_params,
+        fetch="all"
+    ) or []
+    trades = []
+    for trade in rows:
+        trade_reason = trade.get('reason', '') or ''
+        trades.append({
+            'symbol': trade.get('symbol', ''),
+            'direction': trade.get('direction', ''),
+            'entry': float(trade.get('entry', 0) or 0),
+            'exit_price': float(trade.get('exit_price', 0) or 0),
+            'pnl': round(float(trade.get('pnl', 0) or 0), 2),
+            'reason': trade_reason,
+            'amount': round(float(trade.get('amount', 0) or 0), 2),
+            'closed_at': trade.get('closed_at'),
+            'is_auto': 'AUTO' in trade_reason.upper() or 'LINKED' in trade_reason.upper()
+        })
+    pages = (total + limit - 1) // limit if limit else 0
     return jsonify({
         'count': len(trades),
+        'total': total,
+        'page': page,
+        'limit': limit,
+        'pages': pages,
         'trades': trades,
         'timestamp': to_moscow_time()
     })
@@ -764,21 +910,85 @@ def api_extended():
 @app.route('/api/logs')
 def api_logs():
     """Logs endpoint"""
-    limit = request.args.get('limit', 100, type=int)
-    limit = max(1, min(1000, limit))  # clamp 1-1000
+    page, limit = _safe_page_limit(default_limit=100, max_limit=1000)
+    offset = _offset(page, limit)
     level = request.args.get('level', None)
+    category = request.args.get('category', None)
+    symbol = request.args.get('symbol', None)
+    user_id = request.args.get('user_id', type=int)
+    from_dt = _parse_datetime_arg(request.args.get('from'))
+    to_dt = _parse_datetime_arg(request.args.get('to'))
     if level is not None and level not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
         level = None
-    
-    # Get in-memory logs
-    memory_logs = get_logs(limit, level)
-    
-    # Get DB logs
-    db_logs = get_db_logs(limit)
-    
+
+    # Get and filter in-memory logs
+    memory_all = list(_log_buffer)
+    memory_all.reverse()
+    filtered_memory = []
+    for log in memory_all:
+        if level and str(log.get('level')) != level:
+            continue
+        if category and str(log.get('category', '')).lower() != str(category).lower():
+            continue
+        if symbol and symbol.upper() not in str(log.get('symbol', '')).upper():
+            continue
+        if user_id is not None and int(log.get('user_id', 0) or 0) != user_id:
+            continue
+        dt = _parse_datetime_arg(log.get('timestamp_iso') or log.get('timestamp'))
+        if from_dt and dt and dt < from_dt:
+            continue
+        if to_dt and dt and dt > to_dt:
+            continue
+        filtered_memory.append(log)
+    memory_total = len(filtered_memory)
+    memory_logs = filtered_memory[offset:offset + limit]
+
+    # Get DB logs with filters/pagination
+    db_logs = []
+    db_total = 0
+    if _run_sql:
+        where_parts = ["1=1"]
+        params = []
+        if level:
+            where_parts.append("level = ?")
+            params.append(level)
+        if category:
+            where_parts.append("category = ?")
+            params.append(category)
+        if symbol:
+            where_parts.append("UPPER(symbol) LIKE ?")
+            params.append(f"%{symbol.upper()}%")
+        if user_id is not None:
+            where_parts.append("user_id = ?")
+            params.append(user_id)
+        if from_dt:
+            where_parts.append("timestamp >= ?")
+            params.append(from_dt.strftime('%Y-%m-%d %H:%M:%S'))
+        if to_dt:
+            where_parts.append("timestamp <= ?")
+            params.append(to_dt.strftime('%Y-%m-%d %H:%M:%S'))
+        where_sql = " AND ".join(where_parts)
+        db_total_row = _run_sql(f"SELECT COUNT(*) as total FROM trading_logs WHERE {where_sql}", tuple(params), fetch="one") or {}
+        db_total = int(db_total_row.get('total') or 0)
+        db_logs = _run_sql(
+            f"""
+            SELECT timestamp, category, level, user_id, message, symbol, direction
+            FROM trading_logs
+            WHERE {where_sql}
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params + [limit, offset]),
+            fetch="all"
+        ) or []
+
     return jsonify({
         'memory_logs': memory_logs,
         'db_logs': db_logs,
+        'memory_total': memory_total,
+        'db_total': db_total,
+        'page': page,
+        'limit': limit,
         'total_logs_in_buffer': len(_log_buffer),
         'timestamp': to_moscow_time()
     })
@@ -947,80 +1157,132 @@ def api_winrate_breakdown():
 
 @app.route('/api/export_logs')
 def api_export_logs():
-    """Export logs for a specified period"""
-    # Period: hours, days, months, or all
+    """Export logs by period/date range with accurate filtering."""
+    if not _run_sql:
+        return jsonify({'error': 'Database not connected'})
+
+    # Supported filters:
+    # - hours=24 / days=7 / months=1 / all=1
+    # - from=YYYY-MM-DD[ HH:MM:SS], to=YYYY-MM-DD[ HH:MM:SS] (priority over period)
     hours = request.args.get('hours', type=int)
     days = request.args.get('days', type=int)
     months = request.args.get('months', type=int)
     export_all = request.args.get('all', type=int)
-    
-    if not _run_sql:
-        return jsonify({'error': 'Database not connected'})
-    
-    # Calculate the cutoff time
-    now = datetime.now()
-    if export_all:
-        cutoff = datetime(2020, 1, 1)  # Very old date to get all logs
+    from_raw = request.args.get('from', type=str)
+    to_raw = request.args.get('to', type=str)
+    if not FEATURE_NEW_LOG_EXPORT:
+        from_raw = None
+        to_raw = None
+
+    now = datetime.now(MOSCOW_TZ)
+
+    def _parse_dt(value: str):
+        if not value:
+            return None
+        v = value.strip()
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+            try:
+                dt = datetime.strptime(v, fmt)
+                return dt.replace(tzinfo=MOSCOW_TZ)
+            except Exception:
+                continue
+        try:
+            parsed = datetime.fromisoformat(v.replace('Z', '+00:00'))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=MOSCOW_TZ)
+            return parsed.astimezone(MOSCOW_TZ)
+        except Exception:
+            return None
+
+    from_dt = _parse_dt(from_raw)
+    to_dt = _parse_dt(to_raw)
+
+    if from_dt or to_dt:
+        # Explicit date range has priority
+        start_dt = from_dt or datetime(2020, 1, 1, tzinfo=MOSCOW_TZ)
+        end_dt = to_dt or now
+        period_str = "custom"
+    elif export_all:
+        start_dt = datetime(2020, 1, 1, tzinfo=MOSCOW_TZ)
+        end_dt = now
         period_str = "all"
     elif hours:
-        cutoff = now - timedelta(hours=hours)
+        start_dt = now - timedelta(hours=hours)
+        end_dt = now
         period_str = f"{hours}h"
     elif days:
-        cutoff = now - timedelta(days=days)
+        start_dt = now - timedelta(days=days)
+        end_dt = now
         period_str = f"{days}d"
     elif months:
-        cutoff = now - timedelta(days=months * 30)
+        start_dt = now - timedelta(days=months * 30)
+        end_dt = now
         period_str = f"{months}m"
     else:
-        cutoff = now - timedelta(hours=24)  # Default 24h
+        start_dt = now - timedelta(hours=24)
+        end_dt = now
         period_str = "24h"
-    
+
+    if start_dt > end_dt:
+        start_dt, end_dt = end_dt, start_dt
+
+    # Use SQL-friendly datetime string (space separator) for both SQLite and PostgreSQL.
+    start_sql = start_dt.strftime('%Y-%m-%d %H:%M:%S')
+    end_sql = end_dt.strftime('%Y-%m-%d %H:%M:%S')
+
     try:
-        # Get logs from database (? placeholders auto-converted to %s for PostgreSQL by run_sql)
         db_logs = _run_sql("""
             SELECT timestamp, category, level, user_id, message, symbol, direction, data
             FROM trading_logs
-            WHERE timestamp > ?
+            WHERE timestamp >= ? AND timestamp <= ?
             ORDER BY timestamp DESC
-        """, (cutoff.isoformat(),), fetch="all")
-        
-        # Get in-memory logs
-        memory_logs = list(_log_buffer)
-        memory_logs.reverse()
-        
-        # Filter memory logs by time (or include all if export_all)
+        """, (start_sql, end_sql), fetch="all") or []
+
+        # Filter in-memory logs by timestamp_iso first (most accurate), then timestamp.
         filtered_memory = []
-        for log in memory_logs:
+        for log in reversed(list(_log_buffer)):  # newest first
+            log_dt = None
             try:
-                log_time = datetime.strptime(log['timestamp'], '%Y-%m-%d %H:%M:%S')
-                if log_time > cutoff:
+                ts_iso = log.get('timestamp_iso')
+                if ts_iso:
+                    log_dt = datetime.fromisoformat(str(ts_iso).replace('Z', '+00:00'))
+                    if log_dt.tzinfo is None:
+                        log_dt = log_dt.replace(tzinfo=MOSCOW_TZ)
+                    else:
+                        log_dt = log_dt.astimezone(MOSCOW_TZ)
+                else:
+                    ts = log.get('timestamp')
+                    if ts:
+                        log_dt = datetime.strptime(str(ts), '%Y-%m-%d %H:%M:%S').replace(tzinfo=MOSCOW_TZ)
+            except Exception:
+                log_dt = None
+
+            if log_dt is None:
+                if period_str == "all":
                     filtered_memory.append(log)
-            except:
-                # Include logs with unparseable timestamps if exporting all
-                if export_all:
-                    filtered_memory.append(log)
-        
-        # Combine and format for export
+                continue
+            if start_dt <= log_dt <= end_dt:
+                filtered_memory.append(log)
+
         export_data = {
             'period': period_str,
+            'feature_new_export': FEATURE_NEW_LOG_EXPORT,
             'exported_at': to_moscow_time(),
-            'cutoff': cutoff.isoformat(),
-            'db_logs_count': len(db_logs or []),
+            'from': start_dt.isoformat(),
+            'to': end_dt.isoformat(),
+            'db_logs_count': len(db_logs),
             'memory_logs_count': len(filtered_memory),
-            'db_logs': db_logs or [],
+            'db_logs': db_logs,
             'memory_logs': filtered_memory
         }
-        
-        # Return as downloadable JSON
-        response = Response(
+
+        return Response(
             json.dumps(export_data, indent=2, ensure_ascii=False, default=str),
             mimetype='application/json',
             headers={
                 'Content-Disposition': f'attachment; filename=logs_export_{period_str}_{now.strftime("%Y%m%d_%H%M%S")}.json'
             }
         )
-        return response
-        
     except Exception as e:
         logger.error(f"[DASHBOARD] Error exporting logs: {e}")
         return jsonify({'error': str(e)})
@@ -1029,20 +1291,37 @@ def api_export_logs():
 @app.route('/api/users')
 def api_users():
     """Users statistics endpoint"""
+    page, limit = _safe_page_limit(default_limit=100, max_limit=500)
     users = get_all_users_stats()
+    q = (request.args.get('q') or '').strip()
+    trading_filter = request.args.get('trading')
+    auto_filter = request.args.get('auto_trade')
+    if q:
+        users = [u for u in users if q in str(u.get('user_id', ''))]
+    if trading_filter in ('0', '1'):
+        expected = trading_filter == '1'
+        users = [u for u in users if bool(u.get('trading')) == expected]
+    if auto_filter in ('0', '1'):
+        expected = auto_filter == '1'
+        users = [u for u in users if bool(u.get('auto_trade')) == expected]
+    payload = _paginate_list(users, page, limit)
     
     # Calculate totals - включаем стоимость позиций
-    total_balance = sum(u['balance'] for u in users)
-    total_positions_value = sum(u.get('positions_amount', 0) for u in users)
+    total_balance = sum(u['balance'] for u in payload['items'])
+    total_positions_value = sum(u.get('positions_amount', 0) for u in payload['items'])
     total_equity = total_balance + total_positions_value  # Полная стоимость
-    total_deposits = sum(u['total_deposit'] for u in users)
-    active_traders = sum(1 for u in users if u['trading'])
-    auto_traders = sum(1 for u in users if u['auto_trade'])
-    total_pnl = sum(u.get('total_pnl', 0) for u in users)
+    total_deposits = sum(u['total_deposit'] for u in payload['items'])
+    active_traders = sum(1 for u in payload['items'] if u['trading'])
+    auto_traders = sum(1 for u in payload['items'] if u['auto_trade'])
+    total_pnl = sum(u.get('total_pnl', 0) for u in payload['items'])
     
     return jsonify({
-        'count': len(users),
-        'users': users,
+        'count': len(payload['items']),
+        'total': payload['total'],
+        'page': payload['page'],
+        'limit': payload['limit'],
+        'pages': payload['pages'],
+        'users': payload['items'],
         'totals': {
             'total_balance': round(total_balance, 2),
             'total_positions_value': round(total_positions_value, 2),
@@ -1617,7 +1896,7 @@ def api_ai():
         learned_rules = memory.learned_rules[-50:]
         learned_rules.reverse()
         
-        # Get market insights (latest first) with de-duplication for daily summaries by report date.
+        # Get DAILY summaries only (latest first) with de-duplication by report date.
         raw_insights = list(memory.market_insights)
         raw_insights.reverse()
         insights = []
@@ -1625,16 +1904,17 @@ def api_ai():
         for ins in raw_insights:
             if not isinstance(ins, dict):
                 continue
-            if ins.get('category') == 'daily_summary':
-                meta = ins.get('meta') if isinstance(ins.get('meta'), dict) else {}
-                report_key = meta.get('report_date')
-                if not report_key:
-                    ts = str(ins.get('timestamp', ''))
-                    report_key = ts[:10] if len(ts) >= 10 else ''
-                if report_key and report_key in seen_daily_keys:
-                    continue
-                if report_key:
-                    seen_daily_keys.add(report_key)
+            if ins.get('category') != 'daily_summary':
+                continue
+            meta = ins.get('meta') if isinstance(ins.get('meta'), dict) else {}
+            report_key = meta.get('report_date')
+            if not report_key:
+                ts = str(ins.get('timestamp', ''))
+                report_key = ts[:10] if len(ts) >= 10 else ''
+            if report_key and report_key in seen_daily_keys:
+                continue
+            if report_key:
+                seen_daily_keys.add(report_key)
             insights.append(ins)
             if len(insights) >= 30:
                 break

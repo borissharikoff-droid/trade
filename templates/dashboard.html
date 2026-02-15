@@ -1881,6 +1881,14 @@
         let usersSortDir = 'desc';
         let alertsExpanded = true;
         let pnlChart = null;
+        const requestControllers = {};
+        const dataState = {
+            tradesPage: 1,
+            logsPage: 1,
+            positionsPage: 1,
+            usersPage: 1,
+            pageLimit: 100,
+        };
         
         // Utility Functions
         function formatPnl(value) {
@@ -1910,6 +1918,22 @@
             if (MAP[r]) return MAP[r];
             if (r.startsWith('EARLY_EXIT')) return '🤖 AI Exit';
             return raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
+
+        async function fetchJsonManaged(key, url) {
+            try {
+                if (requestControllers[key]) {
+                    requestControllers[key].abort();
+                }
+                const controller = new AbortController();
+                requestControllers[key] = controller;
+                const response = await fetch(url, { signal: controller.signal });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return await response.json();
+            } catch (error) {
+                if (error?.name === 'AbortError') return null;
+                throw error;
+            }
         }
         
         function toMoscowTime(date) {
@@ -2148,7 +2172,7 @@
             currentLogFilter = level;
             document.querySelectorAll('.log-tab').forEach(t => t.classList.remove('active'));
             event.target.classList.add('active');
-            renderLogs(allLogs);
+            fetchLogs();
         }
         
         function renderLivePositions(positions) {
@@ -2374,8 +2398,12 @@
         
         async function fetchTrades() {
             try {
-                const response = await fetch('/api/trades');
-                const data = await response.json();
+                const params = new URLSearchParams({
+                    page: String(dataState.tradesPage),
+                    limit: "30"
+                });
+                const data = await fetchJsonManaged('trades', '/api/trades?' + params.toString());
+                if (!data) return;
                 renderTrades(data.trades);
             } catch (error) {
                 console.error('Error fetching trades:', error);
@@ -2384,8 +2412,15 @@
         
         async function fetchLogs() {
             try {
-                const response = await fetch('/api/logs?limit=150');
-                const data = await response.json();
+                const params = new URLSearchParams({
+                    page: String(dataState.logsPage),
+                    limit: "150"
+                });
+                if (currentLogFilter !== 'all') {
+                    params.set('level', currentLogFilter);
+                }
+                const data = await fetchJsonManaged('logs', '/api/logs?' + params.toString());
+                if (!data) return;
                 allLogs = data.memory_logs || [];
                 renderLogs(allLogs);
                 document.getElementById('logsCount').textContent = (data.total_logs_in_buffer || 0).toLocaleString() + ' logs';
@@ -2466,8 +2501,12 @@
         
         async function fetchPositions() {
             try {
-                const response = await fetch('/api/positions');
-                const data = await response.json();
+                const params = new URLSearchParams({
+                    page: String(dataState.positionsPage),
+                    limit: "100"
+                });
+                const data = await fetchJsonManaged('positions', '/api/positions?' + params.toString());
+                if (!data) return;
                 renderLivePositions(data.positions || []);
             } catch (error) {
                 console.error('Error fetching positions:', error);
@@ -2489,11 +2528,17 @@
         
         async function fetchUsers() {
             try {
-                const response = await fetch('/api/users');
-                const data = await response.json();
+                const userSearch = document.getElementById('userSearch')?.value || '';
+                const params = new URLSearchParams({
+                    page: String(dataState.usersPage),
+                    limit: "200"
+                });
+                if (userSearch) params.set('q', userSearch);
+                const data = await fetchJsonManaged('users', '/api/users?' + params.toString());
+                if (!data) return;
                 allUsers = data.users || [];
                 
-                document.getElementById('totalUsers').textContent = data.count || 0;
+                document.getElementById('totalUsers').textContent = data.total || data.count || 0;
                 
                 // Total Equity = Balance + Positions Value
                 const totalBalance = data.totals?.total_balance || 0;
@@ -2530,7 +2575,7 @@
         }
         
         function filterUsers() {
-            renderUsers();
+            fetchUsers();
         }
         
         function renderUsers() {
@@ -2941,46 +2986,9 @@
                 });
                 const data = await resp.json();
                 if (data.success) {
-                    const container = document.getElementById('aiInsightsList');
-                    const dateLabel = data.date || period;
-                    const genAt = data.generated_at || new Date().toLocaleString('ru-RU');
-                    const reportTitle = data.title || `Report ${dateLabel}`;
-                    const pnl = data.total_pnl || 0;
-                    const pnlColor = pnl >= 0 ? 'var(--positive)' : 'var(--negative)';
-                    const rawReport = data.report || 'Empty report';
-                    const fullContent = renderMarkdown(rawReport);
-                    const idx = _genReportIdx++;
-                    const needsExpand = rawReport.length > 200;
-                    const previewText = needsExpand ? rawReport.slice(0, 200).replace(/\n/g, ' ') + '...' : '';
-                    
-                    let newHtml = `<div style="padding: 14px; background: var(--bg-card); border-radius: 10px; margin-bottom: 10px; border-left: 3px solid ${pnlColor};">
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <span style="font-weight: 600; color: ${pnlColor}; font-size: 0.9rem;">📅 ${escapeHtml(reportTitle)}</span>
-                            <span style="font-size: 0.72rem; color: var(--text-muted);">📅 ${escapeHtml(dateLabel)} &nbsp;|&nbsp; ${escapeHtml(genAt)}</span>
-                        </div>`;
-                    
-                    if (needsExpand) {
-                        newHtml += `
-                        <div id="insight-preview-${idx}" style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.4; display: none;">
-                            ${escapeHtml(previewText)}
-                        </div>
-                        <div id="insight-full-${idx}" style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6; display: block;">
-                            ${fullContent}
-                        </div>
-                        <button id="insight-btn-${idx}" onclick="toggleInsight(${idx})" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:0.75rem;padding:6px 0 0;font-family:inherit;">
-                            ▲ Collapse
-                        </button>`;
-                    } else {
-                        newHtml += `
-                        <div style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.6;">
-                            ${fullContent}
-                        </div>`;
-                    }
-                    newHtml += '</div>';
-                    
-                    const existingContent = container.querySelector('.no-data') ? '' : container.innerHTML;
-                    container.innerHTML = newHtml + existingContent;
-                    _insightExpandState[idx] = true;
+                    // После генерации всегда перечитываем сводки с API,
+                    // чтобы избежать дублей/рассинхрона в клиентском DOM.
+                    await fetchAI();
                 } else {
                     alert('Error: ' + (data.error || 'Unknown'));
                 }
@@ -3427,22 +3435,42 @@
         
         // Initial load
         refreshAll();
-        
-        // Auto-refresh intervals
-        setInterval(fetchStats, 3000);
-        setInterval(fetchExtended, 5000);
-        setInterval(fetchTrades, 5000);
-        setInterval(fetchLogs, 10000);
-        setInterval(fetchAlerts, 15000);
-        setInterval(fetchPositions, 5000);
-        setInterval(fetchNews, 30000);
-        
-        // AI refresh - every 30 seconds if tab is active
-        setInterval(() => {
-            if (document.getElementById('tab-ai')?.classList.contains('active')) {
+
+        // Unified refresh scheduler (avoids overlapping intervals)
+        const refreshTimers = {
+            stats: 0, extended: 0, trades: 0, logs: 0, alerts: 0, positions: 0, news: 0, ai: 0
+        };
+        const refreshIntervals = {
+            stats: 3000,
+            extended: 5000,
+            trades: 5000,
+            logs: 10000,
+            alerts: 15000,
+            positions: 5000,
+            news: 30000,
+            ai: 30000
+        };
+
+        async function schedulerTick() {
+            if (document.hidden) return;
+            const now = Date.now();
+            if (now - refreshTimers.stats >= refreshIntervals.stats) { refreshTimers.stats = now; fetchStats(); }
+            if (now - refreshTimers.extended >= refreshIntervals.extended) { refreshTimers.extended = now; fetchExtended(); }
+            if (now - refreshTimers.trades >= refreshIntervals.trades) { refreshTimers.trades = now; fetchTrades(); }
+            if (now - refreshTimers.logs >= refreshIntervals.logs) { refreshTimers.logs = now; fetchLogs(); }
+            if (now - refreshTimers.alerts >= refreshIntervals.alerts) { refreshTimers.alerts = now; fetchAlerts(); }
+            if (now - refreshTimers.positions >= refreshIntervals.positions) { refreshTimers.positions = now; fetchPositions(); }
+            if (now - refreshTimers.news >= refreshIntervals.news) { refreshTimers.news = now; fetchNews(); }
+            if (
+                now - refreshTimers.ai >= refreshIntervals.ai &&
+                document.getElementById('tab-ai')?.classList.contains('active')
+            ) {
+                refreshTimers.ai = now;
                 fetchAI();
             }
-        }, 30000);
+        }
+
+        setInterval(schedulerTick, 1000);
     </script>
 </body>
 </html>

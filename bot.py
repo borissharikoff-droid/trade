@@ -28,6 +28,10 @@ from cache_manager import users_cache, positions_cache, price_cache, stats_cache
 from trade_logger import trade_logger, init_trade_logger, LogCategory, LogLevel
 from auto_optimizer import auto_optimizer, init_auto_optimizer
 from dashboard import init_dashboard, start_dashboard_thread
+from position_service import build_auto_position, calculate_close_outcome
+from balance_service import apply_close_delta
+from risk_service import validate_position_open, validate_daily_limit
+from http_client import get_json_with_retry
 
 load_dotenv()
 
@@ -2149,12 +2153,15 @@ async def get_real_price(symbol: str) -> Optional[float]:
     """Получить реальную цену с Binance (с timeout 5 секунд)"""
     try:
         binance_symbol = symbol.replace("/", "")  # BTC/USDT -> BTCUSDT
-        timeout = aiohttp.ClientTimeout(total=5)  # 5 секунд timeout
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{BINANCE_API}/ticker/price?symbol={binance_symbol}") as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return float(data['price'])
+        data = await get_json_with_retry(
+            f"{BINANCE_API}/ticker/price",
+            params={"symbol": binance_symbol},
+            timeout_seconds=5.0,
+            retries=2,
+            retry_delay=0.4,
+        )
+        if data and data.get('price') is not None:
+            return float(data['price'])
     except asyncio.TimeoutError:
         logger.warning(f"[BINANCE] Timeout getting price for {symbol}")
     except Exception as e:
@@ -4749,15 +4756,9 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             # Get real close price if available
             close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
             
-            # Calculate PnL with real price
-            entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else close_price
-            if pos['direction'] == "LONG":
-                pnl_percent = (close_price - entry_price) / entry_price if entry_price > 0 else 0
-            else:
-                pnl_percent = (entry_price - close_price) / entry_price if entry_price > 0 else 0
-            pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
-            
-            returned = pos['amount'] + pnl
+            outcome = calculate_close_outcome(pos, close_price, LEVERAGE)
+            pnl = outcome['pnl']
+            returned = outcome['returned']
             
             # Update stats
             total_pnl += pnl
@@ -4770,8 +4771,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 losers += 1
             
             # Close in DB with real price - включаем accumulated realized_pnl от TP1/TP2
-            accumulated_pnl = pos.get('realized_pnl', 0) or 0
-            total_pnl_for_history = pnl + accumulated_pnl
+            total_pnl_for_history = outcome['total_pnl_for_history']
             db_close_position(pos['id'], close_price, total_pnl_for_history, 'CLOSE_ALL')
             
         except Exception as e:
@@ -4788,8 +4788,7 @@ async def close_all_trades(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         async with get_user_lock(user_id):
             user = get_user(user_id)  # Re-read with lock
-            user['balance'] = sanitize_balance(user['balance'] + total_returned)
-            user['total_profit'] = (user.get('total_profit', 0) or 0) + total_pnl
+            apply_close_delta(user, total_returned, total_pnl, sanitize_balance)
             save_user(user_id)
     except Exception as e:
         logger.error(f"[CLOSE_ALL] Error updating balance: {e}")
@@ -5514,7 +5513,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     skip_reason = "выключен"
                 elif confidence_percent < user_min_winrate:
                     skip_reason = f"confidence {confidence_percent}% < {user_min_winrate}%"
-                elif user_today_count >= user_max_daily:
+                elif not validate_daily_limit(user_today_count, user_max_daily)[0]:
                     skip_reason = f"лимит сделок {user_today_count}/{user_max_daily}"
                 elif auto_balance < AUTO_TRADE_MIN_BET:
                     skip_reason = f"баланс ${auto_balance:.0f} < ${AUTO_TRADE_MIN_BET}"
@@ -5578,6 +5577,15 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                     if auto_bet < AUTO_TRADE_MIN_BET:
                         logger.info(f"[AUTO_TRADE] User {auto_user_id}: недостаточно с резервом")
                         continue
+                valid_open, _ = validate_position_open(
+                    balance=auto_balance,
+                    bet_amount=auto_bet,
+                    min_balance_reserve=MIN_BALANCE_RESERVE,
+                    min_bet=AUTO_TRADE_MIN_BET,
+                )
+                if not valid_open:
+                    logger.info(f"[AUTO_TRADE] User {auto_user_id}: risk validation blocked open")
+                    continue
                 
                 ticker = symbol.split("/")[0]
                 
@@ -5634,25 +5642,18 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # СНАЧАЛА создаём позицию, ПОТОМ списываем баланс
                 # Это защищает от потери денег при ошибках
                 try:
-                    position = {
-                        'symbol': symbol,
-                        'direction': direction,
-                        'entry': float(entry),
-                        'current': float(entry),
-                        'amount': float(auto_bet),
-                        'tp': float(tp1),
-                        'tp1': float(tp1),
-                        'tp2': float(tp2),
-                        'tp3': float(tp3),
-                        'tp1_hit': False,
-                        'tp2_hit': False,
-                        'sl': float(sl),
-                        'commission': float(commission),
-                        'pnl': float(-commission),
-                        'bybit_qty': bybit_qty,  # Уже установлен корректно выше (admin=global_bybit_qty, others=0)
-                        'original_amount': float(auto_bet),
-                        'is_auto': True  # Помечаем как авто-сделку
-                    }
+                    position = build_auto_position(
+                        symbol=symbol,
+                        direction=direction,
+                        entry=float(entry),
+                        tp1=float(tp1),
+                        tp2=float(tp2),
+                        tp3=float(tp3),
+                        sl=float(sl),
+                        amount=float(auto_bet),
+                        commission=float(commission),
+                        bybit_qty=bybit_qty,
+                    )
                     
                     pos_id = db_add_position(auto_user_id, position)
                     position['id'] = pos_id
@@ -6432,27 +6433,18 @@ async def close_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             logger.error(f"[CLOSE] Invalid entry price for position {pos_id}")
             entry_price = close_price  # Fallback
         
-        if pos['direction'] == "LONG":
-            pnl_percent = (close_price - entry_price) / entry_price if entry_price > 0 else 0
-        else:
-            pnl_percent = (entry_price - close_price) / entry_price if entry_price > 0 else 0
-        
-        amount = pos.get('amount', 0)
-        commission = pos.get('commission', 0)
-        pnl = amount * LEVERAGE * pnl_percent - commission
-        
-        returned = amount + pnl
+        outcome = calculate_close_outcome(pos, close_price, LEVERAGE)
+        pnl = outcome['pnl']
+        returned = outcome['returned']
         
         # Use lock for balance update
         async with get_user_lock(user_id):
             user = get_user(user_id)  # Re-read with lock
-            user['balance'] = sanitize_balance(user['balance'] + returned)
-            user['total_profit'] = (user.get('total_profit', 0) or 0) + pnl
+            apply_close_delta(user, returned, pnl, sanitize_balance)
             save_user(user_id)
         
         # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
-        accumulated_pnl = pos.get('realized_pnl', 0) or 0
-        total_pnl_for_history = pnl + accumulated_pnl
+        total_pnl_for_history = outcome['total_pnl_for_history']
         db_close_position(pos_id, close_price, total_pnl_for_history, 'MANUAL')
         
         # Перезагружаем кэш из БД для консистентности
@@ -6621,22 +6613,15 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
         # Получаем реальную цену закрытия если есть
         close_price = close_prices.get((pos['symbol'], pos['direction']), pos.get('current', pos['entry']))
         
-        # Пересчитываем PnL с реальной ценой
-        entry_price = pos['entry'] if pos['entry'] and pos['entry'] > 0 else close_price
-        if pos['direction'] == "LONG":
-            pnl_percent = (close_price - entry_price) / entry_price if entry_price > 0 else 0
-        else:
-            pnl_percent = (entry_price - close_price) / entry_price if entry_price > 0 else 0
-        pnl = pos['amount'] * LEVERAGE * pnl_percent - pos.get('commission', 0)
-        
-        returned = pos['amount'] + pnl
+        outcome = calculate_close_outcome(pos, close_price, LEVERAGE)
+        pnl = outcome['pnl']
+        returned = outcome['returned']
         
         total_pnl += pnl
         total_returned += returned
         
         # Закрываем в БД - включаем accumulated realized_pnl от TP1/TP2
-        accumulated_pnl = pos.get('realized_pnl', 0) or 0
-        total_pnl_for_history = pnl + accumulated_pnl
+        total_pnl_for_history = outcome['total_pnl_for_history']
         db_close_position(pos['id'], close_price, total_pnl_for_history, 'MANUAL')
         # Явно удаляем из кэша по ID
         pos_id_to_remove = pos['id']
@@ -6647,8 +6632,7 @@ async def close_stacked_trades(update: Update, context: ContextTypes.DEFAULT_TYP
     # Обновляем баланс (с локом для защиты от race conditions)
     async with get_user_lock(user_id):
         user = get_user(user_id)  # Re-read with lock
-        user['balance'] = sanitize_balance(user['balance'] + total_returned)
-        user['total_profit'] = (user.get('total_profit', 0) or 0) + total_pnl
+        apply_close_delta(user, total_returned, total_pnl, sanitize_balance)
         save_user(user_id)
     
     pnl_abs = abs(total_pnl)
@@ -10913,23 +10897,47 @@ def main() -> None:
     
     # Jobs
     if app.job_queue:
-        app.job_queue.run_repeating(update_positions, interval=15, first=5)  # 15 секунд - быстрая синхронизация с Bybit
+        safe_jobs_enabled = os.getenv("ENABLE_SAFE_JOBS", "1") == "1"
+        _job_locks: Dict[str, asyncio.Lock] = {}
+
+        def _safe_job(name: str, coro_fn, timeout: float = 30.0):
+            if not safe_jobs_enabled:
+                return coro_fn
+            async def _wrapped(context):
+                lock = _job_locks.setdefault(name, asyncio.Lock())
+                if lock.locked():
+                    logger.warning(f"[JOB] Skip overlapped job: {name}")
+                    return
+                started = datetime.now()
+                async with lock:
+                    try:
+                        await asyncio.wait_for(coro_fn(context), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        logger.error(f"[JOB] Timeout in {name} after {timeout}s")
+                    except Exception as exc:
+                        logger.error(f"[JOB] Error in {name}: {exc}", exc_info=True)
+                    finally:
+                        elapsed = (datetime.now() - started).total_seconds()
+                        logger.debug(f"[JOB] {name} finished in {elapsed:.2f}s")
+            return _wrapped
+
+        app.job_queue.run_repeating(_safe_job("update_positions", update_positions, timeout=14.0), interval=15, first=5)  # 15 секунд - быстрая синхронизация с Bybit
         
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
-            app.job_queue.run_repeating(send_smart_signal, interval=60, first=10)  # 1 минута - чаще сигналы!
+            app.job_queue.run_repeating(_safe_job("send_smart_signal", send_smart_signal, timeout=40.0), interval=60, first=10)  # 1 минута - чаще сигналы!
         
         # Cleanup caches - оборачиваем в async функцию
         async def cleanup_caches_job(context):
             cleanup_caches()
-        app.job_queue.run_repeating(cleanup_caches_job, interval=300, first=300)
+        app.job_queue.run_repeating(_safe_job("cleanup_caches_job", cleanup_caches_job, timeout=20.0), interval=300, first=300)
         
         # Автоматическая проверка крипто-платежей каждые 15 секунд
-        app.job_queue.run_repeating(check_pending_crypto_payments, interval=15, first=15)
+        app.job_queue.run_repeating(_safe_job("check_pending_crypto_payments", check_pending_crypto_payments, timeout=12.0), interval=15, first=15)
         
         # Отправка уведомлений рефералам каждые 60 секунд (группируем уведомления)
         async def send_ref_notifications_job(context):
             await send_referral_notifications(context.bot)
-        app.job_queue.run_repeating(send_ref_notifications_job, interval=60, first=60)
+        app.job_queue.run_repeating(_safe_job("send_ref_notifications_job", send_ref_notifications_job, timeout=40.0), interval=60, first=60)
         
         # === NEWS ANALYZER JOB ===
         # Новости используются для внутреннего анализа и влияния на сделки
@@ -10965,7 +10973,7 @@ def main() -> None:
                 except Exception as e:
                     logger.warning(f"[NEWS] Fetch error: {e}")
             
-            app.job_queue.run_repeating(news_fetch_job, interval=120, first=15)  # Every 2 min, start after 15s
+            app.job_queue.run_repeating(_safe_job("news_fetch_job", news_fetch_job, timeout=50.0), interval=120, first=15)  # Every 2 min, start after 15s
             logger.info("[INIT] News analyzer enabled (dashboard + internal analysis)")
             
             # === AI NEWS IMPACT ANALYSIS JOB ===
@@ -10983,7 +10991,7 @@ def main() -> None:
                         logger.warning(f"[AI] News impact check error: {e}")
                 
                 # Проверяем каждые 5 минут (новости нужно проверить через 15-30 мин после публикации)
-                app.job_queue.run_repeating(ai_news_impact_job, interval=300, first=180)
+                app.job_queue.run_repeating(_safe_job("ai_news_impact_job", ai_news_impact_job, timeout=70.0), interval=300, first=180)
                 logger.info("[INIT] AI News Impact analyzer scheduled (every 5 min)")
         
         # === TRADE LOGGER MAINTENANCE JOB ===
@@ -10998,7 +11006,7 @@ def main() -> None:
             except Exception as e:
                 logger.warning(f"[LOGGER] Maintenance error: {e}")
         
-        app.job_queue.run_repeating(logger_maintenance_job, interval=300, first=60)  # Every 5 minutes
+        app.job_queue.run_repeating(_safe_job("logger_maintenance_job", logger_maintenance_job, timeout=20.0), interval=300, first=60)  # Every 5 minutes
         
         # === AUTO PROFIT SYNC JOB ===
         async def auto_profit_sync_job(context):
@@ -11011,8 +11019,8 @@ def main() -> None:
                 logger.warning(f"[PROFIT_SYNC] Error: {e}")
         
         # Запускаем при старте (через 30 сек) и каждый час
-        app.job_queue.run_once(auto_profit_sync_job, when=30)
-        app.job_queue.run_repeating(auto_profit_sync_job, interval=3600, first=3630)  # Каждый час
+        app.job_queue.run_once(_safe_job("auto_profit_sync_job_once", auto_profit_sync_job, timeout=60.0), when=30)
+        app.job_queue.run_repeating(_safe_job("auto_profit_sync_job", auto_profit_sync_job, timeout=60.0), interval=3600, first=3630)  # Каждый час
         
         # === PHANTOM CLEANUP JOB (быстрая SQL-очистка без Bybit API) ===
         async def phantom_cleanup_job(context):
@@ -11121,7 +11129,7 @@ def main() -> None:
         # слишком агрессивная очистка может закрывать нормальные локальные позиции как PHANTOM_CLEANUP.
         # При необходимости можно включить переменной окружения ENABLE_PHANTOM_CLEANUP_JOB=1.
         if os.getenv("ENABLE_PHANTOM_CLEANUP_JOB", "0") == "1":
-            app.job_queue.run_repeating(phantom_cleanup_job, interval=60, first=45)
+            app.job_queue.run_repeating(_safe_job("phantom_cleanup_job", phantom_cleanup_job, timeout=45.0), interval=60, first=45)
             logger.info("[JOBS] Phantom cleanup job registered (every 60s)")
         else:
             logger.info("[JOBS] Phantom cleanup job disabled (set ENABLE_PHANTOM_CLEANUP_JOB=1 to enable)")
@@ -11139,7 +11147,7 @@ def main() -> None:
                 except Exception as e:
                     logger.error(f"[AI] Initialization error: {e}")
             
-            app.job_queue.run_once(init_ai_job, when=5)  # Через 5 секунд после старта
+            app.job_queue.run_once(_safe_job("init_ai_job", init_ai_job, timeout=40.0), when=5)  # Через 5 секунд после старта
             
             # Daily Summary at 12:00 MSK (09:00 UTC)
             async def ai_daily_summary_job(context):
@@ -11165,6 +11173,9 @@ def main() -> None:
                             (since, until), fetch="all"
                         )
                     trades = [dict(r) for r in (rows or [])]
+                    if not trades:
+                        logger.info(f"[AI] Daily summary skipped: no trades for {report_date}")
+                        return
                     news = []
                     if NEWS_FEATURES and news_analyzer and getattr(news_analyzer, 'recent_events', None):
                         news = [{'title': getattr(e, 'title', str(e)[:80])} for e in list(news_analyzer.recent_events)[-20:]]
@@ -11173,7 +11184,7 @@ def main() -> None:
                 except Exception as e:
                     logger.error(f"[AI] Daily summary job error: {e}", exc_info=True)
             from datetime import time as dt_time
-            app.job_queue.run_daily(ai_daily_summary_job, time=dt_time(9, 0, 0))
+            app.job_queue.run_daily(_safe_job("ai_daily_summary_job", ai_daily_summary_job, timeout=180.0), time=dt_time(9, 0, 0))
             logger.info("[AI] Daily summary job enabled (12:00 MSK)")
         
         # === LEARNING ANALYTICS JOB ===
@@ -11194,7 +11205,7 @@ def main() -> None:
                     logger.error(f"[LEARNING] Snapshot error: {e}")
             
             # Собираем снимок каждый час (для более точных данных)
-            app.job_queue.run_repeating(learning_snapshot_job, interval=3600, first=120)  # Каждый час, старт через 2 мин
+            app.job_queue.run_repeating(_safe_job("learning_snapshot_job", learning_snapshot_job, timeout=35.0), interval=3600, first=120)  # Каждый час, старт через 2 мин
             logger.info("[LEARNING] ✓ Learning analytics tracker enabled")
         except ImportError:
             logger.info("[LEARNING] Learning tracker not available")
@@ -11231,7 +11242,7 @@ def main() -> None:
                 logger.error(f"[OPTIMIZER] Job error: {e}")
         
         # Run optimizer every 4 hours
-        app.job_queue.run_repeating(auto_optimizer_job, interval=14400, first=300)  # 4 hours, start after 5 min
+        app.job_queue.run_repeating(_safe_job("auto_optimizer_job", auto_optimizer_job, timeout=300.0), interval=14400, first=300)  # 4 hours, start after 5 min
         
         logger.info("[JOBS] All periodic tasks registered")
         
