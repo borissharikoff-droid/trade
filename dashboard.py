@@ -10,6 +10,11 @@ from flask import Flask, jsonify, render_template, request, Response, make_respo
 from threading import Thread
 from collections import deque
 import json
+import asyncio
+
+from monitoring import health_check_internal, get_execution_health, get_circuit_breaker_snapshot
+from error_handler import get_circuit_breaker_states
+from failed_operations import list_failed_operations, mark_failed_operation_retried
 
 logger = logging.getLogger(__name__)
 
@@ -1698,6 +1703,122 @@ def dashboard():
 def health():
     """Health check endpoint"""
     return jsonify({'status': 'ok', 'timestamp': to_moscow_time()})
+
+
+@app.route('/api/system_health')
+def api_system_health():
+    """Extended health snapshot for operations."""
+    try:
+        health = asyncio.run(health_check_internal())
+        health["timestamp"] = to_moscow_time()
+        return jsonify(health)
+    except Exception as e:
+        logger.error(f"[DASHBOARD] system_health error: {e}")
+        return jsonify({'status': 'degraded', 'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
+@app.route('/api/execution_health')
+def api_execution_health():
+    """Execution reliability metrics snapshot."""
+    try:
+        payload = get_execution_health()
+        payload["timestamp"] = to_moscow_time()
+        return jsonify(payload)
+    except Exception as e:
+        logger.error(f"[DASHBOARD] execution_health error: {e}")
+        return jsonify({'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
+@app.route('/api/circuit_breakers')
+def api_circuit_breakers():
+    """Circuit breakers state from runtime and metrics snapshots."""
+    try:
+        return jsonify({
+            "runtime": get_circuit_breaker_states(),
+            "metrics": get_circuit_breaker_snapshot(),
+            "timestamp": to_moscow_time(),
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] circuit_breakers error: {e}")
+        return jsonify({'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
+@app.route('/api/stuck_positions')
+def api_stuck_positions():
+    """Return stale state positions for reconciliation."""
+    if not _run_sql:
+        return jsonify({'stuck': [], 'count': 0, 'timestamp': to_moscow_time()})
+    try:
+        # DB-agnostic filtering in Python.
+        rows = _run_sql(
+            """
+            SELECT id, user_id, symbol, direction, state, opened_at, amount, bybit_qty
+            FROM positions
+            WHERE state IN ('PENDING', 'OPENING', 'CLOSING')
+            ORDER BY opened_at ASC
+            LIMIT 500
+            """,
+            fetch="all",
+        ) or []
+        now = datetime.now(MOSCOW_TZ)
+        stuck = []
+        for row in rows:
+            ts = _parse_datetime_arg(str(row.get("opened_at", "")))
+            if ts is None:
+                continue
+            if (now - ts).total_seconds() >= 300:
+                stuck.append(row)
+        return jsonify({
+            "count": len(stuck),
+            "stuck": stuck,
+            "timestamp": to_moscow_time(),
+        })
+    except Exception as e:
+        logger.error(f"[DASHBOARD] stuck_positions error: {e}")
+        return jsonify({'stuck': [], 'count': 0, 'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
+@app.route('/api/failed_ops')
+def api_failed_ops():
+    """Dead-letter queue entries."""
+    try:
+        limit = request.args.get("limit", 100, type=int) or 100
+        rows = list_failed_operations(limit=limit)
+        return jsonify({"count": len(rows), "items": rows, "timestamp": to_moscow_time()})
+    except Exception as e:
+        logger.error(f"[DASHBOARD] failed_ops error: {e}")
+        return jsonify({'count': 0, 'items': [], 'error': str(e), 'timestamp': to_moscow_time()}), 500
+
+
+@app.route('/api/failed_ops/<int:operation_id>/resolve', methods=['POST'])
+def api_failed_ops_resolve(operation_id: int):
+    try:
+        mark_failed_operation_retried(operation_id, True, "dashboard_resolve")
+        return jsonify({"success": True, "id": operation_id, "timestamp": to_moscow_time()})
+    except Exception as e:
+        logger.error(f"[DASHBOARD] failed_ops resolve error: {e}")
+        return jsonify({"success": False, "error": str(e), "timestamp": to_moscow_time()}), 500
+
+
+@app.route('/api/stuck_positions/<int:position_id>/reconcile', methods=['POST'])
+def api_stuck_position_reconcile(position_id: int):
+    if not _run_sql:
+        return jsonify({"success": False, "error": "Database not connected", "timestamp": to_moscow_time()}), 500
+    try:
+        pos = _run_sql("SELECT id, bybit_qty FROM positions WHERE id = ?", (position_id,), fetch="one")
+        if not pos:
+            return jsonify({"success": False, "error": "Position not found", "timestamp": to_moscow_time()}), 404
+        # Conservative reconciliation from dashboard: move stale states into OPEN/CLOSING.
+        if float(pos.get("bybit_qty", 0) or 0) > 0:
+            _run_sql("UPDATE positions SET state = 'OPEN' WHERE id = ?", (position_id,))
+            new_state = "OPEN"
+        else:
+            _run_sql("UPDATE positions SET state = 'CLOSING' WHERE id = ?", (position_id,))
+            new_state = "CLOSING"
+        return jsonify({"success": True, "id": position_id, "state": new_state, "timestamp": to_moscow_time()})
+    except Exception as e:
+        logger.error(f"[DASHBOARD] stuck reconcile error: {e}")
+        return jsonify({"success": False, "error": str(e), "timestamp": to_moscow_time()}), 500
 
 
 @app.route('/api/debug')

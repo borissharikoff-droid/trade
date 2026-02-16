@@ -11,6 +11,7 @@ from typing import Callable, Any, Optional, TypeVar, Tuple
 from enum import Enum
 from datetime import datetime, timedelta
 from functools import wraps
+from monitoring import set_circuit_state
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,10 @@ class CircuitBreaker:
         """Reset on successful call"""
         self.failure_count = 0
         self.state = CircuitState.CLOSED
+        # Service name is optional; populated for global breakers below.
+        service = getattr(self, "service_name", None)
+        if service:
+            set_circuit_state(service, self.state.value, self.failure_count)
     
     def _on_failure(self):
         """Handle failure"""
@@ -87,6 +92,9 @@ class CircuitBreaker:
         if self.failure_count >= self.failure_threshold:
             self.state = CircuitState.OPEN
             logger.warning("[CIRCUIT] Opened after %s failures", self.failure_count)
+        service = getattr(self, "service_name", None)
+        if service:
+            set_circuit_state(service, self.state.value, self.failure_count)
     
     def _should_attempt_reset(self) -> bool:
         """Check if we should try to reset"""
@@ -135,8 +143,34 @@ def retry_with_backoff(max_retries: int = 3, initial_delay: float = 1.0,
 
 # Global circuit breakers for different services
 binance_circuit = CircuitBreaker(failure_threshold=5, timeout=60)
+binance_circuit.service_name = "binance"
 bybit_circuit = CircuitBreaker(failure_threshold=5, timeout=60)
+bybit_circuit.service_name = "bybit"
 database_circuit = CircuitBreaker(failure_threshold=10, timeout=30)
+database_circuit.service_name = "database"
+
+
+def get_circuit_breaker_states() -> dict:
+    return {
+        "binance": {
+            "state": binance_circuit.state.value,
+            "failure_count": binance_circuit.failure_count,
+            "threshold": binance_circuit.failure_threshold,
+            "timeout": binance_circuit.timeout,
+        },
+        "bybit": {
+            "state": bybit_circuit.state.value,
+            "failure_count": bybit_circuit.failure_count,
+            "threshold": bybit_circuit.failure_threshold,
+            "timeout": bybit_circuit.timeout,
+        },
+        "database": {
+            "state": database_circuit.state.value,
+            "failure_count": database_circuit.failure_count,
+            "threshold": database_circuit.failure_threshold,
+            "timeout": database_circuit.timeout,
+        },
+    }
 
 
 def isolate_errors(func: Callable) -> Callable:

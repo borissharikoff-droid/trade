@@ -13,6 +13,8 @@ import time
 import logging
 from typing import Optional, Callable, Dict, Any, List
 from datetime import datetime
+from execution_config import WS_MAX_RECONNECT_DELAY_SECONDS, WS_PING_INTERVAL_SECONDS
+from monitoring import set_ws_health, record_api_call
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +54,9 @@ class BybitWebSocket:
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
         self._reconnect_delay = 1
-        self._max_reconnect_delay = 60
-        self._ping_interval = 20  # Bybit requires ping every 20 seconds
+        self._max_reconnect_delay = WS_MAX_RECONNECT_DELAY_SECONDS
+        self._ping_interval = WS_PING_INTERVAL_SECONDS
+        self._disconnects = 0
         
         # Callbacks
         self._on_position_update: Optional[Callable] = None
@@ -94,9 +97,13 @@ class BybitWebSocket:
             logger.info(f"[WS] Connected to {self.ws_url}")
             self._running = True
             self._reconnect_delay = 1  # Reset delay on successful connect
+            set_ws_health(True, self._reconnect_delay, self._disconnects)
+            record_api_call("bybit_ws_connect", True)
             return True
         except Exception as e:
             logger.error(f"[WS] Connection failed: {e}")
+            set_ws_health(False, self._reconnect_delay, self._disconnects)
+            record_api_call("bybit_ws_connect", False)
             return False
     
     async def authenticate(self) -> bool:
@@ -367,6 +374,7 @@ class BybitWebSocket:
                     if not await self.connect():
                         await asyncio.sleep(self._reconnect_delay)
                         self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
+                        set_ws_health(False, self._reconnect_delay, self._disconnects)
                         continue
                 
                 # Аутентифицируемся
@@ -404,15 +412,18 @@ class BybitWebSocket:
                     await self._send_ping()
                 except websockets.ConnectionClosed as e:
                     logger.warning(f"[WS] Connection closed ({e.code}): {e.reason}, reconnecting...")
+                    self._disconnects += 1
                     await self.disconnect()
                     await asyncio.sleep(self._reconnect_delay)
                 except websockets.ConnectionClosedError as e:
                     logger.warning(f"[WS] Connection closed with error ({e.code}): {e.reason}, reconnecting...")
+                    self._disconnects += 1
                     await self.disconnect()
                     await asyncio.sleep(self._reconnect_delay)
                     
             except Exception as e:
                 logger.error(f"[WS] Run loop error: {e}")
+                self._disconnects += 1
                 await self.disconnect()
                 await asyncio.sleep(self._reconnect_delay)
     
@@ -430,6 +441,7 @@ class BybitWebSocket:
                 self.ws = None
         
         logger.info("[WS] Disconnected")
+        set_ws_health(False, self._reconnect_delay, self._disconnects)
     
     async def stop(self):
         """Останавливает WebSocket клиент"""

@@ -1348,6 +1348,45 @@
                             <div class="stat-value" id="streak">-</div>
                         </div>
                     </div>
+
+                    <!-- Operations Health -->
+                    <div class="section-title"><span class="section-icon">🛡️</span> Operations Health</div>
+                    <div class="stats-grid" style="grid-template-columns: repeat(4, 1fr);">
+                        <div class="stat-card">
+                            <div class="stat-label">WS Connection</div>
+                            <div class="stat-value sm" id="opsWsState">-</div>
+                            <div class="stat-sub" id="opsWsDelay">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Stuck Positions</div>
+                            <div class="stat-value sm" id="opsStuckCount">0</div>
+                            <div class="stat-sub" id="opsStuckInfo">-</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Failed Ops Queue</div>
+                            <div class="stat-value sm" id="opsFailedCount">0</div>
+                            <div class="stat-sub">dead-letter</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Circuit State</div>
+                            <div class="stat-value sm" id="opsCircuit">-</div>
+                            <div class="stat-sub" id="opsCircuitDetail">-</div>
+                        </div>
+                    </div>
+                    <div class="panel" style="margin-top: 10px;">
+                        <div class="panel-header">
+                            <span class="panel-title"><span class="panel-title-icon">🧰</span> Ops Actions</span>
+                            <span class="panel-badge" id="opsActionsStatus">idle</span>
+                        </div>
+                        <div class="panel-content">
+                            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
+                                <button class="btn" onclick="refreshOps()">Refresh Ops</button>
+                                <button class="btn" onclick="resolveTopFailedOp()">Resolve Top Failed Op</button>
+                                <button class="btn" onclick="reconcileTopStuckPosition()">Reconcile Top Stuck</button>
+                            </div>
+                            <div id="opsDetail" class="no-data">No operational alerts</div>
+                        </div>
+                    </div>
                     
                     <!-- Trading Performance (merged Signal Analysis + Trading Results + Records) -->
                     <div class="section-title"><span class="section-icon">📈</span> Trading Performance</div>
@@ -2562,6 +2601,82 @@
                 console.error('Error fetching users:', error);
             }
         }
+
+        let opsState = { failed: [], stuck: [] };
+
+        async function fetchOps() {
+            try {
+                const [execH, failed, stuck, circuits] = await Promise.all([
+                    fetch('/api/execution_health').then(r => r.json()),
+                    fetch('/api/failed_ops?limit=25').then(r => r.json()),
+                    fetch('/api/stuck_positions').then(r => r.json()),
+                    fetch('/api/circuit_breakers').then(r => r.json())
+                ]);
+                opsState.failed = failed.items || [];
+                opsState.stuck = stuck.stuck || [];
+
+                const wsConnected = !!execH.ws_connected;
+                document.getElementById('opsWsState').textContent = wsConnected ? '✅ Connected' : '❌ Disconnected';
+                document.getElementById('opsWsState').className = 'stat-value sm ' + (wsConnected ? 'positive' : 'negative');
+                document.getElementById('opsWsDelay').textContent = 'reconnect delay: ' + (execH.ws_reconnect_delay ?? 0) + 's';
+
+                document.getElementById('opsStuckCount').textContent = String(stuck.count || 0);
+                document.getElementById('opsStuckInfo').textContent = (stuck.count || 0) > 0 ? 'needs reconcile' : 'healthy';
+
+                document.getElementById('opsFailedCount').textContent = String(failed.count || 0);
+
+                const bybitState = circuits?.runtime?.bybit?.state || circuits?.metrics?.bybit?.state || 'unknown';
+                document.getElementById('opsCircuit').textContent = bybitState.toUpperCase();
+                document.getElementById('opsCircuit').className = 'stat-value sm ' + (bybitState === 'open' ? 'negative' : bybitState === 'half_open' ? '' : 'positive');
+                const failures = circuits?.runtime?.bybit?.failure_count ?? 0;
+                document.getElementById('opsCircuitDetail').textContent = `bybit failures: ${failures}`;
+
+                const details = [];
+                if ((failed.count || 0) > 0) details.push(`Failed ops: ${failed.count}`);
+                if ((stuck.count || 0) > 0) details.push(`Stuck positions: ${stuck.count}`);
+                document.getElementById('opsDetail').textContent = details.length ? details.join(' | ') : 'No operational alerts';
+            } catch (error) {
+                console.error('Error fetching ops:', error);
+            }
+        }
+
+        async function refreshOps() {
+            document.getElementById('opsActionsStatus').textContent = 'refreshing...';
+            await fetchOps();
+            document.getElementById('opsActionsStatus').textContent = 'updated';
+        }
+
+        async function resolveTopFailedOp() {
+            const top = (opsState.failed || [])[0];
+            if (!top) {
+                document.getElementById('opsActionsStatus').textContent = 'no failed ops';
+                return;
+            }
+            document.getElementById('opsActionsStatus').textContent = `resolving #${top.id}...`;
+            try {
+                await fetch(`/api/failed_ops/${top.id}/resolve`, { method: 'POST' });
+                await fetchOps();
+                document.getElementById('opsActionsStatus').textContent = `resolved #${top.id}`;
+            } catch (e) {
+                document.getElementById('opsActionsStatus').textContent = 'resolve failed';
+            }
+        }
+
+        async function reconcileTopStuckPosition() {
+            const top = (opsState.stuck || [])[0];
+            if (!top) {
+                document.getElementById('opsActionsStatus').textContent = 'no stuck positions';
+                return;
+            }
+            document.getElementById('opsActionsStatus').textContent = `reconciling #${top.id}...`;
+            try {
+                await fetch(`/api/stuck_positions/${top.id}/reconcile`, { method: 'POST' });
+                await fetchOps();
+                document.getElementById('opsActionsStatus').textContent = `reconciled #${top.id}`;
+            } catch (e) {
+                document.getElementById('opsActionsStatus').textContent = 'reconcile failed';
+            }
+        }
         
         function sortUsers(field) {
             document.querySelectorAll('.data-table th').forEach(th => th.classList.remove('sorted-asc', 'sorted-desc'));
@@ -3427,7 +3542,8 @@
                 fetchLogs(),
                 fetchAlerts(),
                 fetchPositions(),
-                fetchNews()
+                fetchNews(),
+                fetchOps()
             ]).finally(() => {
                 setTimeout(() => btn.classList.remove('spinning'), 600);
             });
@@ -3438,7 +3554,7 @@
 
         // Unified refresh scheduler (avoids overlapping intervals)
         const refreshTimers = {
-            stats: 0, extended: 0, trades: 0, logs: 0, alerts: 0, positions: 0, news: 0, ai: 0
+            stats: 0, extended: 0, trades: 0, logs: 0, alerts: 0, positions: 0, news: 0, ai: 0, ops: 0
         };
         const refreshIntervals = {
             stats: 3000,
@@ -3448,7 +3564,8 @@
             alerts: 15000,
             positions: 5000,
             news: 30000,
-            ai: 30000
+            ai: 30000,
+            ops: 10000
         };
 
         async function schedulerTick() {
@@ -3461,6 +3578,7 @@
             if (now - refreshTimers.alerts >= refreshIntervals.alerts) { refreshTimers.alerts = now; fetchAlerts(); }
             if (now - refreshTimers.positions >= refreshIntervals.positions) { refreshTimers.positions = now; fetchPositions(); }
             if (now - refreshTimers.news >= refreshIntervals.news) { refreshTimers.news = now; fetchNews(); }
+            if (now - refreshTimers.ops >= refreshIntervals.ops) { refreshTimers.ops = now; fetchOps(); }
             if (
                 now - refreshTimers.ai >= refreshIntervals.ai &&
                 document.getElementById('tab-ai')?.classList.contains('active')

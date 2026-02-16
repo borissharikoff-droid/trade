@@ -35,12 +35,44 @@ from risk_guard import (
     check_risk_per_trade,
     check_daily_stop_loss,
     check_consecutive_losses,
+    check_portfolio_drawdown,
+    check_total_directional_exposure,
     update_daily_pnl,
 )
 from metrics_calculator import update_user_metrics, ensure_user_metrics_table
 from auto_reports import ensure_reports_table, refresh_reports_for_all_users
 from http_client import get_json_with_retry
-
+from execution_config import (
+    FEATURE_ADMIN_ALERTS,
+    FEATURE_AUTO_ORPHAN_CLEANUP,
+    FEATURE_DEAD_LETTER_QUEUE,
+    FEATURE_EXECUTION_WATCHDOGS,
+    FEATURE_LEARNING_PROMOTION,
+    MAX_DIRECTIONAL_EXPOSURE_PCT,
+    MAX_EQUITY_DRAWDOWN_PCT,
+    ORPHAN_GRACE_SECONDS,
+    ROLLOUT_MODE,
+    STUCK_CLOSING_SECONDS,
+    STUCK_OPENING_SECONDS,
+    STUCK_PENDING_SECONDS,
+    EXECUTION_COST_BUFFER_PCT,
+)
+from monitoring import (
+    record_position_update,
+    set_stuck_positions_count,
+)
+from failed_operations import (
+    add_failed_operation,
+    ensure_failed_operations_table,
+    list_failed_operations,
+    mark_failed_operation_retried,
+)
+from strategy_validation import (
+    ensure_strategy_versions_table,
+    get_latest_approved_strategy,
+    save_strategy_candidate,
+    validate_candidate_metrics,
+)
 load_dotenv()
 
 # Настройка логирования ДО импорта модулей, которые используют logger
@@ -424,6 +456,8 @@ def init_db():
     try:
         ensure_user_metrics_table()
         ensure_reports_table()
+        ensure_failed_operations_table()
+        ensure_strategy_versions_table()
         logger.info("[DB] Migration: user_metrics and reports tables ensured")
     except Exception as e:
         logger.warning(f"[DB] Migration warning (metrics/reports): {e}")
@@ -1608,6 +1642,30 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 configure_rate_limiter(run_sql, USE_POSTGRES, ADMIN_IDS)
 REFERRAL_BONUS = 5.0  # $5 бонус рефереру уровня 1 при депозите (для совместимости)
 COMMISSION_WITHDRAW_THRESHOLD = 10.0  # Авто-вывод комиссий при накоплении $10
+
+# Ops alert throttling to avoid notification storms.
+_admin_alert_timestamps: Dict[str, float] = {}
+
+
+async def send_admin_alert(
+    context: ContextTypes.DEFAULT_TYPE,
+    key: str,
+    text: str,
+    min_interval_sec: int = 120,
+) -> None:
+    """Send throttled admin alerts to Telegram."""
+    if not FEATURE_ADMIN_ALERTS or not context or not getattr(context, "bot", None):
+        return
+    now_ts = datetime.utcnow().timestamp()
+    last = _admin_alert_timestamps.get(key, 0.0)
+    if now_ts - last < float(min_interval_sec):
+        return
+    _admin_alert_timestamps[key] = now_ts
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(admin_id, text, parse_mode="HTML")
+        except Exception as exc:
+            logger.warning(f"[ALERT] Failed to send admin alert to {admin_id}: {exc}")
 
 # Многоуровневая реферальная система - проценты от комиссии для каждого уровня
 ADMIN_CRYPTO_ID_RAW = os.getenv("ADMIN_CRYPTO_ID", "")  # CryptoBot ID админа для вывода комиссий
@@ -5437,6 +5495,14 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"[SMART] ✓ Найден сетап: {setup.symbol} {setup.direction}")
         logger.info(f"[SMART] Качество: {setup.quality.name}, R/R: {setup.risk_reward:.2f}, Уверенность: {setup.confidence:.0%}")
         logger.info(f"[SMART] Режим рынка: {setup.market_regime.name}")
+
+        # Regime-aware quality gates for balanced mode.
+        if setup.market_regime == MarketRegime.HIGH_VOLATILITY and setup.quality not in (SetupQuality.A_PLUS, SetupQuality.A):
+            logger.info("[SMART] Пропуск: HIGH_VOLATILITY требует A+/A качества")
+            return
+        if setup.market_regime == MarketRegime.RANGING and setup.risk_reward < 3.0:
+            logger.info(f"[SMART] Пропуск: боковик требует R/R >= 3.0 (текущий {setup.risk_reward:.2f})")
+            return
         
         # Данные для сигнала
         symbol = setup.symbol
@@ -5446,12 +5512,28 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         tp1 = setup.take_profit_1
         tp2 = setup.take_profit_2
         tp3 = setup.take_profit_3
+
+        # Apply latest approved offline-gated strategy profile if available.
+        approved_profile = get_latest_approved_strategy()
+        if approved_profile:
+            params = approved_profile.get("params", {}) or {}
+            avoid_symbols = set(params.get("avoid_symbols") or [])
+            preferred_direction = params.get("preferred_direction")
+            if symbol in avoid_symbols:
+                logger.info(f"[SMART] Пропуск: {symbol} в approved avoid list")
+                return
+            if preferred_direction in ("LONG", "SHORT") and direction != preferred_direction:
+                logger.info(f"[SMART] Пропуск: direction {direction} != preferred {preferred_direction}")
+                return
         
         # Процентные уровни
         tp1_percent = abs(tp1 - entry) / entry * 100 if entry > 0 else 0
         tp2_percent = abs(tp2 - entry) / entry * 100 if entry > 0 else 0
         tp3_percent = abs(tp3 - entry) / entry * 100 if entry > 0 else 0
         sl_percent = abs(sl - entry) / entry * 100 if entry > 0 else 0
+        if tp1_percent <= EXECUTION_COST_BUFFER_PCT:
+            logger.info(f"[SMART] Пропуск: edge too small ({tp1_percent:.3f}% <= {EXECUTION_COST_BUFFER_PCT:.3f}%)")
+            return
         
         # Confidence = качество сетапа
         confidence_percent = int(setup.confidence * 100)
@@ -6118,6 +6200,54 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         logger.info(f"[RISK_GUARD] User {user_id}: blocked by consecutive losses ({streak_reason})")
         return
 
+    exposure_ok, exposure_reason = check_total_directional_exposure(
+        user_id,
+        direction=direction,
+        new_amount=amount,
+        max_exposure_percent=MAX_DIRECTIONAL_EXPOSURE_PCT,
+    )
+    if not exposure_ok:
+        await query.edit_message_text(
+            "<b>⛔ Лимит портфельной экспозиции</b>\n\n"
+            "Слишком большая доля капитала уже в этом направлении.\n"
+            "Снизьте размер входа или дождитесь закрытия части позиций.",
+            parse_mode="HTML",
+        )
+        logger.info(f"[RISK_GUARD] User {user_id}: blocked by directional exposure ({exposure_reason})")
+        return
+
+    drawdown_ok, drawdown_reason = check_portfolio_drawdown(user_id, max_drawdown_percent=MAX_EQUITY_DRAWDOWN_PCT)
+    if not drawdown_ok:
+        await query.edit_message_text(
+            "<b>⛔ Режим защиты капитала</b>\n\n"
+            "Достигнут лимит просадки портфеля.\n"
+            "Торговля временно приостановлена до восстановления.",
+            parse_mode="HTML",
+        )
+        logger.info(f"[RISK_GUARD] User {user_id}: blocked by portfolio drawdown ({drawdown_reason})")
+        return
+
+    # Cost-aware edge filter (spread/slippage/fees safety margin).
+    move_to_tp_pct = abs(tp1 - entry) / entry * 100 if entry > 0 else 0.0
+    move_to_sl_pct = abs(entry - sl) / entry * 100 if entry > 0 else 0.0
+    if move_to_tp_pct <= EXECUTION_COST_BUFFER_PCT:
+        await query.edit_message_text(
+            "<b>⛔ Недостаточное преимущество</b>\n\n"
+            "Потенциал до TP слишком мал с учетом издержек исполнения.\n"
+            "Сигнал пропущен для защиты результата.",
+            parse_mode="HTML",
+        )
+        logger.info(f"[RISK] User {user_id}: blocked by cost-edge filter tp_move={move_to_tp_pct:.3f}%")
+        return
+    if move_to_sl_pct > 0 and (move_to_tp_pct / move_to_sl_pct) < 2.0:
+        await query.edit_message_text(
+            "<b>⛔ Недостаточное соотношение риск/прибыль</b>\n\n"
+            "Сделка не проходит минимальный фильтр R/R 2.0.",
+            parse_mode="HTML",
+        )
+        logger.info(f"[RISK] User {user_id}: blocked by rr filter rr={move_to_tp_pct / move_to_sl_pct:.2f}")
+        return
+
     # === ЗАЩИТА: Не добавлять к убыточной позиции ===
     for p in user_positions:
         if p['symbol'] == symbol and p['direction'] == direction:
@@ -6333,6 +6463,18 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 else:
                     # Bybit ошибка - удаляем PENDING позицию и возвращаем деньги
                     logger.error(f"[HEDGE] ❌ Failed to open on Bybit - rolling back")
+                    if FEATURE_DEAD_LETTER_QUEUE:
+                        add_failed_operation(
+                            "open_hedge",
+                            {
+                                "user_id": user_id,
+                                "position_id": pending_pos_id,
+                                "symbol": symbol,
+                                "direction": direction,
+                                "amount": amount,
+                            },
+                            "hedge_open_failed",
+                        )
                     run_sql("DELETE FROM positions WHERE id = ?", (pending_pos_id,))
                     async with get_user_lock(user_id):
                         user = get_user(user_id)
@@ -6363,6 +6505,24 @@ async def enter_trade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     except Exception as e:
         # КРИТИЧЕСКАЯ ОШИБКА
         logger.critical(f"[TRADE] ❌ CRITICAL ERROR for user {user_id}: {e}")
+        await send_admin_alert(
+            context,
+            key=f"enter_trade_critical_{user_id}",
+            text=f"<b>🚨 Trade critical error</b>\nUser: <code>{user_id}</code>\nError: <code>{str(e)[:220]}</code>",
+            min_interval_sec=180,
+        )
+        if FEATURE_DEAD_LETTER_QUEUE:
+            add_failed_operation(
+                "enter_trade_exception",
+                {
+                    "user_id": user_id,
+                    "symbol": symbol if 'symbol' in locals() else None,
+                    "direction": direction if 'direction' in locals() else None,
+                    "amount": amount if 'amount' in locals() else None,
+                    "pending_pos_id": pending_pos_id,
+                },
+                str(e),
+            )
         
         # Пытаемся откатить всё
         try:
@@ -7461,6 +7621,51 @@ Bybit синхронизация
 
 
 # ==================== ОБНОВЛЕНИЕ ПОЗИЦИЙ ====================
+def _parse_ts_safe(value) -> Optional[datetime]:
+    if not value:
+        return None
+    raw = str(value).strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(raw, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def get_stuck_positions_snapshot() -> List[Dict]:
+    rows = run_sql(
+        """
+        SELECT id, user_id, symbol, direction, state, opened_at, amount, bybit_qty
+        FROM positions
+        WHERE state IN ('PENDING', 'OPENING', 'CLOSING')
+        ORDER BY opened_at ASC
+        """,
+        fetch="all",
+    ) or []
+    now = datetime.utcnow()
+    stuck: List[Dict] = []
+    for row in rows:
+        ts = _parse_ts_safe(row.get("opened_at"))
+        if ts is None:
+            continue
+        age = (now - ts).total_seconds()
+        state = str(row.get("state", "")).upper()
+        state_limit = {
+            "PENDING": STUCK_PENDING_SECONDS,
+            "OPENING": STUCK_OPENING_SECONDS,
+            "CLOSING": STUCK_CLOSING_SECONDS,
+        }.get(state, STUCK_PENDING_SECONDS)
+        if age >= state_limit:
+            row["stale_seconds"] = int(age)
+            stuck.append(row)
+    return stuck
+
+
 @isolate_errors
 async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Обновление цен и PnL с реальными данными Bybit (если хеджирование) или Binance
@@ -7477,6 +7682,7 @@ async def update_positions(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _update_positions_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Внутренняя реализация update_positions с timeout-ами на каждый этап"""
+    started = datetime.utcnow()
     try:
         # === СИНХРОНИЗАЦИЯ С BYBIT: проверяем закрытые позиции ===
         bybit_open_symbols = set()
@@ -7547,6 +7753,11 @@ async def _update_positions_impl(context: ContextTypes.DEFAULT_TYPE) -> None:
             cleanup_caches()
         except Exception as e:
             logger.warning(f"[UPDATE_POSITIONS] Error cleaning caches: {e}")
+
+        elapsed = (datetime.utcnow() - started).total_seconds()
+        record_position_update(len(user_ids), total_positions, elapsed)
+        stuck_now = get_stuck_positions_snapshot()
+        set_stuck_positions_count(len(stuck_now))
     except Exception as e:
         logger.error(f"[UPDATE_POSITIONS] Error in impl: {e}")
 
@@ -9569,6 +9780,14 @@ async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         status_lines.append(f"🧠 Cache size: ~{cache_size / 1024:.1f}KB")
     except:
         pass
+
+    # 7. Reliability queue/state
+    try:
+        failed_count = len(list_failed_operations(limit=200))
+        stuck_count = len(get_stuck_positions_snapshot())
+        status_lines.append(f"🧰 Failed ops: {failed_count} | Stuck: {stuck_count}")
+    except Exception:
+        pass
     
     # Total time
     total_time = (time.time() - start_time) * 1000
@@ -9576,6 +9795,209 @@ async def health_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     status_lines.append(f"{'✅ ALL OK' if all_ok else '⚠️ ISSUES DETECTED'}")
     
     await update.message.reply_text("\n".join(status_lines), parse_mode="HTML")
+
+
+async def failed_ops_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show dead-letter queue entries."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    rows = list_failed_operations(limit=20)
+    if not rows:
+        await update.message.reply_text("<b>✅ Failed ops queue is empty</b>", parse_mode="HTML")
+        return
+    lines = ["<b>⚠️ Failed operations</b>"]
+    for row in rows[:10]:
+        lines.append(
+            f"#{row.get('id')} | {row.get('operation_type')} | retries={row.get('retry_count', 0)} | status={row.get('status')}"
+        )
+    lines.append("\nUse <code>/retryop ID</code> to mark as retried after manual recovery.")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def retry_failed_op_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mark failed operation as retried/resolved manually."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: <code>/retryop ID</code>", parse_mode="HTML")
+        return
+    try:
+        op_id = int(context.args[0])
+    except Exception:
+        await update.message.reply_text("Invalid ID", parse_mode="HTML")
+        return
+    mark_failed_operation_retried(op_id, True, "manual_retry")
+    await update.message.reply_text(f"<b>✅ Operation #{op_id} marked as resolved</b>", parse_mode="HTML")
+
+
+async def reconcile_position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reconcile a single stuck position by id."""
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("<b>⛔ Доступ закрыт</b>", parse_mode="HTML")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: <code>/reconcile POSITION_ID</code>", parse_mode="HTML")
+        return
+    try:
+        pos_id = int(context.args[0])
+    except Exception:
+        await update.message.reply_text("Invalid position ID", parse_mode="HTML")
+        return
+    pos = run_sql("SELECT * FROM positions WHERE id = ?", (pos_id,), fetch="one")
+    if not pos:
+        await update.message.reply_text("Position not found", parse_mode="HTML")
+        return
+    try:
+        bybit_pos = await hedger.get_position_data(pos["symbol"])
+        bybit_open = bool(bybit_pos and float(bybit_pos.get("size", 0) or 0) > 0)
+        if bybit_open:
+            db_update_position(pos_id, state="OPEN", bybit_qty=float(bybit_pos.get("size", 0) or 0))
+            await update.message.reply_text(f"<b>✅ Position #{pos_id} reconciled -> OPEN</b>", parse_mode="HTML")
+        else:
+            db_update_position(pos_id, state="CLOSING", bybit_qty=0)
+            await update.message.reply_text(f"<b>⚠️ Position #{pos_id} reconciled -> CLOSING</b>", parse_mode="HTML")
+    except Exception as exc:
+        if FEATURE_DEAD_LETTER_QUEUE:
+            add_failed_operation("reconcile_position", {"position_id": pos_id}, str(exc))
+        await update.message.reply_text(f"<b>❌ Reconcile error:</b> {exc}", parse_mode="HTML")
+
+
+async def execution_watchdog_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Detect and reconcile stale position states."""
+    if not FEATURE_EXECUTION_WATCHDOGS:
+        return
+    stuck = get_stuck_positions_snapshot()
+    set_stuck_positions_count(len(stuck))
+    if not stuck:
+        return
+    logger.warning(f"[WATCHDOG] Found {len(stuck)} stale positions")
+    await send_admin_alert(
+        context,
+        key="stuck_positions",
+        text=f"<b>⚠️ Watchdog</b>\nDetected stale positions: <b>{len(stuck)}</b>\nMode: <code>{ROLLOUT_MODE}</code>",
+        min_interval_sec=300,
+    )
+    if ROLLOUT_MODE != "full":
+        return
+    for pos in stuck[:100]:
+        try:
+            pos_id = int(pos["id"])
+            user_id = int(pos["user_id"])
+            symbol = pos["symbol"]
+            bybit = await hedger.get_position_data(symbol)
+            bybit_size = float(bybit.get("size", 0) or 0) if bybit else 0.0
+            if bybit_size > 0:
+                db_update_position(pos_id, state="OPEN", bybit_qty=bybit_size)
+            else:
+                if str(pos.get("state", "")).upper() in ("PENDING", "OPENING"):
+                    run_sql("DELETE FROM positions WHERE id = ?", (pos_id,))
+                    async with get_user_lock(user_id):
+                        user = get_user(user_id)
+                        user["balance"] = sanitize_balance(user["balance"] + float(pos.get("amount", 0) or 0))
+                        save_user(user_id)
+                else:
+                    db_update_position(pos_id, state="CLOSING", bybit_qty=0)
+        except Exception as exc:
+            logger.error(f"[WATCHDOG] Failed to reconcile position {pos.get('id')}: {exc}")
+            if FEATURE_DEAD_LETTER_QUEUE:
+                add_failed_operation("execution_watchdog", {"position": dict(pos)}, str(exc))
+
+
+async def auto_orphan_cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Auto cleanup orphan Bybit hedges."""
+    if not FEATURE_AUTO_ORPHAN_CLEANUP:
+        return
+    if not await is_hedging_enabled():
+        return
+    try:
+        bybit_positions = await hedger.get_all_positions()
+        bot_positions = run_sql(
+            "SELECT symbol, direction, bybit_qty FROM positions WHERE bybit_qty > 0",
+            fetch="all",
+        ) or []
+        bot_symbols = {bp["symbol"].replace("/", "") for bp in bot_positions}
+        orphan = [p for p in bybit_positions if p.get("symbol") not in bot_symbols]
+        if not orphan:
+            return
+        await send_admin_alert(
+            context,
+            key="orphan_hedges",
+            text=f"<b>⚠️ Orphan hedges detected:</b> {len(orphan)}\nMode: <code>{ROLLOUT_MODE}</code>",
+            min_interval_sec=300,
+        )
+        if ROLLOUT_MODE != "full":
+            return
+        for p in orphan:
+            try:
+                symbol = p["symbol"]
+                side = p.get("side", "Buy")
+                direction = "LONG" if side == "Buy" else "SHORT"
+                qty = float(p.get("size", 0) or 0)
+                # Conservative guard: skip tiny or very fresh entries when timestamp exists.
+                updated_ms = int(p.get("updatedTime", 0) or 0)
+                if updated_ms > 0:
+                    age_s = int(datetime.utcnow().timestamp() - (updated_ms / 1000))
+                    if age_s < ORPHAN_GRACE_SECONDS:
+                        continue
+                if qty <= 0:
+                    continue
+                bot_symbol = f"{symbol[:-4]}/USDT" if symbol.endswith("USDT") else symbol
+                closed = await hedge_close(0, bot_symbol, direction, qty)
+                if not closed and FEATURE_DEAD_LETTER_QUEUE:
+                    add_failed_operation("auto_orphan_cleanup", {"symbol": symbol, "qty": qty}, "close_failed")
+            except Exception as exc:
+                logger.error(f"[ORPHAN_AUTO] close error: {exc}")
+                if FEATURE_DEAD_LETTER_QUEUE:
+                    add_failed_operation("auto_orphan_cleanup_exception", {"raw": p}, str(exc))
+    except Exception as exc:
+        logger.error(f"[ORPHAN_AUTO] job error: {exc}")
+
+
+async def learning_promotion_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Offline-gated learning: analyze and store approved candidate versions."""
+    if not FEATURE_LEARNING_PROMOTION:
+        return
+    try:
+        analysis = await auto_optimizer.run_analysis()
+        if analysis.get("status") != "completed":
+            return
+        overall = analysis.get("overall_stats", {})
+        total_trades = int(overall.get("total_trades", 0) or 0)
+        wins = float(overall.get("win_rate", 0) or 0) * 100.0
+        pnl = float(overall.get("total_pnl", 0) or 0)
+        denom = max(1.0, abs(pnl) + 1.0)
+        # Approximate proxy until dedicated backtest engine is added.
+        candidate_metrics = {
+            "total_trades": total_trades,
+            "win_rate": wins,
+            "profit_factor": (max(0.0, pnl) + denom) / denom,
+            "max_drawdown_pct": max(0.0, (100.0 - wins) * 0.4),
+        }
+        passed, validation = validate_candidate_metrics(candidate_metrics)
+        params = {
+            "best_symbols": auto_optimizer.get_best_symbols(min_trades=8),
+            "avoid_symbols": auto_optimizer.get_worst_symbols(min_trades=5),
+            "preferred_direction": auto_optimizer.get_recommended_direction(),
+            "optimizer_metrics": auto_optimizer.get_metrics(),
+        }
+        tag = datetime.utcnow().strftime("auto_%Y%m%d_%H%M%S")
+        version_id = save_strategy_candidate(tag, params, validation)
+        if passed:
+            await send_admin_alert(
+                context,
+                key="learning_candidate_passed",
+                text=f"<b>✅ Learning candidate approved</b>\nVersion: <code>{tag}</code>\nTrades: {total_trades}\nID: {version_id}",
+                min_interval_sec=180,
+            )
+        else:
+            logger.info(f"[LEARNING] Candidate rejected by gate: {validation}")
+    except Exception as exc:
+        logger.error(f"[LEARNING] promotion job error: {exc}")
 
 async def test_bybit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Тест подключения к Bybit"""
@@ -10960,6 +11382,9 @@ def main() -> None:
     app.add_handler(CommandHandler("sync", sync_cmd))  # Синхронизация позиций с Bybit
     app.add_handler(CommandHandler("import_bybit", import_bybit_cmd))  # Импорт позиций с Bybit
     app.add_handler(CommandHandler("orphans", cleanup_orphan_hedges_cmd))  # Очистка orphan хеджей (админ)
+    app.add_handler(CommandHandler("failedops", failed_ops_cmd))
+    app.add_handler(CommandHandler("retryop", retry_failed_op_cmd))
+    app.add_handler(CommandHandler("reconcile", reconcile_position_cmd))
     
     # Оплата Stars
     app.add_handler(PreCheckoutQueryHandler(precheckout))
@@ -11057,6 +11482,16 @@ def main() -> None:
         
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
             app.job_queue.run_repeating(_safe_job("send_smart_signal", send_smart_signal, timeout=40.0), interval=60, first=10)  # 1 минута - чаще сигналы!
+
+        # Reliability and learning jobs under phased rollout flags.
+        app.job_queue.run_repeating(_safe_job("execution_watchdog_job", execution_watchdog_job, timeout=35.0), interval=60, first=20)
+        app.job_queue.run_repeating(_safe_job("auto_orphan_cleanup_job", auto_orphan_cleanup_job, timeout=45.0), interval=120, first=35)
+        app.job_queue.run_repeating(_safe_job("learning_promotion_job", learning_promotion_job, timeout=180.0), interval=3600, first=180)
+        logger.info(
+            f"[ROLLOUT] mode={ROLLOUT_MODE} watchdogs={FEATURE_EXECUTION_WATCHDOGS} "
+            f"orphan_cleanup={FEATURE_AUTO_ORPHAN_CLEANUP} dead_letter={FEATURE_DEAD_LETTER_QUEUE} "
+            f"learning_promotion={FEATURE_LEARNING_PROMOTION}"
+        )
         
         # Cleanup caches - оборачиваем в async функцию
         async def cleanup_caches_job(context):

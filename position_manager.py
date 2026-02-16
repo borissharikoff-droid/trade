@@ -56,7 +56,10 @@ def calculate_volatility_based_size(balance: float, atr: float, entry: float,
     
     # В высоковолатильных условиях уменьшаем размер
     volatility_ratio = atr / entry if entry > 0 else 0
-    if volatility_ratio > 0.03:  # >3% волатильность
+    if volatility_ratio > 0.05:  # >5% волатильность
+        position_size *= 0.5  # Агрессивнее режем риск
+        logger.info(f"[SIZE] Extreme volatility ({volatility_ratio:.2%}), reducing size by 50%")
+    elif volatility_ratio > 0.03:  # >3% волатильность
         position_size *= 0.7  # Уменьшаем на 30%
         logger.info(f"[SIZE] High volatility ({volatility_ratio:.2%}), reducing size by 30%")
     elif volatility_ratio > 0.02:  # >2% волатильность

@@ -14,6 +14,14 @@ from typing import Optional, Dict, List
 from datetime import datetime
 
 import aiohttp
+from execution_config import (
+    BYBIT_MAX_RETRIES,
+    BYBIT_REQUEST_TIMEOUT,
+    BYBIT_RETRY_DELAY,
+    BYBIT_SESSION_CONNECT_TIMEOUT,
+    BYBIT_SESSION_TOTAL_TIMEOUT,
+)
+from monitoring import record_api_call, record_latency, record_retry
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +159,7 @@ class BybitHedger:
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             # Default timeout for all requests on this session
-            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            timeout = aiohttp.ClientTimeout(total=BYBIT_SESSION_TOTAL_TIMEOUT, connect=BYBIT_SESSION_CONNECT_TIMEOUT)
             self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
     
@@ -189,8 +197,8 @@ class BybitHedger:
         
         return headers
     
-    async def _request(self, method: str, endpoint: str, params: dict = None, 
-                       max_retries: int = 3, retry_delay: float = 1.0) -> Optional[dict]:
+    async def _request(self, method: str, endpoint: str, params: dict = None,
+                       max_retries: int = BYBIT_MAX_RETRIES, retry_delay: float = BYBIT_RETRY_DELAY) -> Optional[dict]:
         """
         Выполнить запрос к Bybit API с retry логикой
         
@@ -233,6 +241,7 @@ class BybitHedger:
         last_error = None
         
         for attempt in range(max_retries):
+            started_at = time.perf_counter()
             try:
                 # Пересчитываем подпись для каждой попытки (timestamp меняется)
                 headers = self._sign(params, is_post=is_post)
@@ -246,7 +255,7 @@ class BybitHedger:
                 session = await self._get_session()
                 
                 # Set timeout for request
-                timeout = aiohttp.ClientTimeout(total=10)
+                timeout = aiohttp.ClientTimeout(total=BYBIT_REQUEST_TIMEOUT)
                 
                 if method == "GET":
                     async with session.get(url, headers=headers, params=params, timeout=timeout) as resp:
@@ -258,14 +267,19 @@ class BybitHedger:
                 
                 ret_code = data.get('retCode')
                 ret_msg = data.get('retMsg', 'Unknown error')
+                record_latency("bybit_request", time.perf_counter() - started_at)
                 logger.info(f"[BYBIT] Response: retCode={ret_code}, retMsg={ret_msg}")
                 
                 if ret_code == 0:
+                    record_api_call("bybit", True)
+                    if attempt > 0:
+                        record_retry("bybit", True)
                     return data.get("result")
                 
                 # Ignorable "errors" (e.g., leverage already set) — treat as success
                 if ret_code in ignorable_codes:
                     logger.debug(f"[BYBIT] Ignorable response {ret_code}: {ret_msg}")
+                    record_api_call("bybit", True)
                     return data.get("result", {})
                 
                 # Non-retryable errors
@@ -280,41 +294,51 @@ class BybitHedger:
                         logger.error(f"[BYBIT] ❌ TP/SL слишком близко к цене!")
                     elif ret_code == 110017:
                         logger.error(f"[BYBIT] ❌ Слишком маленький размер ордера!")
+                    record_api_call("bybit", False)
                     return None
                 
                 # Parameter errors (Qty invalid, params error) — don't retry, same params will fail again
                 if ret_code in param_error_codes:
                     logger.error(f"[BYBIT] ❌ Parameter error {ret_code}: {ret_msg} — not retrying")
                     logger.error(f"[BYBIT] Params: {params}")
+                    record_api_call("bybit", False)
                     return None
                 
                 # Retryable errors
                 if ret_code in retryable_codes and attempt < max_retries - 1:
                     logger.warning(f"[BYBIT] Retryable error {ret_code}: {ret_msg}, retrying in {retry_delay}s...")
+                    record_retry("bybit", False)
                     await asyncio.sleep(retry_delay * (attempt + 1))  # Exponential backoff
                     continue
                 
                 # Other errors - log and return None
                 logger.error(f"[BYBIT] API Error: {ret_msg} (code: {ret_code})")
                 logger.error(f"[BYBIT] Full response: {data}")
+                record_api_call("bybit", False)
                 return None
                 
             except asyncio.TimeoutError:
                 last_error = "Request timeout"
                 logger.warning(f"[BYBIT] Request timeout on attempt {attempt + 1}/{max_retries}")
+                record_api_call("bybit", False)
                 if attempt < max_retries - 1:
+                    record_retry("bybit", False)
                     await asyncio.sleep(retry_delay * (attempt + 1))
                     continue
             except aiohttp.ClientError as e:
                 last_error = str(e)
                 logger.warning(f"[BYBIT] Client error on attempt {attempt + 1}/{max_retries}: {e}")
+                record_api_call("bybit", False)
                 if attempt < max_retries - 1:
+                    record_retry("bybit", False)
                     await asyncio.sleep(retry_delay * (attempt + 1))
                     continue
             except Exception as e:
                 last_error = str(e)
                 logger.error(f"[BYBIT] Request error: {e}")
+                record_api_call("bybit", False)
                 if attempt < max_retries - 1:
+                    record_retry("bybit", False)
                     await asyncio.sleep(retry_delay)
                     continue
                 break

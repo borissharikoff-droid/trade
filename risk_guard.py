@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 from db_core import run_sql
+from execution_config import MAX_DIRECTIONAL_EXPOSURE_PCT, MAX_EQUITY_DRAWDOWN_PCT
 
 DEFAULT_RISK_PER_TRADE = 0.015
 DEFAULT_DAILY_STOP_LOSS = -0.03
@@ -35,7 +36,7 @@ def _to_int(value, default: int = 0) -> int:
 def _get_risk_row(user_id: int) -> Dict:
     row = run_sql(
         """
-        SELECT user_id, balance, risk_per_trade, daily_stop_loss, max_consecutive_losses,
+        SELECT user_id, balance, total_deposit, risk_per_trade, daily_stop_loss, max_consecutive_losses,
                daily_pnl, consecutive_losses, last_trade_date
         FROM users
         WHERE user_id = ?
@@ -165,3 +166,44 @@ def get_risk_status(user_id: int) -> Dict:
         "loss_streak_ok": streak_ok,
         "loss_streak_reason": streak_reason,
     }
+
+
+def check_total_directional_exposure(
+    user_id: int,
+    *,
+    direction: str,
+    new_amount: float,
+    max_exposure_percent: float = MAX_DIRECTIONAL_EXPOSURE_PCT,
+) -> Tuple[bool, str]:
+    row = _get_risk_row(user_id)
+    if not row:
+        return False, "user_not_found"
+    balance = max(_to_float(row.get("balance"), 0.0), 1.0)
+    current = run_sql(
+        """
+        SELECT COALESCE(SUM(amount), 0) AS exposure
+        FROM positions
+        WHERE user_id = ? AND UPPER(direction) = ?
+        """,
+        (user_id, str(direction or "").upper()),
+        fetch="one",
+    ) or {}
+    total = _to_float(current.get("exposure"), 0.0) + _to_float(new_amount, 0.0)
+    pct = (total / balance) * 100.0
+    if pct > float(max_exposure_percent):
+        return False, f"directional_exposure_limit_hit direction={direction} exposure_pct={pct:.2f} limit_pct={max_exposure_percent:.2f}"
+    return True, "ok"
+
+
+def check_portfolio_drawdown(user_id: int, max_drawdown_percent: float = MAX_EQUITY_DRAWDOWN_PCT) -> Tuple[bool, str]:
+    row = _get_risk_row(user_id)
+    if not row:
+        return False, "user_not_found"
+    balance = _to_float(row.get("balance"), 0.0)
+    deposit = _to_float(row.get("total_deposit"), 0.0)
+    if deposit <= 0:
+        return True, "ok"
+    drawdown_pct = max(0.0, ((deposit - balance) / deposit) * 100.0)
+    if drawdown_pct >= float(max_drawdown_percent):
+        return False, f"max_drawdown_hit drawdown_pct={drawdown_pct:.2f} limit_pct={max_drawdown_percent:.2f}"
+    return True, "ok"
