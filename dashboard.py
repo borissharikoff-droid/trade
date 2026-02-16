@@ -240,6 +240,7 @@ def get_positions_stats() -> dict:
 
 
 _positions_has_is_auto = None  # Cached: True/False/None (not checked yet)
+_positions_has_state = None
 
 def get_open_positions_details() -> list:
     """Get details of all open positions"""
@@ -1746,9 +1747,29 @@ def api_circuit_breakers():
 @app.route('/api/stuck_positions')
 def api_stuck_positions():
     """Return stale state positions for reconciliation."""
+    global _positions_has_state
     if not _run_sql:
         return jsonify({'stuck': [], 'count': 0, 'timestamp': to_moscow_time()})
     try:
+        if _positions_has_state is None:
+            try:
+                _check = _run_sql(
+                    """
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = 'positions' AND column_name = 'state'
+                    """,
+                    fetch="one",
+                )
+                _positions_has_state = bool(_check)
+            except Exception:
+                try:
+                    _cols = _run_sql("PRAGMA table_info(positions)", fetch="all") or []
+                    _positions_has_state = any(c.get("name") == "state" for c in _cols)
+                except Exception:
+                    _positions_has_state = False
+        if not _positions_has_state:
+            return jsonify({"count": 0, "stuck": [], "timestamp": to_moscow_time()})
+
         # DB-agnostic filtering in Python.
         rows = _run_sql(
             """

@@ -599,14 +599,37 @@ def init_db():
 
 def db_get_user(user_id: int) -> Dict:
     """Получить пользователя из БД"""
-    row = run_sql("""
-        SELECT balance, total_deposit, total_profit, trading,
-               auto_trade, auto_trade_max_daily, auto_trade_min_winrate,
-               auto_trade_today, auto_trade_last_reset, referrer_id,
-               risk_per_trade, daily_stop_loss, max_consecutive_losses,
-               daily_pnl, consecutive_losses, last_trade_date
-        FROM users WHERE user_id = ?
-    """, (user_id,), fetch="one")
+    def _has_user_column(column_name: str) -> bool:
+        try:
+            if USE_POSTGRES:
+                col = run_sql(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'users' AND column_name = ?
+                    """,
+                    (column_name,),
+                    fetch="one",
+                )
+                return bool(col)
+            cols = run_sql("PRAGMA table_info(users)", fetch="all") or []
+            return any(c.get("name") == column_name for c in cols)
+        except Exception:
+            return False
+
+    base_cols = ["balance", "total_deposit", "total_profit", "trading", "referrer_id"]
+    optional_cols = [
+        "auto_trade", "auto_trade_max_daily", "auto_trade_min_winrate",
+        "auto_trade_today", "auto_trade_last_reset",
+        "risk_per_trade", "daily_stop_loss", "max_consecutive_losses",
+        "daily_pnl", "consecutive_losses", "last_trade_date",
+    ]
+    selected_cols = base_cols + [c for c in optional_cols if _has_user_column(c)]
+    row = run_sql(
+        f"SELECT {', '.join(selected_cols)} FROM users WHERE user_id = ?",
+        (user_id,),
+        fetch="one",
+    )
 
     if not row:
         # Явно указываем balance=0.0 и total_deposit=0.0 при создании
@@ -772,7 +795,13 @@ def db_update_position(pos_id: int, **kwargs):
         if key not in ALLOWED_POSITION_COLUMNS:
             logger.warning(f"[SECURITY] Blocked attempt to update invalid position column: {key}")
             continue
-        run_sql(f"UPDATE positions SET {key} = ? WHERE id = ?", (value, pos_id))
+        try:
+            run_sql(f"UPDATE positions SET {key} = ? WHERE id = ?", (value, pos_id))
+        except Exception as e:
+            if key == "state" and "state" in str(e).lower():
+                logger.debug(f"[DB] positions.state missing, skip state update for pos {pos_id}")
+                continue
+            raise
 
 def db_close_position(pos_id: int, exit_price: float, pnl: float, reason: str):
     """
@@ -7638,15 +7667,21 @@ def _parse_ts_safe(value) -> Optional[datetime]:
 
 
 def get_stuck_positions_snapshot() -> List[Dict]:
-    rows = run_sql(
-        """
-        SELECT id, user_id, symbol, direction, state, opened_at, amount, bybit_qty
-        FROM positions
-        WHERE state IN ('PENDING', 'OPENING', 'CLOSING')
-        ORDER BY opened_at ASC
-        """,
-        fetch="all",
-    ) or []
+    try:
+        rows = run_sql(
+            """
+            SELECT id, user_id, symbol, direction, state, opened_at, amount, bybit_qty
+            FROM positions
+            WHERE state IN ('PENDING', 'OPENING', 'CLOSING')
+            ORDER BY opened_at ASC
+            """,
+            fetch="all",
+        ) or []
+    except Exception as e:
+        if "state" in str(e).lower():
+            # Backward-compatible mode for old schemas without positions.state.
+            return []
+        raise
     now = datetime.utcnow()
     stuck: List[Dict] = []
     for row in rows:

@@ -34,17 +34,38 @@ def _to_int(value, default: int = 0) -> int:
 
 
 def _get_risk_row(user_id: int) -> Dict:
-    row = run_sql(
-        """
-        SELECT user_id, balance, total_deposit, risk_per_trade, daily_stop_loss, max_consecutive_losses,
-               daily_pnl, consecutive_losses, last_trade_date
-        FROM users
-        WHERE user_id = ?
-        """,
-        (user_id,),
-        fetch="one",
-    )
-    return row or {}
+    try:
+        row = run_sql(
+            """
+            SELECT user_id, balance, total_deposit, risk_per_trade, daily_stop_loss, max_consecutive_losses,
+                   daily_pnl, consecutive_losses, last_trade_date
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,),
+            fetch="one",
+        )
+        return row or {}
+    except Exception as exc:
+        if "column" not in str(exc).lower():
+            raise
+        # Backward-compatible fallback for old schemas.
+        row = run_sql(
+            """
+            SELECT user_id, balance, total_deposit
+            FROM users
+            WHERE user_id = ?
+            """,
+            (user_id,),
+            fetch="one",
+        ) or {}
+        row.setdefault("risk_per_trade", DEFAULT_RISK_PER_TRADE)
+        row.setdefault("daily_stop_loss", DEFAULT_DAILY_STOP_LOSS)
+        row.setdefault("max_consecutive_losses", DEFAULT_MAX_CONSECUTIVE_LOSSES)
+        row.setdefault("daily_pnl", 0.0)
+        row.setdefault("consecutive_losses", 0)
+        row.setdefault("last_trade_date", "")
+        return row
 
 
 def _reset_daily_if_needed(user_id: int, row: Dict) -> Dict:
