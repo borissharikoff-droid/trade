@@ -11362,6 +11362,13 @@ def main() -> None:
         logger.error("BOT_TOKEN not set")
         return
     
+    # Run DB migration (fix missing failed_operations table and state column)
+    try:
+        from run_migration import run_migration
+        run_migration()
+    except Exception as e:
+        logger.warning(f"[MIGRATION] Could not run migration (may already be applied): {e}")
+    
     # Load persistent data from DB
     load_pending_commission()
     load_pending_invoices()
