@@ -325,15 +325,15 @@ class SmartAnalyzer:
                 'min_rr': 1.2,
                 'min_confidence': 0.50
             },
-            # Обычный тренд - moderate
+            # Обычный тренд - moderate (min_rr=1.2 aligned with MIN_GUARANTEED_RR)
             MarketRegime.UPTREND: {
                 'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
-                'min_rr': 1.3,                    # R/R 1:1.3 (raised from 1.0)
+                'min_rr': 1.2,                    # R/R 1:1.2 (aligned with TP1 floor)
                 'min_confidence': 0.50            # 50% уверенности (raised from 45%)
             },
             MarketRegime.DOWNTREND: {
                 'min_quality': SetupQuality.B,
-                'min_rr': 1.3,
+                'min_rr': 1.2,
                 'min_confidence': 0.50
             },
             # Рейндж - tighter (range trades are harder)
@@ -351,7 +351,7 @@ class SmartAnalyzer:
             # Неизвестный режим - cautious
             MarketRegime.UNKNOWN: {
                 'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
-                'min_rr': 1.3,
+                'min_rr': 1.2,
                 'min_confidence': 0.50
             }
         }

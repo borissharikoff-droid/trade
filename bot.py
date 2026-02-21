@@ -11523,7 +11523,7 @@ def main() -> None:
         app.job_queue.run_repeating(_safe_job("update_positions", update_positions, timeout=14.0), interval=15, first=5)  # 15 секунд - быстрая синхронизация с Bybit
         
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
-            app.job_queue.run_repeating(_safe_job("send_smart_signal", send_smart_signal, timeout=40.0), interval=60, first=10)  # 1 минута - чаще сигналы!
+            app.job_queue.run_repeating(_safe_job("send_smart_signal", send_smart_signal, timeout=120.0), interval=120, first=10)  # 2 мин; interval>=timeout чтобы не скипать overlapped runs
 
         # Reliability and learning jobs under phased rollout flags.
         app.job_queue.run_repeating(_safe_job("execution_watchdog_job", execution_watchdog_job, timeout=35.0), interval=60, first=20)
