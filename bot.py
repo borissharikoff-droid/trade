@@ -5532,14 +5532,8 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.info(f"[SMART] Качество: {setup.quality.name}, R/R: {setup.risk_reward:.2f}, Уверенность: {setup.confidence:.0%}")
         logger.info(f"[SMART] Режим рынка: {setup.market_regime.name}")
 
-        # Regime-aware quality gates for balanced mode.
-        if setup.market_regime == MarketRegime.HIGH_VOLATILITY and setup.quality not in (SetupQuality.A_PLUS, SetupQuality.A):
-            logger.info("[SMART] Пропуск: HIGH_VOLATILITY требует A+/A качества")
-            return
-        if setup.market_regime == MarketRegime.RANGING and setup.risk_reward < 3.0:
-            logger.info(f"[SMART] Пропуск: боковик требует R/R >= 3.0 (текущий {setup.risk_reward:.2f})")
-            return
-        
+        # Regime gates убраны — adaptive thresholds в smart_analyzer уже фильтруют (C + 1.2 R/R для всех режимов)
+
         # Данные для сигнала
         symbol = setup.symbol
         direction = setup.direction
@@ -5549,8 +5543,8 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
         tp2 = setup.take_profit_2
         tp3 = setup.take_profit_3
 
-        # Apply latest approved offline-gated strategy profile if available.
-        approved_profile = get_latest_approved_strategy()
+        # Apply latest approved strategy only when learning gate enabled (иначе не блокируем)
+        approved_profile = get_latest_approved_strategy() if FEATURE_LEARNING_PROMOTION else None
         if approved_profile:
             params = approved_profile.get("params", {}) or {}
             avoid_symbols = set(params.get("avoid_symbols") or [])
