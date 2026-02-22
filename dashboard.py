@@ -960,6 +960,32 @@ def api_trades():
     })
 
 
+@app.route('/api/auto_trades_count')
+def api_auto_trades_count():
+    """Количество автотрейдов за последние 24 часа (пользователи с auto_trade=1)"""
+    try:
+        from datetime import datetime, timezone, timedelta
+        if not _run_sql:
+            return jsonify({'count': 0, 'hours': 24, 'timestamp': to_moscow_time()})
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        row = _run_sql(
+            """
+            SELECT COUNT(*) as cnt
+            FROM history h
+            JOIN users u ON h.user_id = u.user_id
+            WHERE u.auto_trade = 1
+              AND h.closed_at >= ?
+            """,
+            (since,),
+            fetch="one"
+        )
+        count = int(row['cnt']) if row else 0
+        return jsonify({'count': count, 'hours': 24, 'timestamp': to_moscow_time()})
+    except Exception as e:
+        logger.error(f"[DASHBOARD] auto_trades_count error: {e}", exc_info=True)
+        return jsonify({'count': 0, 'error': str(e), 'timestamp': to_moscow_time()})
+
+
 @app.route('/api/extended')
 def api_extended():
     """Extended statistics endpoint"""
