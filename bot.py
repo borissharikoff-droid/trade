@@ -5705,7 +5705,8 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 
                 if not user_auto_enabled:
                     skip_reason = "выключен"
-                elif confidence_percent < user_min_winrate:
+                elif confidence_percent < user_min_winrate and confidence_percent < 50:
+                    # Сетап прошёл фильтры анализатора — разрешаем если conf>=50% (даже при min_winrate 70%)
                     skip_reason = f"confidence {confidence_percent}% < {user_min_winrate}%"
                 elif not validate_daily_limit(user_today_count, user_max_daily)[0]:
                     skip_reason = f"лимит сделок {user_today_count}/{user_max_daily}"
