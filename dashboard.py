@@ -717,7 +717,7 @@ def get_all_users_stats() -> list:
                 'trading': bool(user['trading']),
                 'auto_trade': bool(user['auto_trade']),
                 'auto_trade_today': int(user['auto_trade_today'] or 0),
-                'auto_trade_max_daily': int(user['auto_trade_max_daily'] or 10),
+                'auto_trade_max_daily': int(user['auto_trade_max_daily'] or 25),
                 'total_trades': total_trades,
                 'wins': wins,
                 'losses': int(stats['losses'] or 0) if stats else 0,

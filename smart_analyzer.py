@@ -169,16 +169,16 @@ class TradingState:
         self.pause_until: Optional[datetime] = None
         self.recent_trades: List[float] = []  # Последние 10 сделок для расчёта winrate
         
-        # Настройки потока (без бана на убытки - торгуем всегда)
-        self.MAX_DAILY_TRADES = 20
-        self.MIN_TIME_BETWEEN_TRADES = 5     # минут между сделками
+        # Настройки потока — цель 50+ сделок/день
+        self.MAX_DAILY_TRADES = 60
+        self.MIN_TIME_BETWEEN_TRADES = 2     # минут между сделками (было 5)
         
-        # Адаптивные настройки
+        # Адаптивные настройки (подняты для 50+ сделок/день)
         self.ADAPTIVE_DAILY_TRADES = {
-            'strong_trend': 25,    # В сильном тренде - больше сделок
-            'trend': 20,           # В тренде - стандартно
-            'ranging': 15,         # В рейндже - меньше
-            'high_volatility': 10  # В волатильности - осторожно
+            'strong_trend': 60,
+            'trend': 50,
+            'ranging': 40,
+            'high_volatility': 30
         }
     
     def get_recent_winrate(self) -> float:
@@ -240,10 +240,10 @@ class TradingState:
             return False, f"Лимит сделок в день ({self.daily_trades}/{max_trades})"
         
         # === LOSS STREAK COOLDOWN ===
-        # After 3+ consecutive losses, add escalating cooldown to prevent tilt trading
+        # After 3+ consecutive losses, add escalating cooldown (смягчено для 50+ сделок/день)
         if self.consecutive_losses >= 3 and self.last_trade_time:
-            cooldown_minutes = self.MIN_TIME_BETWEEN_TRADES + (self.consecutive_losses - 2) * 10  # +10 min per extra loss
-            cooldown_minutes = min(cooldown_minutes, 60)  # Max 1 hour cooldown
+            cooldown_minutes = self.MIN_TIME_BETWEEN_TRADES + (self.consecutive_losses - 2) * 5  # +5 min per extra loss
+            cooldown_minutes = min(cooldown_minutes, 30)  # Max 30 min cooldown
             minutes_since_last = (now - self.last_trade_time).total_seconds() / 60
             if minutes_since_last < cooldown_minutes:
                 remaining = int(cooldown_minutes - minutes_since_last)
@@ -336,17 +336,17 @@ class SmartAnalyzer:
                 'min_rr': 1.2,
                 'min_confidence': 0.45
             },
-            # Рейндж - tighter (range trades are harder)
+            # Рейндж — relaxed для 50+ сделок/день
             MarketRegime.RANGING: {
-                'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
-                'min_rr': 1.5,                    # R/R 1:1.5 (raised from 1.0)
-                'min_confidence': 0.55            # 55% уверенности (raised from 40%)
+                'min_quality': SetupQuality.C,
+                'min_rr': 1.2,
+                'min_confidence': 0.45
             },
-            # Высокая волатильность - tight (dangerous)
+            # Высокая волатильность — relaxed
             MarketRegime.HIGH_VOLATILITY: {
-                'min_quality': SetupQuality.B,   # B-сетапы минимум (raised from C)
-                'min_rr': 1.5,                    # R/R 1:1.5 (raised from 1.0)
-                'min_confidence': 0.55            # 55% уверенности (raised from 40%)
+                'min_quality': SetupQuality.C,
+                'min_rr': 1.2,
+                'min_confidence': 0.45
             },
             # Неизвестный режим - relaxed (C + 45%)
             MarketRegime.UNKNOWN: {

@@ -466,7 +466,7 @@ def init_db():
     try:
         if USE_POSTGRES:
             c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade INTEGER DEFAULT 0")
-            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_max_daily INTEGER DEFAULT 10")
+            c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_max_daily INTEGER DEFAULT 25")
             c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_min_winrate INTEGER DEFAULT 70")
             c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_today INTEGER DEFAULT 0")
             c.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_trade_last_reset TEXT")
@@ -476,7 +476,7 @@ def init_db():
             if 'auto_trade' not in columns:
                 c.execute("ALTER TABLE users ADD COLUMN auto_trade INTEGER DEFAULT 0")
             if 'auto_trade_max_daily' not in columns:
-                c.execute("ALTER TABLE users ADD COLUMN auto_trade_max_daily INTEGER DEFAULT 10")
+                c.execute("ALTER TABLE users ADD COLUMN auto_trade_max_daily INTEGER DEFAULT 25")
             if 'auto_trade_min_winrate' not in columns:
                 c.execute("ALTER TABLE users ADD COLUMN auto_trade_min_winrate INTEGER DEFAULT 70")
             if 'auto_trade_today' not in columns:
@@ -485,6 +485,13 @@ def init_db():
                 c.execute("ALTER TABLE users ADD COLUMN auto_trade_last_reset TEXT")
         conn.commit()
         logger.info("[DB] Migration: auto_trade columns ensured")
+        # Bump auto_trade_max_daily to 50 для цели 50+ сделок/день
+        try:
+            c.execute("UPDATE users SET auto_trade_max_daily = 50 WHERE auto_trade = 1 AND (auto_trade_max_daily IS NULL OR auto_trade_max_daily < 50)")
+            conn.commit()
+            logger.info("[DB] Migration: auto_trade_max_daily bump to 50 for auto-traders")
+        except Exception as e2:
+            logger.warning(f"[DB] Migration warning (auto_trade_max_daily bump): {e2}")
     except Exception as e:
         logger.warning(f"[DB] Migration warning (auto_trade): {e}")
     
@@ -637,7 +644,7 @@ def db_get_user(user_id: int) -> Dict:
         logger.info(f"[DB] New user {user_id} created with balance=0.0")
         return {
             'balance': 0.0, 'total_deposit': 0.0, 'total_profit': 0.0, 'trading': False,
-            'auto_trade': False, 'auto_trade_max_daily': 10, 'auto_trade_min_winrate': 70,
+            'auto_trade': False, 'auto_trade_max_daily': 25, 'auto_trade_min_winrate': 70,
             'auto_trade_today': 0, 'auto_trade_last_reset': None, 'referrer_id': None,
             'risk_per_trade': 0.015, 'daily_stop_loss': -0.03, 'max_consecutive_losses': 5,
             'daily_pnl': 0.0, 'consecutive_losses': 0, 'last_trade_date': None
@@ -649,7 +656,7 @@ def db_get_user(user_id: int) -> Dict:
         'total_profit': row['total_profit'],
         'trading': bool(row['trading']),
         'auto_trade': bool(row['auto_trade'] or 0),
-        'auto_trade_max_daily': int(row['auto_trade_max_daily'] or 10),
+        'auto_trade_max_daily': int(row['auto_trade_max_daily'] or 25),
         'auto_trade_min_winrate': int(row['auto_trade_min_winrate'] or 70),
         'auto_trade_today': int(row['auto_trade_today'] or 0),
         'auto_trade_last_reset': row['auto_trade_last_reset'],
@@ -2701,7 +2708,7 @@ def get_user(user_id: int) -> Dict:
     user.setdefault('total_profit', 0.0)
     user.setdefault('trading', False)
     user.setdefault('auto_trade', False)
-    user.setdefault('auto_trade_max_daily', 10)
+    user.setdefault('auto_trade_max_daily', 25)
     user.setdefault('auto_trade_min_winrate', 70)
     user.setdefault('auto_trade_today', 0)
     user.setdefault('auto_trade_last_reset', None)
@@ -2727,7 +2734,7 @@ def save_user(user_id: int):
             total_profit=user['total_profit'],
             trading=user['trading'],
             auto_trade=user.get('auto_trade', False),
-            auto_trade_max_daily=user.get('auto_trade_max_daily', 10),
+            auto_trade_max_daily=user.get('auto_trade_max_daily', 25),
             auto_trade_min_winrate=user.get('auto_trade_min_winrate', 70),
             auto_trade_today=user.get('auto_trade_today', 0),
             auto_trade_last_reset=user.get('auto_trade_last_reset'),
@@ -4135,11 +4142,11 @@ async def auto_trade_daily_menu(update: Update, context: ContextTypes.DEFAULT_TY
 Выбери лимит:"""
     
     keyboard = [
-        [InlineKeyboardButton("3", callback_data="auto_daily_3"),
-         InlineKeyboardButton("5", callback_data="auto_daily_5"),
-         InlineKeyboardButton("10", callback_data="auto_daily_10")],
-        [InlineKeyboardButton("15", callback_data="auto_daily_15"),
-         InlineKeyboardButton("20", callback_data="auto_daily_20"),
+        [InlineKeyboardButton("10", callback_data="auto_daily_10"),
+         InlineKeyboardButton("25", callback_data="auto_daily_25"),
+         InlineKeyboardButton("50", callback_data="auto_daily_50")],
+        [InlineKeyboardButton("75", callback_data="auto_daily_75"),
+         InlineKeyboardButton("100", callback_data="auto_daily_100"),
          InlineKeyboardButton("∞", callback_data="auto_daily_999")],
         [InlineKeyboardButton("🔙 Назад", callback_data="auto_trade_menu")]
     ]
@@ -5687,7 +5694,7 @@ async def send_smart_signal(context: ContextTypes.DEFAULT_TYPE) -> None:
                 # Проверяем настройки ЭТОГО пользователя
                 user_auto_enabled = auto_user.get('auto_trade', False)
                 user_min_winrate = auto_user.get('auto_trade_min_winrate', 70)
-                user_max_daily = auto_user.get('auto_trade_max_daily', 20)
+                user_max_daily = auto_user.get('auto_trade_max_daily', 50)
                 user_today_count = auto_user.get('auto_trade_today', 0)
                 
                 # Сброс счётчика сделок за день
@@ -11524,7 +11531,7 @@ def main() -> None:
         app.job_queue.run_repeating(_safe_job("update_positions", update_positions, timeout=14.0), interval=15, first=5)  # 15 секунд - быстрая синхронизация с Bybit
         
         if AUTO_TRADE_USER_ID and AUTO_TRADE_USER_ID != 0:
-            app.job_queue.run_repeating(_safe_job("send_smart_signal", send_smart_signal, timeout=120.0), interval=120, first=10)  # 2 мин; interval>=timeout чтобы не скипать overlapped runs
+            app.job_queue.run_repeating(_safe_job("send_smart_signal", send_smart_signal, timeout=90.0), interval=90, first=10)  # 90s для 50+ сделок/день
 
         # Reliability and learning jobs under phased rollout flags.
         app.job_queue.run_repeating(_safe_job("execution_watchdog_job", execution_watchdog_job, timeout=35.0), interval=60, first=20)
