@@ -313,47 +313,15 @@ class SmartAnalyzer:
         # АДАПТИВНЫЕ ПОРОГИ по режиму рынка v3.1 (BALANCED: quality over quantity)
         # Key insight: 49% WR with 53 trades = thresholds too loose. Tighten to improve WR.
         # Формат: {режим: (min_quality, min_rr, min_confidence)}
+        # ULTRA-RELAXED: D quality + 35% conf + 1.0 R/R — гарантия сделок
         self.ADAPTIVE_THRESHOLDS = {
-            # Сильный тренд - most permissive (trend gives edge)
-            MarketRegime.STRONG_UPTREND: {
-                'min_quality': SetupQuality.C,   # C-сетапы ОК в сильном тренде
-                'min_rr': 1.2,                    # R/R 1:1.2 (raised from 0.8)
-                'min_confidence': 0.50            # 50% уверенности (raised from 40%)
-            },
-            MarketRegime.STRONG_DOWNTREND: {
-                'min_quality': SetupQuality.C,
-                'min_rr': 1.2,
-                'min_confidence': 0.50
-            },
-            # Обычный тренд - relaxed для большего кол-ва сделок (C + 45% conf)
-            MarketRegime.UPTREND: {
-                'min_quality': SetupQuality.C,   # C-сетапы ОК (relaxed from B)
-                'min_rr': 1.2,                    # R/R 1:1.2 (aligned with TP1 floor)
-                'min_confidence': 0.45            # 45% (relaxed from 50%)
-            },
-            MarketRegime.DOWNTREND: {
-                'min_quality': SetupQuality.C,
-                'min_rr': 1.2,
-                'min_confidence': 0.45
-            },
-            # Рейндж — relaxed для 50+ сделок/день
-            MarketRegime.RANGING: {
-                'min_quality': SetupQuality.C,
-                'min_rr': 1.2,
-                'min_confidence': 0.45
-            },
-            # Высокая волатильность — relaxed
-            MarketRegime.HIGH_VOLATILITY: {
-                'min_quality': SetupQuality.C,
-                'min_rr': 1.2,
-                'min_confidence': 0.45
-            },
-            # Неизвестный режим - relaxed (C + 45%)
-            MarketRegime.UNKNOWN: {
-                'min_quality': SetupQuality.C,
-                'min_rr': 1.2,
-                'min_confidence': 0.45
-            }
+            MarketRegime.STRONG_UPTREND: {'min_quality': SetupQuality.D, 'min_rr': 1.0, 'min_confidence': 0.35},
+            MarketRegime.STRONG_DOWNTREND: {'min_quality': SetupQuality.D, 'min_rr': 1.0, 'min_confidence': 0.35},
+            MarketRegime.UPTREND: {'min_quality': SetupQuality.D, 'min_rr': 1.0, 'min_confidence': 0.35},
+            MarketRegime.DOWNTREND: {'min_quality': SetupQuality.D, 'min_rr': 1.0, 'min_confidence': 0.35},
+            MarketRegime.RANGING: {'min_quality': SetupQuality.D, 'min_rr': 1.0, 'min_confidence': 0.35},
+            MarketRegime.HIGH_VOLATILITY: {'min_quality': SetupQuality.D, 'min_rr': 1.0, 'min_confidence': 0.35},
+            MarketRegime.UNKNOWN: {'min_quality': SetupQuality.D, 'min_rr': 1.0, 'min_confidence': 0.35}
         }
         
         # Legacy: RR_THRESHOLDS для обратной совместимости
@@ -2171,9 +2139,9 @@ class SmartAnalyzer:
                 else:
                     score -= 20
         
-        # Высокая волатильность - не торгуем
-        if market_regime == MarketRegime.HIGH_VOLATILITY:
-            return SetupQuality.D, 0.0
+        # Высокая волатильность — не блокируем, adaptive thresholds уже фильтруют (C + 1.2 R/R)
+        # if market_regime == MarketRegime.HIGH_VOLATILITY:
+        #     return SetupQuality.D, 0.0  # УБРАНО — блокировало все сетапы
         
         # 2. Ключевой уровень (15 баллов)
         if at_key_level:
